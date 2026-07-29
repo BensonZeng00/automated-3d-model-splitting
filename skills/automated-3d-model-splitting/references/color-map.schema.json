@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:openai:skill:automated-3d-model-splitting:color-map",
+  "title": "3MF paint color display overrides",
+  "type": "object",
+  "additionalProperties": {
+    "oneOf": [
+      {"type": "string", "pattern": "^#[0-9A-Fa-f]{6}$"},
+      {
+        "type": "object",
+        "properties": {
+          "name": {"type": "string"},
+          "hex": {"type": "string", "pattern": "^#[0-9A-Fa-f]{6}$"},
+          "rgba": {
+            "type": "array",
+            "prefixItems": [
+              {"type": "integer", "minimum": 0, "maximum": 255},
+              {"type": "integer", "minimum": 0, "maximum": 255},
+              {"type": "integer", "minimum": 0, "maximum": 255},
+              {"type": "integer", "minimum": 0, "maximum": 255}
+            ],
+            "minItems": 4,
+            "maxItems": 4
+          }
+        },
+        "additionalProperties": false
+      }
+    ]
+  }
+}

@@ -1,0 +1,5 @@
+# Reproduces the local Windows/Python 3.12 validation environment used for v1.3.5.
+numpy==2.3.5
+scipy==1.18.0
+trimesh==4.12.2
+networkx==3.6.1

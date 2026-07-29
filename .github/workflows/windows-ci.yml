@@ -1,0 +1,52 @@
+name: Windows CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: skills/automated-3d-model-splitting/requirements.txt
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r skills/automated-3d-model-splitting/requirements.txt
+
+      - name: Unit and regression tests
+        shell: pwsh
+        run: python -X utf8 -B -m unittest discover -s skills/automated-3d-model-splitting/tests -v
+
+      - name: Dependency preflight
+        shell: pwsh
+        run: python -X utf8 -B skills/automated-3d-model-splitting/scripts/split_painted_3mf.py --preflight-only
+
+      - name: Release consistency checks
+        shell: pwsh
+        run: python -X utf8 -B tools/validate_release.py
+
+      - name: Synthetic end-to-end test
+        shell: pwsh
+        run: python -X utf8 -B tools/run_synthetic_e2e.py

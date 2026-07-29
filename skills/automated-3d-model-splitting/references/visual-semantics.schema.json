@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:openai:skill:automated-3d-model-splitting:visual-semantics:1.2",
+  "title": "Visual semantics for recognized 3MF parts",
+  "type": "object",
+  "properties": {
+    "parts": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/part"}
+        },
+        {
+          "type": "array",
+          "items": {
+            "allOf": [
+              {"$ref": "#/$defs/part"},
+              {
+                "type": "object",
+                "properties": {"part": {"$ref": "#/$defs/partId"}},
+                "required": ["part"]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "parent_relations": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/relation"}
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "partId": {"oneOf": [{"type": "integer", "minimum": 1}, {"type": "string", "pattern": "^[Pp]?0*[1-9][0-9]*$"}]},
+    "confidence": {"oneOf": [{"type": "number", "minimum": 0, "maximum": 1}, {"enum": ["VERYLOW", "LOW", "MED", "MEDIUM", "HIGH", "UNKNOWN"]}]},
+    "part": {
+      "type": "object",
+      "properties": {
+        "label": {"type": "string"},
+        "description": {"type": "string"},
+        "confidence": {"$ref": "#/$defs/confidence"},
+        "visual_evidence": {"type": "string"},
+        "source_views": {"type": "array", "items": {"type": "string"}}
+        ,"force_inward_vector": {
+          "type": "array",
+          "items": {"type": "number"},
+          "minItems": 3,
+          "maxItems": 3
+        },
+        "force_parent_direction": {"type": "boolean"}
+      },
+      "additionalProperties": true
+    },
+    "relation": {
+      "type": "object",
+      "properties": {
+        "child": {"$ref": "#/$defs/partId"},
+        "parent": {"$ref": "#/$defs/partId"},
+        "relation": {"type": "string"},
+        "confidence": {"$ref": "#/$defs/confidence"},
+        "reason": {"type": "string"},
+        "source_views": {"type": "array", "items": {"type": "string"}},
+        "apply": {"type": "boolean"}
+      },
+      "required": ["child", "parent"],
+      "additionalProperties": true
+    }
+  }
+}

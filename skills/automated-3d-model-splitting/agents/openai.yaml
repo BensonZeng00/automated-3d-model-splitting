@@ -1,0 +1,4 @@
+interface:
+  display_name: "自动化3d模型拆件"
+  short_description: "自动识别涂色区域并拆分为可打印且验证通过的3MF装配零件"
+  default_prompt: "Use $automated-3d-model-splitting to split a painted 3MF into a visually and topologically validated grouped assembly."

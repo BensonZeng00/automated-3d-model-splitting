@@ -1,0 +1,1481 @@
+from __future__ import annotations
+
+from .common import *
+from .project import *
+from .recognition import *
+from .mesh import *
+from .package_io import *
+from .selection import *
+from .assembly import *
+from .validation import *
+from .inward import *
+from .debug_export import *
+from .reporting import *
+from .domain import BoundaryFairingConfig, BoundaryFairingContext, SplitConfig
+
+
+class SplitPipeline:
+    """Orchestrate one deterministic recognition, planning, build, and export run."""
+
+    def __init__(self, config: SplitConfig, parser) -> None:
+        self.config = config
+        self.parser = parser
+        self.reader = ThreeMFReader()
+        self.recognizer = PartRecognizer()
+        self.body_selector = BodySelector()
+        self.assembly_planner = AssemblyPlanner()
+        self.direction_planner = InwardDirectionPlanner()
+        self.cap_planner = AdaptiveCapPlanner()
+        self.triangulator = BoundaryTriangulator()
+        self.mesh_builder = PartMeshBuilder()
+        self.writer = ThreeMFWriter()
+        self.validator = ValidationService()
+
+    def run(self) -> None:
+        args = self.config.namespace
+        input_path = self.config.input_path
+        parser = self.parser
+        requested_max_extension_mm = float(args.max_extension_mm)
+        args.max_extension_mm = max(
+            requested_max_extension_mm,
+            DEFAULT_EFFECTIVE_MINIMUM_INWARD_DEPTH_MM,
+        )
+        maximum_planar_travel_mm = min(
+            max(float(args.max_planar_travel_mm), args.max_extension_mm),
+            MAXIMUM_SAFE_INWARD_DEPTH_MM,
+        )
+        available_planar_extra_mm = max(0.0, maximum_planar_travel_mm - args.max_extension_mm)
+        requested_planar_extra_limit_mm = (
+            None if args.planar_extra_limit_mm is None else float(args.planar_extra_limit_mm)
+        )
+        args.planar_extra_limit_mm = (
+            available_planar_extra_mm
+            if requested_planar_extra_limit_mm is None
+            else min(requested_planar_extra_limit_mm, available_planar_extra_mm)
+        )
+        planar_travel_policy = {
+            "preferred_minimum_inward_depth_mm": float(args.max_extension_mm),
+            "global_safety_ceiling_mm": maximum_planar_travel_mm,
+            "parent_thickness_clearance_mm": PARENT_THICKNESS_CLEARANCE_MM,
+            "parent_thickness_rule": "min(global ceiling, 5 mm, parent thickness - 0.05 mm)",
+            "requested_planar_extra_limit_mm": requested_planar_extra_limit_mm,
+            "effective_planar_extra_limit_mm": float(args.planar_extra_limit_mm),
+        }
+        insert_shrink_mm, socket_overcut_mm = clearance_offsets(args.clearance_mode, args.fit_clearance_mm)
+        top_edge_clearance_mm = min(insert_shrink_mm, 0.05)
+        force_flat_part_indices = parse_part_index_tokens(args.force_flat_parts)
+        try:
+            part_mode_overrides = parse_part_mode_overrides(args.part_mode_overrides)
+        except ValueError as exc:
+            parser.error(str(exc))
+
+        output_path = default_output_3mf(input_path, args.output)
+        runtime_log(
+            "输入",
+            "source_read_start",
+            "开始读取并标准化源 3MF",
+            input=str(input_path),
+            model_entry=args.model_entry,
+            format_profile=args.format_profile,
+        )
+        try:
+            prepare_output_3mf(output_path, args.overwrite)
+            vertices, faces, colors, project_settings = self.reader.read(
+                input_path,
+                model_entry=args.model_entry,
+                format_profile=args.format_profile,
+            )
+        except (OSError, ValueError, zipfile.BadZipFile, ET.ParseError) as exc:
+            parser.error(str(exc))
+        runtime_log(
+            "输入",
+            "source_read_done",
+            "源 3MF 已读取并转换到毫米空间",
+            vertices=int(len(vertices)),
+            faces=int(len(faces)),
+            source_unit=project_settings.get("_source_unit", "millimeter"),
+            selected_model_entry=project_settings.get("_selected_model_entry"),
+        )
+        boundary_fairing = BoundaryFairingContext(
+            config=BoundaryFairingConfig.from_namespace(args),
+            source_surface_normals=mesh_vertex_inward_normals(vertices, faces),
+        )
+        new_color_info, new_color_order = build_color_info_map(
+            project_settings,
+            colors,
+            Path(args.color_map_json).expanduser() if args.color_map_json else None,
+        )
+        COLOR_CATALOG.replace(new_color_info, new_color_order)
+        source_filament_colors = project_settings.get("filament_colour") or []
+        if not isinstance(source_filament_colors, list):
+            source_filament_colors = []
+        progress(
+            "颜色",
+            "已按厂商 paint_color 槽位编码解析材料颜色",
+            mapping={code: {"hex": info.get("hex"), "slot": info.get("filament_slot"), "source": info.get("mapping_source")} for code, info in COLOR_INFO.items()},
+        )
+        if args.recognition_surface_profile == "exterior-visible":
+            runtime_log(
+                "识别",
+                "exterior_visibility_start",
+                "开始外表面多视角深度识别",
+                views=int(args.exterior_view_count),
+                resolution=int(args.exterior_depth_map_resolution),
+            )
+            progress(
+                "识别",
+                "正在从模型外部多方向采样可见表面颜色",
+                views=args.exterior_view_count,
+                resolution=args.exterior_depth_map_resolution,
+                depth_tolerance_mm=args.exterior_depth_tolerance_mm,
+            )
+            visible_faces, exterior_visibility = exterior_visible_face_mask(
+                vertices,
+                faces,
+                view_count=args.exterior_view_count,
+                depth_map_resolution=args.exterior_depth_map_resolution,
+                depth_tolerance_mm=args.exterior_depth_tolerance_mm,
+            )
+            recognition_token_colors, exterior_color_filter = recognition_colors_from_exterior(
+                colors,
+                visible_faces,
+                body_color_override=args.body_color,
+            )
+        else:
+            visible_faces = np.ones(len(faces), dtype=bool)
+            recognition_token_colors = list(colors)
+            exterior_visibility = {
+                "profile": "all-faces",
+                "method": "legacy_all_faces",
+                "view_count": 0,
+                "depth_map_resolution": 0,
+                "depth_tolerance_mm": 0.0,
+                "visible_faces": int(len(faces)),
+                "occluded_faces": 0,
+                "visible_ratio": 1.0,
+                "per_view_visible_faces": [],
+            }
+            exterior_color_filter = {
+                "base_color_token": args.body_color,
+                "base_color_source": "not_applied",
+                "reassigned_occluded_faces": 0,
+                "already_base_occluded_faces": 0,
+                "reassigned_by_source_token": [],
+            }
+        runtime_log(
+            "识别",
+            "exterior_visibility_done",
+            "外表面可见性识别完成",
+            visible_faces=int(exterior_visibility["visible_faces"]),
+            occluded_faces=int(exterior_visibility["occluded_faces"]),
+            profile=str(exterior_visibility["profile"]),
+        )
+        exterior_visibility["color_filter"] = exterior_color_filter
+        print(
+            "exterior_surface_recognition="
+            + json.dumps(exterior_visibility, ensure_ascii=False, sort_keys=True),
+            flush=True,
+        )
+        recognition_colors, material_connectivity = material_connectivity_labels(recognition_token_colors)
+        if material_connectivity["merged_material_groups"]:
+            progress(
+                "颜色",
+                "已按源文件解析后的实际耗材槽合并等价 paint_color token 的连通边界",
+                merged_groups=material_connectivity["merged_material_groups"],
+            )
+        runtime_log(
+            "识别",
+            "component_connectivity_start",
+            "开始按材料和共享边识别连通部件",
+            source_faces=int(len(faces)),
+            minimum_faces=int(args.min_faces),
+        )
+        groups = connected_components_by_color(faces, recognition_colors)
+        if args.tiny_component_policy == "merge":
+            components, ignored, merged_tiny_components = merge_tiny_groups_into_components(
+                vertices,
+                faces,
+                recognition_colors,
+                groups,
+                args.min_faces,
+                display_colors=recognition_token_colors,
+            )
+        else:
+            components, ignored = summarize_components(
+                vertices,
+                faces,
+                recognition_colors,
+                groups,
+                args.min_faces,
+                display_colors=recognition_token_colors,
+            )
+            merged_tiny_components = []
+        if not components:
+            raise SystemExit(f"No effective components found with --min-faces={args.min_faces}")
+        recursive_face_colors = component_owned_face_colors(
+            recognition_token_colors,
+            components,
+        )
+        runtime_log(
+            "识别",
+            "component_connectivity_done",
+            "连通部件识别与微小区域处理完成",
+            raw_groups=int(len(groups)),
+            effective_components=int(len(components)),
+            merged_tiny_components=int(len(merged_tiny_components)),
+        )
+        model_center = vertices.mean(axis=0)
+        runtime_log(
+            "主体",
+            "body_evidence_start",
+            "开始测量结构分隔证据并选择根主体",
+            components=int(len(components)),
+        )
+        body_separator_evidence = body_selection_separator_evidence(
+            vertices=vertices,
+            faces=faces,
+            components=components,
+            model_center=model_center,
+            min_faces=args.min_faces,
+        )
+        excluded_auto_body_indices = {
+            int(index)
+            for index, record in body_separator_evidence.items()
+            if record.get("exclude_from_automatic_body")
+        }
+        body_component = choose_body_component(
+            components,
+            args.body_strategy,
+            args.body_color,
+            args.body_index,
+            excluded_auto_indices=excluded_auto_body_indices,
+            auto_selection_evidence=body_separator_evidence,
+        )
+        body_index = component_identity_index(components, body_component)
+        runtime_log(
+            "主体",
+            "body_evidence_done",
+            "根主体选择完成",
+            body_index=body_index,
+            excluded_separator_candidates=sorted(excluded_auto_body_indices),
+        )
+        progress(
+            "主体",
+            "已在排除强结构分隔候选后选择根主体",
+            body=None if body_index is None else f"P{body_index:02d}",
+            body_candidate_score=(
+                None
+                if body_index is None
+                else round(float(body_separator_evidence[body_index]["body_candidate_score"]), 6)
+            ),
+            excluded_separator_candidates=[f"P{index:02d}" for index in sorted(excluded_auto_body_indices)],
+        )
+        visual_semantics = load_visual_semantics(Path(args.visual_semantics_json).expanduser() if args.visual_semantics_json else None)
+        visual_semantic_min_confidence = confidence_score(args.visual_semantic_min_confidence, default=0.65)
+        recognition = component_recognition_records(vertices, faces, components, body_component, colors)
+        recognition = annotate_recognition_with_visual_semantics(recognition, visual_semantics.get("parts", {}))
+        invalid_mode_override_indices = sorted(index for index in part_mode_overrides if index < 1 or index > len(components))
+        if invalid_mode_override_indices:
+            parser.error(
+                "--part-mode-overrides references unknown parts: "
+                + ", ".join(f"P{index:02d}" for index in invalid_mode_override_indices)
+            )
+        runtime_log(
+            "分类",
+            "processing_classification_start",
+            "开始分类主体和内嵌部件处理模式",
+            components=int(len(components)),
+        )
+        processing_classifications = classify_component_processing_modes(
+            vertices=vertices,
+            faces=faces,
+            components=components,
+            body_component=body_component,
+            model_center=model_center,
+            global_mode=args.part_processing_mode,
+            overrides=part_mode_overrides,
+            accept_ambiguous_inward=args.accept_ambiguous_inward,
+            precomputed_structural_evidence=body_separator_evidence,
+        )
+        runtime_log(
+            "分类",
+            "processing_classification_done",
+            "部件处理模式分类完成",
+            body_index=body_index,
+            inward_parts=int(
+                sum(
+                    record["selected_processing_mode"] == "inward"
+                    for record in processing_classifications.values()
+                )
+            ),
+        )
+        for record in recognition:
+            record["recognition_basis"] = args.recognition_surface_profile
+            record["occluded_paint_excluded"] = args.recognition_surface_profile == "exterior-visible"
+            record.update(processing_classifications[int(record["part_index"])])
+        progress("识别", f"识别到 {len(recognition)} 个有效部件", tiny_policy=args.tiny_component_policy, merged_tiny=len(merged_tiny_components))
+        print_recognition(recognition)
+        if args.recognize_only:
+            return
+        processing_mode_by_part = {
+            index: str(classification["selected_processing_mode"])
+            for index, classification in processing_classifications.items()
+        }
+        runtime_log(
+            "装配",
+            "assembly_plan_start",
+            "开始构建共享边、边界环和递归装配树",
+            strategy=args.assembly_tree_strategy,
+            components=int(len(components)),
+        )
+        component_adjacency = component_shared_edges(faces, components)
+        boundary_neighbor_lookup = component_boundary_neighbor_lookup(faces, components)
+        boundary_loop_neighbors = [
+            record
+            for index, component in enumerate(components, start=1)
+            for record in component_boundary_loop_neighbors(vertices, faces, component, index, boundary_neighbor_lookup)
+        ]
+        recursive_minimal_reparents: list[dict] = []
+        recursive_assembly_enabled = args.assembly_mode in {"tree", "flat"}
+        if recursive_assembly_enabled:
+            assembly_parents, assembly_children, assembly_records = self.assembly_planner.build_tree(
+                components,
+                body_component,
+                component_adjacency,
+                args.min_assembly_shared_edges,
+                args.assembly_tree_strategy,
+                boundary_loop_neighbors,
+            )
+            (
+                assembly_parents,
+                assembly_children,
+                assembly_records,
+                mixed_boundary_reparents,
+                boundary_loop_neighbors,
+            ) = refine_mixed_boundary_parents(
+                vertices,
+                faces,
+                components,
+                boundary_neighbor_lookup,
+                component_adjacency,
+                assembly_parents,
+                assembly_records,
+                args.min_assembly_shared_edges,
+            )
+            (
+                assembly_parents,
+                assembly_children,
+                assembly_records,
+                cycle_breaks,
+            ) = break_assembly_parent_cycles(
+                components,
+                body_index,
+                component_adjacency,
+                assembly_parents,
+                assembly_records,
+                args.min_assembly_shared_edges,
+            )
+            (
+                assembly_parents,
+                assembly_children,
+                assembly_records,
+                shared_loop_reparents,
+            ) = reparent_shared_parent_child_loops(
+                assembly_parents,
+                assembly_records,
+                boundary_loop_neighbors,
+                component_adjacency,
+            )
+            mixed_boundary_reparents = mixed_boundary_reparents + shared_loop_reparents
+            if args.assembly_tree_strategy == "recursive-minimal":
+                (
+                    assembly_parents,
+                    assembly_children,
+                    assembly_records,
+                    recursive_minimal_reparents,
+                ) = refine_recursive_minimal_parents(
+                    components,
+                    component_adjacency,
+                    assembly_parents,
+                    assembly_records,
+                    boundary_loop_neighbors,
+                    args.min_assembly_shared_edges,
+                )
+                (
+                    assembly_parents,
+                    assembly_children,
+                    assembly_records,
+                    recursive_cycle_breaks,
+                ) = break_assembly_parent_cycles(
+                    components,
+                    body_index,
+                    component_adjacency,
+                    assembly_parents,
+                    assembly_records,
+                    args.min_assembly_shared_edges,
+                )
+                cycle_breaks = cycle_breaks + recursive_cycle_breaks
+        else:
+            assembly_parents = {
+                index: (None if index == body_index else body_index)
+                for index in range(1, len(components) + 1)
+            }
+            assembly_children = collections.defaultdict(list)
+            for child_index, parent_index in assembly_parents.items():
+                if parent_index is not None:
+                    assembly_children[parent_index].append(child_index)
+            assembly_children = {
+                parent: sorted(children) for parent, children in assembly_children.items()
+            }
+            assembly_records = [
+                {
+                    "part_index": index,
+                    "parent_index": parent_index,
+                    "shared_edges_to_parent": 0,
+                    "reason": "legacy_flat_mode_direct_body_insert" if parent_index is not None else "body_root",
+                }
+                for index, parent_index in sorted(assembly_parents.items())
+            ]
+            mixed_boundary_reparents = []
+            cycle_breaks = []
+        visual_semantic_parent_overrides = {"applied": [], "rejected": []}
+        if recursive_assembly_enabled and visual_semantics.get("parent_relations"):
+            (
+                assembly_parents,
+                assembly_children,
+                assembly_records,
+                visual_semantic_parent_overrides,
+            ) = apply_visual_semantic_parent_relations(
+                components,
+                component_adjacency,
+                assembly_parents,
+                assembly_records,
+                visual_semantics.get("parent_relations", []),
+                visual_semantic_min_confidence,
+            )
+        runtime_log(
+            "装配",
+            "assembly_plan_done",
+            "递归装配树和执行顺序已确定",
+            strategy=args.assembly_tree_strategy,
+            parent_relations=int(
+                sum(parent is not None for parent in assembly_parents.values())
+            ),
+            internal_steps=int(
+                sum(bool(children) for children in assembly_children.values())
+            ),
+        )
+        effective_fit_clearance_by_part: dict[int, float] = {}
+        clearance_records: list[dict] = []
+        for component_index, component in enumerate(components, start=1):
+            effective_clearance, clearance_record = effective_feature_clearance(
+                component,
+                args.fit_clearance_mm,
+                profile=args.clearance_profile,
+                feature_ratio=args.clearance_feature_ratio,
+                minimum_mm=args.clearance_min_mm,
+            )
+            effective_fit_clearance_by_part[component_index] = effective_clearance
+            clearance_records.append({"part_index": component_index, **clearance_record})
+        assembly_depth_by_part = assembly_depths(assembly_parents)
+        recursive_minimal_layers = build_recursive_minimal_layers(assembly_parents, assembly_children)
+        inward_overrides: dict[int, np.ndarray] = {}
+        inward_override_records = []
+        body_index_for_overrides = component_identity_index(components, body_component)
+        body_root_indices = {int(body_index_for_overrides)} if body_index_for_overrides is not None else set()
+        for nested_leaf_index, nested_parent_index in assembly_parents.items():
+            is_nested_leaf = (
+                nested_parent_index is not None
+                and int(nested_parent_index) not in body_root_indices
+                and not assembly_children.get(nested_leaf_index)
+            )
+            if not is_nested_leaf:
+                continue
+            original_clearance = float(effective_fit_clearance_by_part[nested_leaf_index])
+            nested_clearance = min(original_clearance, 0.10)
+            effective_fit_clearance_by_part[nested_leaf_index] = nested_clearance
+            for clearance_record in clearance_records:
+                if int(clearance_record["part_index"]) == int(nested_leaf_index):
+                    clearance_record["pre_nested_detail_clearance_mm"] = original_clearance
+                    clearance_record["effective_fit_clearance_mm"] = nested_clearance
+                    clearance_record["nested_detail_clearance_cap_mm"] = 0.10
+                    clearance_record["reason"] = (
+                        "nested_detail_oblique_wall_exposure_cap"
+                        if nested_clearance < original_clearance - 1e-12
+                        else clearance_record["reason"]
+                    )
+                    break
+        for child_index, parent_index in assembly_parents.items():
+            if parent_index is None or int(parent_index) in body_root_indices:
+                continue
+            direction = components[parent_index - 1].center - components[child_index - 1].center
+            length = float(np.linalg.norm(direction))
+            if length <= 1e-9:
+                continue
+            parent_direction = direction / length
+            original_inward = component_inward_direction(vertices, faces, components[child_index - 1], model_center)
+            alignment = float(np.dot(original_inward, parent_direction))
+            override_record = {
+                "part_index": child_index,
+                "parent_index": parent_index,
+                "alignment_dot": alignment,
+                "threshold": float(args.assembly_direction_override_dot),
+                "original_inward": original_inward.round(6).tolist(),
+                "parent_direction": parent_direction.round(6).tolist(),
+                "overridden": bool(alignment < float(args.assembly_direction_override_dot)),
+            }
+            if override_record["overridden"]:
+                inward_overrides[child_index] = parent_direction
+            inward_override_records.append(override_record)
+
+        semantic_direction_overrides = {"applied": [], "rejected": []}
+        for part_index, semantic in sorted(visual_semantics.get("parts", {}).items()):
+            part_index = int(part_index)
+            requested_vector = semantic.get("force_inward_vector")
+            force_parent = bool(semantic.get("force_parent_direction", False))
+            confidence = float(semantic.get("confidence_score", 0.0))
+            rejection = {
+                "part_index": part_index,
+                "confidence": semantic.get("confidence", "UNKNOWN"),
+                "confidence_score": confidence,
+            }
+            if requested_vector is None and not force_parent:
+                continue
+            if confidence < visual_semantic_min_confidence:
+                rejection["reject_reason"] = "semantic_confidence_below_threshold"
+                semantic_direction_overrides["rejected"].append(rejection)
+                continue
+            if part_index not in range(1, len(components) + 1) or part_index in body_root_indices:
+                rejection["reject_reason"] = "unknown_part_or_body"
+                semantic_direction_overrides["rejected"].append(rejection)
+                continue
+            direction_source = "force_inward_vector"
+            if requested_vector is not None:
+                try:
+                    direction = np.asarray(requested_vector, dtype=np.float64)
+                except (TypeError, ValueError):
+                    direction = np.asarray([], dtype=np.float64)
+                if direction.shape != (3,) or not np.all(np.isfinite(direction)):
+                    rejection["reject_reason"] = "invalid_force_inward_vector"
+                    semantic_direction_overrides["rejected"].append(rejection)
+                    continue
+            else:
+                parent_index = assembly_parents.get(part_index)
+                if parent_index is None:
+                    rejection["reject_reason"] = "force_parent_direction_without_parent"
+                    semantic_direction_overrides["rejected"].append(rejection)
+                    continue
+                direction = components[int(parent_index) - 1].center - components[part_index - 1].center
+                direction_source = "force_parent_direction"
+            length = float(np.linalg.norm(direction))
+            if length <= 1e-9:
+                rejection["reject_reason"] = "zero_length_direction"
+                semantic_direction_overrides["rejected"].append(rejection)
+                continue
+            normalized = direction / length
+            inward_overrides[part_index] = normalized
+            applied = {
+                **rejection,
+                "direction_source": direction_source,
+                "normalized_direction": normalized.round(6).tolist(),
+                "parent_index": assembly_parents.get(part_index),
+            }
+            semantic_direction_overrides["applied"].append(applied)
+            inward_override_records.append({**applied, "overridden": True})
+
+        runtime_log(
+            "几何",
+            "cut_reference_start",
+            "开始建立部件切割边界与方向引用",
+            components=int(len(components)),
+        )
+        all_cut_refs = build_component_cut_references(
+            vertices,
+            faces,
+            components,
+            model_center,
+            inward_overrides,
+            fit_clearance_by_part=effective_fit_clearance_by_part,
+            clearance_mode=args.clearance_mode,
+        )
+        runtime_log(
+            "几何",
+            "cut_reference_done",
+            "切割边界与方向引用建立完成",
+            cut_references=int(len(all_cut_refs)),
+        )
+        refs_by_component_index: dict[int, list[dict]] = collections.defaultdict(list)
+        for ref in all_cut_refs:
+            ref["processing_mode"] = "inward"
+            refs_by_component_index[int(ref["component_index"])].append(ref)
+
+        def effective_cap_mode(component_index: int) -> str:
+            if component_index in force_flat_part_indices:
+                return "flat"
+            parent_index = assembly_parents.get(component_index)
+            is_nested_insert = (
+                recursive_assembly_enabled
+                and parent_index is not None
+                and int(parent_index) not in body_root_indices
+            )
+            requested_mode = (
+                args.nested_cap_mode
+                if is_nested_insert and args.nested_cap_mode != "inherit"
+                else args.cap_mode
+            )
+            return requested_mode
+
+        def effective_planar_extra_limit(component_index: int) -> float:
+            return float(args.planar_extra_limit_mm)
+
+        layer_child_context_cache: dict[int, tuple[list[dict], dict[int, Component], dict[int, list[int]]]] = {}
+
+        def layer_child_context(parent_index: int) -> tuple[list[dict], dict[int, Component], dict[int, list[int]]]:
+            parent_index = int(parent_index)
+            if parent_index not in layer_child_context_cache:
+                layer_child_context_cache[parent_index] = build_layer_child_cut_references(
+                    vertices=vertices,
+                    faces=faces,
+                    components=components,
+                    parent_index=parent_index,
+                    direct_child_indices=assembly_children.get(parent_index, []),
+                    assembly_children=assembly_children,
+                    model_center=model_center,
+                    boundary_neighbor_lookup=boundary_neighbor_lookup,
+                    inward_overrides=inward_overrides,
+                    effective_cap_mode=effective_cap_mode,
+                    effective_planar_extra_limit=effective_planar_extra_limit,
+                    fit_clearance_by_part=effective_fit_clearance_by_part,
+                    clearance_mode=args.clearance_mode,
+                    boundary_fairing=boundary_fairing,
+                    max_extension_mm=args.max_extension_mm,
+                    flat_clearance_mm=args.flat_clearance_mm,
+                    bottom_clearance_mm=args.bottom_clearance_mm,
+                )
+            return layer_child_context_cache[parent_index]
+
+        def direct_child_refs(parent_index: int) -> list[dict]:
+            if recursive_assembly_enabled and args.assembly_tree_strategy == "recursive-minimal":
+                refs, _union_by_child, _subtree_by_child = layer_child_context(parent_index)
+                results = []
+                for ref in refs:
+                    ref_with_mode = dict(ref)
+                    ref_with_mode["processing_mode"] = "inward"
+                    results.append(ref_with_mode)
+                return results
+            refs: list[dict] = []
+            for child_index in assembly_children.get(parent_index, []):
+                for ref in refs_by_component_index.get(child_index, []):
+                    ref_with_mode = dict(ref)
+                    ref_with_mode["cap_mode"] = effective_cap_mode(child_index)
+                    ref_with_mode["planar_extra_limit_mm"] = effective_planar_extra_limit(
+                        child_index
+                    )
+                    ref_with_mode["processing_mode"] = "inward"
+                    refs.append(ref_with_mode)
+            return refs
+
+        component_centers = {
+            index: component.center
+            for index, component in enumerate(components, start=1)
+        }
+
+        print("assembly_tree:", flush=True)
+        progress("装配", "已推断父子装配关系", strategy=args.assembly_tree_strategy)
+        for record in assembly_records:
+            parent = record.get("parent_index")
+            parent_label = "none" if parent is None else f"P{int(parent):02d}"
+            print(
+                "  P{part_index:02d} parent={parent} shared_edges={shared_edges_to_parent} reason={reason}".format(
+                    parent=parent_label,
+                    **record,
+                ),
+                flush=True,
+            )
+
+        report = {
+            "source": input_path.name,
+            "output_3mf": str(output_path),
+            "format_profile_requested": args.format_profile,
+            "recognition_surface_profile": args.recognition_surface_profile,
+            "exterior_surface_recognition": exterior_visibility,
+            "format_support": project_settings.get("_format_support", {}),
+            "vendor_paint_decode": project_settings.get("_vendor_paint_decode", {}),
+            "source_unit": project_settings.get("_source_unit", "millimeter"),
+            "unit_scale_mm": project_settings.get("_unit_scale_mm", 1.0),
+            "selected_model_entry": project_settings.get("_selected_model_entry"),
+            "available_model_entries": project_settings.get("_available_model_entries", []),
+            "default_filament_resolution": project_settings.get("_default_filament", {}),
+            "source_vertex_count": int(len(vertices)),
+            "source_face_count": int(len(faces)),
+            "source_mesh_validation": validate_mesh_in_memory(
+                trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
+            ),
+            "min_faces": args.min_faces,
+            "tiny_component_policy": args.tiny_component_policy,
+            "merged_tiny_component_count": len(merged_tiny_components),
+            "merged_tiny_components": merged_tiny_components,
+            "material_connectivity": material_connectivity,
+            "requested_max_extension_mm": requested_max_extension_mm,
+            "minimum_flat_bottom_depth_mm": MINIMUM_INWARD_DEPTH_MM,
+            "max_extension_mm": args.max_extension_mm,
+            "max_planar_travel_mm": maximum_planar_travel_mm,
+            "planar_travel_policy": planar_travel_policy,
+            "flat_clearance_mm": args.flat_clearance_mm,
+            "fit_clearance_mm": max(float(args.fit_clearance_mm), 0.0),
+            "bottom_clearance_mm": max(float(args.bottom_clearance_mm), 0.0),
+            "lead_in_mm": max(float(args.lead_in_mm), 0.0),
+            "sibling_clearance_mm": max(float(args.sibling_clearance_mm), 0.0),
+            "cap_mode": args.cap_mode,
+            "nested_cap_mode": args.nested_cap_mode,
+            "planar_extra_limit_mm": max(float(args.planar_extra_limit_mm), 0.0),
+            "force_flat_parts": sorted(force_flat_part_indices),
+            "part_processing_mode": args.part_processing_mode,
+            "part_mode_overrides": {f"P{index:02d}": mode for index, mode in sorted(part_mode_overrides.items())},
+            "accept_ambiguous_inward": bool(args.accept_ambiguous_inward),
+            "processing_classifications": [
+                processing_classifications[index] for index in sorted(processing_classifications)
+            ],
+            "source_recognized_component_count": len(components),
+            "final_candidate_component_count": len(components),
+            "clearance_mode": args.clearance_mode,
+            "insert_shrink_mm": insert_shrink_mm,
+            "socket_overcut_mm": socket_overcut_mm,
+            "top_edge_clearance_mm": top_edge_clearance_mm,
+            "boundary_fairing_mode": args.boundary_fairing_mode,
+            "boundary_fairing_radius_mm": args.boundary_fairing_radius_mm,
+            "boundary_max_displacement_mm": args.boundary_max_displacement_mm,
+            "boundary_feature_angle_deg": args.boundary_feature_angle_deg,
+            "boundary_fidelity_weight": args.boundary_fidelity_weight,
+            "legacy_taubin_smooth_iterations": args.smooth_iterations,
+            "legacy_taubin_lambda_factor": args.lambda_factor,
+            "legacy_taubin_mu_factor": args.mu_factor,
+            "body_strategy": args.body_strategy,
+            "body_color": args.body_color,
+            "body_index": args.body_index,
+            "selected_body_index": body_index_for_overrides,
+            "automatic_body_excluded_separator_indices": sorted(excluded_auto_body_indices),
+            "body_selection_separator_evidence": [
+                {"part_index": int(index), **record}
+                for index, record in sorted(body_separator_evidence.items())
+            ],
+            "assembly_mode": args.assembly_mode,
+            "assembly_tree_strategy": args.assembly_tree_strategy,
+            "min_assembly_shared_edges": args.min_assembly_shared_edges,
+            "assembly_direction_override_dot": args.assembly_direction_override_dot,
+            "semantic_direction_overrides": semantic_direction_overrides,
+            "clearance_profile": args.clearance_profile,
+            "clearance_records": clearance_records,
+            "output_layout": args.output_layout,
+            "visual_semantics_source": visual_semantics.get("source"),
+            "visual_semantic_min_confidence": args.visual_semantic_min_confidence,
+            "visual_semantic_min_confidence_score": visual_semantic_min_confidence,
+            "visual_part_semantics": [
+                visual_semantics["parts"][index]
+                for index in sorted(visual_semantics.get("parts", {}))
+            ],
+            "visual_semantic_parent_overrides": visual_semantic_parent_overrides,
+            "inward_direction_overrides": inward_override_records,
+            "mixed_boundary_reparents": mixed_boundary_reparents,
+            "recursive_minimal_reparents": recursive_minimal_reparents,
+            "recursive_minimal_layers": recursive_minimal_layers,
+            "cycle_breaks": cycle_breaks,
+            "boundary_loop_neighbors": boundary_loop_neighbors,
+            "component_adjacency": [
+                {
+                    "part_a": left,
+                    "part_b": right,
+                    "shared_edges": int(record["shared_edges"]),
+                    "shared_vertex_count": int(record["shared_vertex_count"]),
+                }
+                for (left, right), record in sorted(component_adjacency.items())
+            ],
+            "assembly_tree": assembly_records,
+            "project_filament_colours": project_settings.get("filament_colour", []),
+            "color_info": COLOR_INFO,
+            "recognition": recognition,
+            "body_part_id": None,
+            "body_part_ids": [],
+            "parts": [],
+            "ignored_tiny_components": ignored,
+        }
+        debug_root = None
+        if args.debug_recursive_3mf:
+            debug_root = output_path.with_name(output_path.stem + "_debug")
+            try:
+                prepare_debug_directory(debug_root, args.overwrite)
+            except ValueError as exc:
+                parser.error(str(exc))
+        runtime_log(
+            "递归",
+            "strict_recursion_start",
+            "开始严格深度优先递归拆件",
+            steps=int(len(recursive_minimal_layers)),
+            root_body_index=body_index_for_overrides,
+            debug_output=bool(args.debug_recursive_3mf),
+        )
+        try:
+            (
+                strict_layers_dir,
+                strict_execution_stage_records,
+                strict_active_parts,
+                strict_snapshot_records,
+            ) = execute_strict_recursive_split(
+                output_dir=debug_root,
+                report_path_mode="relative",
+                input_stem=input_path.stem,
+                vertices=vertices,
+                faces=faces,
+                colors=recursive_face_colors,
+                components=components,
+                assembly_parents=assembly_parents,
+                assembly_children=assembly_children,
+                recursive_steps=recursive_minimal_layers,
+                boundary_neighbor_lookup=boundary_neighbor_lookup,
+                component_centers=component_centers,
+                inward_overrides=inward_overrides,
+                model_center=model_center,
+                max_extension_mm=args.max_extension_mm,
+                boundary_fairing=boundary_fairing,
+                flat_clearance_mm=args.flat_clearance_mm,
+                fit_clearance_by_part=effective_fit_clearance_by_part,
+                lead_in_mm=args.lead_in_mm,
+                clearance_mode=args.clearance_mode,
+                sibling_clearance_mm=args.sibling_clearance_mm,
+                bottom_clearance_mm=args.bottom_clearance_mm,
+                effective_cap_mode=effective_cap_mode,
+                effective_planar_extra_limit=effective_planar_extra_limit,
+                layer_child_context=layer_child_context,
+                validation_profile=args.validation_profile,
+                max_topology_defect_ratio=args.max_topology_defect_ratio,
+                source_application=project_settings.get("_source_application"),
+                source_filament_colors=project_settings.get(
+                    "filament_colour", []
+                ),
+                source_project_settings=project_settings,
+            )
+        except ValueError as exc:
+            print(
+                "strict_recursive_execution_failure="
+                + json.dumps({"error": str(exc)}, ensure_ascii=False),
+                file=sys.stderr,
+            )
+            raise SystemExit(3)
+        runtime_log(
+            "递归",
+            "strict_recursion_done",
+            "严格递归拆件完成，最终活动部件已物化",
+            steps=int(len(recursive_minimal_layers)),
+            final_parts=int(len(strict_active_parts)),
+            final_active_indices=sorted(strict_active_parts),
+        )
+
+        debug_layers_dir = strict_layers_dir if args.debug_recursive_3mf else None
+        debug_stage_records = (
+            strict_execution_stage_records if args.debug_recursive_3mf else []
+        )
+        print(
+            "strict_recursive_execution="
+            + json.dumps(
+                {
+                    "execution_order": "strict_depth_first_preorder",
+                    "step_count": len(recursive_minimal_layers),
+                    "final_active_indices": sorted(strict_active_parts),
+                    "parent_emitted_part_3mf_is_recursive_input": True,
+                    "cumulative_3mf_is_recursive_input": False,
+                    "cumulative_debug_snapshots": len(strict_snapshot_records)
+                    if args.debug_recursive_3mf
+                    else 0,
+                },
+                ensure_ascii=False,
+            ),
+            flush=True,
+        )
+        report["strict_recursive_execution"] = {
+            "execution_order": "strict_depth_first_preorder",
+            "step_count": len(recursive_minimal_layers),
+            "final_active_indices": sorted(strict_active_parts),
+            "parent_emitted_part_3mf_is_recursive_input": True,
+            "cumulative_3mf_is_recursive_input": False,
+            "debug_snapshot_mode": "standalone_colored_parts_plus_cumulative_audit",
+            "snapshots": strict_snapshot_records if args.debug_recursive_3mf else [],
+        }
+        if args.debug_recursive_3mf:
+            recursive_stage_cap_audit = []
+            for stage_record in debug_stage_records:
+                loop_audit = []
+                for extension in stage_record.get("loop_extensions", []):
+                    loop_audit.append(
+                        {
+                            "loop_index": extension.get("loop_index"),
+                            "cap_mode": extension.get("cap_mode"),
+                            "flat_orientation": extension.get("flat_orientation"),
+                            "global_flat_extension_max_mm": extension.get("global_flat_extension_max_mm"),
+                            "best_fit_flat_extension_max_mm": extension.get("best_fit_flat_extension_max_mm"),
+                            "best_fit_flat_normal_dot_global": extension.get("best_fit_flat_normal_dot_global"),
+                            "planar_extra_limit_mm": extension.get("planar_extra_limit_mm"),
+                            "local_fallback_reason": extension.get("local_fallback_reason"),
+                        }
+                    )
+                if loop_audit:
+                    recursive_stage_cap_audit.append(
+                        {
+                            "part_id": stage_record.get("part_id"),
+                            "geometry_cap_mode": stage_record.get("geometry_cap_mode"),
+                            "loops": loop_audit,
+                        }
+                    )
+            print(
+                "recursive_stage_cap_audit="
+                + json.dumps(recursive_stage_cap_audit, ensure_ascii=False, sort_keys=True),
+                flush=True,
+            )
+            invalid_debug_parts = [
+                part.get("part_id")
+                for part in debug_stage_records
+                if not part.get("reload_watertight")
+                or part.get("reload_open_edges")
+                or part.get("reload_over_shared_edges")
+            ]
+            max_debug_defect_ratio = max(float(args.max_topology_defect_ratio), 0.0)
+            blocking_debug_parts = [
+                part.get("part_id")
+                for part in debug_stage_records
+                if (
+                    not part.get("reload_watertight")
+                    or part.get("reload_open_edges")
+                    or part.get("reload_over_shared_edges")
+                )
+                and (
+                    args.validation_profile == "strict"
+                    or float(part.get("reload_topology_defect_ratio", 1.0)) > max_debug_defect_ratio
+                )
+            ]
+            print(
+                "debug_recursive_3mf="
+                + json.dumps(
+                    {
+                        "directory": str(debug_layers_dir),
+                        "part_count": len(debug_stage_records),
+                        "invalid_parts": invalid_debug_parts,
+                        "blocking_parts": blocking_debug_parts,
+                        "inward_stage_count": len(recursive_minimal_layers),
+                        "snapshot_count": len(strict_snapshot_records),
+                        "snapshot_mode": "standalone_colored_parts_plus_cumulative_audit",
+                        "recursive_input_mode": "parent_emitted_standalone_3mf",
+                    },
+                    ensure_ascii=False,
+                ),
+                flush=True,
+            )
+            if blocking_debug_parts:
+                if not args.diagnostic_preview:
+                    raise SystemExit(3)
+                progress("验证", "递归 3MF 含超过当前容差的非水密部件；诊断预览模式继续", parts=blocking_debug_parts)
+            elif invalid_debug_parts:
+                progress(
+                    "验证",
+                    "递归 3MF 含少量源网格缺陷；比例容差内继续",
+                    parts=invalid_debug_parts,
+                    max_topology_defect_ratio=max_debug_defect_ratio,
+                )
+
+        colored_3mf_parts = []
+        for index, component in enumerate(components, start=1):
+            raw_token_counts = collections.Counter(str(colors[int(face_id)]) for face_id in component.global_faces)
+            raw_color_tokens = [
+                {"token": token, "faces": int(count)}
+                for token, count in sorted(raw_token_counts.items(), key=lambda item: (-int(item[1]), str(item[0])))
+            ]
+            raw_color_token = "|".join(item["token"] for item in raw_color_tokens)
+            color_info = COLOR_INFO.get(component.color_code, {"name": component.color_code, "hex": "", "rgba": [200, 200, 200, 255]})
+            mapping_source = color_info.get("mapping_source", "unmapped")
+            resolution_status = color_resolution_status(color_info)
+            filament_slot_index = color_info.get("filament_slot")
+            filament_slot_number = None if filament_slot_index is None else int(filament_slot_index) + 1
+            part_id = f"P{index:02d}_{component.color_code}_{sanitize_name(color_info['name'])}"
+            part_cap_mode = effective_cap_mode(index)
+            part_fit_clearance_mm = float(effective_fit_clearance_by_part[index])
+            part_insert_shrink_mm, part_socket_overcut_mm = clearance_offsets(
+                args.clearance_mode, part_fit_clearance_mm
+            )
+            part_top_edge_clearance_mm = min(part_insert_shrink_mm, 0.05)
+            selected_processing_mode = processing_mode_by_part[index]
+            progress("拆分", f"正在生成 P{index:02d}/{len(components):02d}", color_code=component.color_code, cap_mode=part_cap_mode)
+            if index in body_root_indices:
+                part_id = f"{part_id}_BODY_CUT"
+            strict_entry = strict_active_parts.get(index)
+            if strict_entry is None:
+                raise RuntimeError(
+                    f"strict recursive execution did not materialize P{index:02d}"
+                )
+            mesh = strict_entry["mesh"]
+            stats = dict(strict_entry["stats"])
+            stats["part_id"] = part_id
+            stats["strict_recursive_origin_step"] = int(
+                strict_entry.get("origin_step", 0)
+            )
+            stats["strict_recursive_final_state_role"] = strict_entry.get(
+                "state_role"
+            )
+            stats["strict_recursive_parent_part_3mf_is_input"] = True
+            stats["strict_recursive_cumulative_3mf_is_input"] = False
+            classification = processing_classifications[index]
+            stats["selected_processing_mode"] = selected_processing_mode
+            stats["suggested_processing_mode"] = classification["suggested_processing_mode"]
+            stats["processing_mode_status"] = classification["processing_mode_status"]
+            stats["processing_mode_confidence"] = classification["processing_mode_confidence"]
+            stats["processing_mode_evidence"] = classification["processing_mode_evidence"]
+            stats["forced_flat_cap"] = bool(index in force_flat_part_indices)
+            stats["clearance_profile"] = args.clearance_profile
+            stats["requested_fit_clearance_mm"] = float(args.fit_clearance_mm)
+            stats["effective_fit_clearance_mm"] = part_fit_clearance_mm
+            stats["raw_color_token"] = raw_color_token
+            stats["raw_color_tokens"] = raw_color_tokens
+            stats["filament_slot_index"] = filament_slot_index
+            stats["filament_slot_number"] = filament_slot_number
+            stats["color_mapping_source"] = mapping_source
+            stats["color_resolution_status"] = resolution_status
+            stats["color_is_fallback"] = resolution_status == "fallback_estimate"
+            stats["assembly_parent_index"] = assembly_parents.get(index)
+            stats["assembly_child_indices"] = assembly_children.get(index, [])
+            stats["assembly_depth"] = int(assembly_depth_by_part.get(index, 0))
+            stats["recursive_minimal_role"] = (
+                "root_body"
+                if assembly_parents.get(index) is None
+                else ("subassembly_body" if assembly_children.get(index) else "leaf_insert")
+            )
+            mesh_validation = validate_mesh_in_memory(mesh)
+            source_validation = report["source_mesh_validation"]
+            mesh_validation["source_mesh_had_defects"] = bool(
+                source_validation["open_edges"] or source_validation["over_shared_edges"]
+            )
+            mesh_validation["attribution"] = (
+                "source_contains_topology_defects_exact_edge_provenance_unresolved"
+                if mesh_validation["source_mesh_had_defects"] and (mesh_validation["open_edges"] or mesh_validation["over_shared_edges"])
+                else "no_remaining_defect"
+            )
+            stats["mesh_validation"] = mesh_validation
+            if index in body_root_indices:
+                report.setdefault("body_part_ids", []).append(part_id)
+                if report.get("body_part_id") is None:
+                    report["body_part_id"] = part_id
+            report["parts"].append(stats)
+            colored_3mf_parts.append(
+                {
+                    "part_id": part_id,
+                    "color_code": component.color_code,
+                    "color_name": color_info["name"],
+                    "color_hex": color_info["hex"],
+                    "filament_slot_index": filament_slot_index,
+                    "filament_slot_number": filament_slot_number,
+                    "color_mapping_source": mapping_source,
+                    "color_resolution_status": resolution_status,
+                    "source_surface_face_count": int(
+                        max(
+                            0,
+                            int(stats.get("source_faces", 0))
+                            - int(stats.get("dropped_non_parent_source_faces", 0)),
+                        )
+                    ),
+                    "mesh": mesh,
+                    "annotation": {
+                        "recognition_basis": args.recognition_surface_profile,
+                        "occluded_paint_excluded": args.recognition_surface_profile == "exterior-visible",
+                        "processing_mode": stats["processing_mode"],
+                        "selected_processing_mode": selected_processing_mode,
+                        "suggested_processing_mode": classification["suggested_processing_mode"],
+                        "processing_mode_status": classification["processing_mode_status"],
+                        "processing_mode_confidence": classification["processing_mode_confidence"],
+                        "processing_mode_evidence": classification["processing_mode_evidence"],
+                        "raw_color_token": raw_color_token,
+                        "raw_color_tokens": raw_color_tokens,
+                        "filament_slot_index": filament_slot_index,
+                        "filament_slot_number": filament_slot_number,
+                        "color_mapping_source": mapping_source,
+                        "color_resolution_status": resolution_status,
+                        "color_is_fallback": resolution_status == "fallback_estimate",
+                        "semantic_label": stats.get("visual_semantic_label"),
+                        "parent_part": None if assembly_parents.get(index) is None else f"P{int(assembly_parents[index]):02d}",
+                        "assembly_depth": int(assembly_depth_by_part.get(index, 0)),
+                        "strict_recursive_origin_step": int(
+                            stats.get("strict_recursive_origin_step", 0)
+                        ),
+                        "strict_recursive_final_state_role": stats.get(
+                            "strict_recursive_final_state_role"
+                        ),
+                        "strict_recursive_parent_part_3mf_is_input": True,
+                        "strict_recursive_cumulative_3mf_is_input": False,
+                        "cap_mode": part_cap_mode,
+                        "geometry_cap_mode": stats.get("geometry_cap_mode", part_cap_mode),
+                        "fixed_inward_depth_mm": stats.get("fixed_inward_depth_mm", args.max_extension_mm),
+                        "maximum_generated_inward_travel_mm": stats.get("maximum_generated_inward_travel_mm", 0.0),
+                        "boundary_fairing_mode": args.boundary_fairing_mode,
+                        "boundary_fairing_radius_mm": float(args.boundary_fairing_radius_mm),
+                        "boundary_max_displacement_mm": float(args.boundary_max_displacement_mm),
+                        "boundary_feature_angle_deg": float(args.boundary_feature_angle_deg),
+                        "boundary_fairing_records": stats.get("boundary_fairing_records", []),
+                        "local_inward_direction_records": stats.get("local_inward_direction_records", []),
+                        "local_inward_outward_vertices_before": stats.get("local_inward_outward_vertices_before", 0),
+                        "local_inward_outward_vertices_after": stats.get("local_inward_outward_vertices_after", 0),
+                        "planar_extra_limit_mm": effective_planar_extra_limit(index),
+                        "maximum_planar_inward_travel_mm": maximum_planar_travel_mm,
+                        "requested_fit_clearance_mm": float(args.fit_clearance_mm),
+                        "effective_fit_clearance_mm": part_fit_clearance_mm,
+                        "fit_clearance_mm": part_fit_clearance_mm,
+                        "lead_in_mm": float(args.lead_in_mm),
+                        "validation_level": (
+                            "strict"
+                            if mesh_validation["watertight"]
+                            and mesh_validation["winding_consistent"]
+                            and not (
+                                mesh_validation["open_edges"]
+                                or mesh_validation["over_shared_edges"]
+                                or mesh_validation["inconsistent_shared_edges"]
+                            )
+                            else "diagnostic_invalid"
+                        ),
+                        "mesh_validation": mesh_validation,
+                    },
+                }
+            )
+            runtime_log(
+                "部件",
+                "final_part_ready",
+                f"最终部件 P{index:02d}/{len(components):02d} 已完成拓扑检查",
+                part_id=part_id,
+                faces=int(len(mesh.faces)),
+                vertices=int(len(mesh.vertices)),
+                watertight=bool(mesh_validation["watertight"]),
+                winding_consistent=bool(mesh_validation["winding_consistent"]),
+                open_edges=int(mesh_validation["open_edges"]),
+            )
+            print(
+                f"{part_id}: color_name={stats['color_name']} color_hex={stats['color_hex']} "
+                f"raw_token={raw_color_token} filament_slot={filament_slot_number if filament_slot_number is not None else 'unmapped'} "
+                f"mapping_source={mapping_source} resolution={resolution_status} faces={stats['source_faces']} "
+                f"out={stats['output_faces']} loops={stats['boundary_loops']} "
+                f"mode={stats['processing_mode']} watertight={mesh_validation['watertight']} "
+                f"winding_consistent={mesh_validation['winding_consistent']} "
+                f"open_edges={mesh_validation['open_edges']} over_edges={mesh_validation['over_shared_edges']} "
+                f"inconsistent_edges={mesh_validation['inconsistent_shared_edges']}",
+                flush=True,
+            )
+
+        inward_depth_audit = [
+            {
+                "part_id": part.get("part_id"),
+                "selected_processing_mode": part.get("selected_processing_mode"),
+                "cap_mode": part.get("geometry_cap_mode", part.get("cap_mode")),
+                "target_depth_mm": float(part.get("fixed_inward_depth_mm", 0.0)),
+                "maximum_generated_inward_travel_mm": float(part.get("maximum_generated_inward_travel_mm", 0.0)),
+                "local_inward_outward_vertices_before": int(part.get("local_inward_outward_vertices_before", 0)),
+                "local_inward_outward_vertices_after": int(part.get("local_inward_outward_vertices_after", 0)),
+            }
+            for part in report["parts"]
+        ]
+        print("inward_depth_audit=" + json.dumps(inward_depth_audit, ensure_ascii=False), flush=True)
+
+        runtime_log(
+            "视觉验证",
+            "multiview_validation_start",
+            "开始确定性多视角表面一致性验证",
+            profile=args.visual_validation_profile,
+            views=int(args.visual_validation_view_count),
+            resolution=int(args.visual_validation_resolution),
+            generated_parts=int(len(colored_3mf_parts)),
+        )
+        if args.visual_validation_profile == "off":
+            visual_surface_validation = {
+                "valid": True,
+                "skipped": True,
+                "profile": "off",
+                "requires_computer_use": False,
+                "slicer_screenshot_policy": "ask_user_to_open_final_3mf_and_provide_screenshots",
+            }
+        else:
+            source_part_by_face = np.zeros(len(faces), dtype=np.int32)
+            for component_index, component in enumerate(components, start=1):
+                source_part_by_face[np.asarray(component.global_faces, dtype=np.int64)] = component_index
+            visual_surface_validation = validate_multiview_visual_consistency(
+                vertices,
+                faces,
+                source_part_by_face,
+                colored_3mf_parts,
+                view_count=args.visual_validation_view_count,
+                resolution=args.visual_validation_resolution,
+                depth_tolerance_mm=args.visual_depth_tolerance_mm,
+                max_intrusion_ratio=args.visual_max_intrusion_ratio,
+                max_material_mismatch_ratio=args.visual_max_material_mismatch_ratio,
+                max_local_material_mismatch_ratio=args.visual_max_local_material_mismatch_ratio,
+                min_coverage_ratio=args.visual_min_coverage_ratio,
+            )
+            visual_surface_validation["profile"] = args.visual_validation_profile
+        runtime_log(
+            "视觉验证",
+            "multiview_validation_done",
+            "多视角表面一致性验证完成",
+            valid=bool(visual_surface_validation.get("valid", False)),
+            skipped=bool(visual_surface_validation.get("skipped", False)),
+            coverage_ratio=visual_surface_validation.get("coverage_ratio"),
+            intrusion_ratio=visual_surface_validation.get(
+                "generated_surface_intrusion_ratio"
+            ),
+            mismatch_ratio=visual_surface_validation.get(
+                "front_material_mismatch_ratio"
+            ),
+        )
+        report["visual_surface_validation"] = visual_surface_validation
+        print(
+            "visual_surface_validation="
+            + json.dumps(visual_surface_validation, ensure_ascii=False),
+            flush=True,
+        )
+        if (
+            args.visual_validation_profile == "strict"
+            and not visual_surface_validation.get("valid", False)
+            and not args.diagnostic_preview
+        ):
+            print(
+                "visual_validation_failures="
+                + json.dumps(visual_surface_validation.get("errors", []), ensure_ascii=False),
+                file=sys.stderr,
+            )
+            raise SystemExit(3)
+
+        invalid_part_records = [
+            {
+                "part_id": part.get("part_id"),
+                "open_edges": part["mesh_validation"]["open_edges"],
+                "over_shared_edges": part["mesh_validation"]["over_shared_edges"],
+                "winding_consistent": part["mesh_validation"]["winding_consistent"],
+                "inconsistent_shared_edges": part["mesh_validation"]["inconsistent_shared_edges"],
+                "unique_edges": part["mesh_validation"]["unique_edges"],
+                "defect_edges": part["mesh_validation"]["defect_edges"],
+                "topology_defect_ratio": part["mesh_validation"]["topology_defect_ratio"],
+                "open_edge_ratio": part["mesh_validation"]["open_edge_ratio"],
+                "over_shared_edge_ratio": part["mesh_validation"]["over_shared_edge_ratio"],
+                "inconsistent_orientation_ratio": part["mesh_validation"]["inconsistent_orientation_ratio"],
+                "open_edge_metrics": part["mesh_validation"]["open_edge_metrics"],
+                "over_shared_edge_metrics": part["mesh_validation"]["over_shared_edge_metrics"],
+                "inconsistent_edge_metrics": part["mesh_validation"]["inconsistent_edge_metrics"],
+                "bbox_min": part.get("bbox_min"),
+                "bbox_max": part.get("bbox_max"),
+                "source_mesh_had_defects": part["mesh_validation"].get("source_mesh_had_defects", False),
+                "attribution": part["mesh_validation"].get("attribution"),
+            }
+            for part in report["parts"]
+            if not part["mesh_validation"]["watertight"]
+            or not part["mesh_validation"]["winding_consistent"]
+            or part["mesh_validation"]["open_edges"]
+            or part["mesh_validation"]["over_shared_edges"]
+            or part["mesh_validation"]["inconsistent_shared_edges"]
+        ]
+        invalid_parts = [record["part_id"] for record in invalid_part_records]
+        max_topology_defect_ratio = max(float(args.max_topology_defect_ratio), 0.0)
+        ratio_accepted_part_records: list[dict] = []
+        blocking_part_records = list(invalid_part_records)
+
+        if invalid_part_records and args.validation_profile == "ratio":
+            for record in invalid_part_records:
+                standard_ratio_accepted = bool(
+                    not record["inconsistent_shared_edges"]
+                    and record["winding_consistent"]
+                    and float(record["topology_defect_ratio"])
+                    <= max_topology_defect_ratio
+                )
+                localized_accepted, localized_limits = localized_short_open_edge_acceptance(
+                    record,
+                    max_topology_defect_ratio,
+                )
+                if standard_ratio_accepted or localized_accepted:
+                    accepted_record = dict(record)
+                    accepted_record["ratio_acceptance_reason"] = (
+                        "standard_defect_ratio"
+                        if standard_ratio_accepted
+                        else "localized_short_open_edges"
+                    )
+                    accepted_record["localized_open_edge_limits"] = localized_limits
+                    ratio_accepted_part_records.append(accepted_record)
+            ratio_accepted_ids = {record["part_id"] for record in ratio_accepted_part_records}
+            blocking_part_records = [record for record in invalid_part_records if record["part_id"] not in ratio_accepted_ids]
+        if invalid_parts:
+            machine_record(
+                "topology_findings",
+                {"parts": invalid_part_records},
+            )
+            if ratio_accepted_part_records:
+                machine_record(
+                    "ratio_accepted_topology_findings",
+                    {
+                        "parts": ratio_accepted_part_records,
+                        "max_topology_defect_ratio": max_topology_defect_ratio,
+                        "blocking": False,
+                    },
+                )
+            if blocking_part_records:
+                machine_record(
+                    "validation_failures",
+                    {"parts": blocking_part_records},
+                    blocking=True,
+                )
+            if blocking_part_records and not args.diagnostic_preview:
+                raise SystemExit(3)
+            if ratio_accepted_part_records and not blocking_part_records:
+                progress(
+                    "验证",
+                    "存在少量局部拓扑边；异常边比例符合打印参考，继续导出",
+                    parts=[record["part_id"] for record in ratio_accepted_part_records],
+                    max_topology_defect_ratio=max_topology_defect_ratio,
+                )
+                ratio_accepted_ids = {record["part_id"] for record in ratio_accepted_part_records}
+                for part in colored_3mf_parts:
+                    if part["part_id"] in ratio_accepted_ids:
+                        part["annotation"]["validation_level"] = "ratio_accepted"
+                        part["annotation"]["topology_ratio_validation"] = {
+                            "max_topology_defect_ratio": max_topology_defect_ratio,
+                            "topology_defect_ratio": next(
+                                float(record["topology_defect_ratio"])
+                                for record in ratio_accepted_part_records
+                                if record["part_id"] == part["part_id"]
+                            ),
+                        }
+            else:
+                progress("验证", "严格水密验证未通过，按请求输出诊断预览", parts=invalid_parts)
+        else:
+            progress("验证", "全部部件通过严格水密验证", parts=len(report["parts"]))
+
+        temporary_output = output_path.with_name(output_path.name + ".tmp")
+        ratio_acceptance_active = bool(ratio_accepted_part_records and not blocking_part_records)
+        runtime_log(
+            "导出",
+            "final_package_write_start",
+            "开始写入临时分组多部件 3MF",
+            temporary_output=str(temporary_output),
+            parts=int(len(colored_3mf_parts)),
+            layout=args.output_layout,
+        )
+        export_summary = self.writer.write(
+            temporary_output,
+            colored_3mf_parts,
+            title=(
+                f"DIAGNOSTIC INVALID PREVIEW - {input_path.stem}"
+                if blocking_part_records
+                else (
+                    f"RATIO ACCEPTED - {input_path.stem} split printable parts"
+                    if ratio_acceptance_active
+                    else f"{input_path.stem} split printable parts"
+                )
+            ),
+            source_application=project_settings.get("_source_application"),
+            source_filament_colors=source_filament_colors,
+            source_project_settings=project_settings,
+            output_layout=args.output_layout,
+        )
+        runtime_log(
+            "导出",
+            "final_package_write_done",
+            "临时分组多部件 3MF 写入完成",
+            temporary_output=str(temporary_output),
+            objects=int(export_summary["part_count"]),
+            build_items=int(export_summary["build_item_count"]),
+        )
+        runtime_log(
+            "验证",
+            "final_package_reload_start",
+            "开始从磁盘回读临时 3MF 并复检结构、颜色和耗材槽",
+            temporary_output=str(temporary_output),
+        )
+        three_mf_validation = self.validator.validate_package(
+            temporary_output,
+            colored_3mf_parts,
+            source_filament_colors=source_filament_colors,
+            source_application=project_settings.get("_source_application"),
+            source_project_settings=project_settings,
+            output_layout=args.output_layout,
+        )
+        runtime_log(
+            "验证",
+            "final_package_reload_done",
+            "临时 3MF 磁盘回读复检完成",
+            valid=bool(three_mf_validation.get("valid", False)),
+            errors=int(len(three_mf_validation.get("errors", []))),
+            objects=int(len(three_mf_validation.get("objects", []))),
+        )
+        if not three_mf_validation["valid"]:
+            known_topology_errors = [
+                error
+                for error in three_mf_validation["errors"]
+                if "reloaded mesh is not watertight" in error
+                or "reloaded mesh has " in error and ("open edges" in error or "over-shared edges" in error)
+            ]
+            package_errors = [error for error in three_mf_validation["errors"] if error not in known_topology_errors]
+            allow_known_topology = bool(ratio_acceptance_active or args.diagnostic_preview)
+            if not allow_known_topology or package_errors:
+                temporary_output.unlink(missing_ok=True)
+                print(
+                    "3mf_validation_failures=" + json.dumps(three_mf_validation["errors"], ensure_ascii=False),
+                    file=sys.stderr,
+                )
+                raise SystemExit(3)
+            three_mf_validation["strict_valid"] = False
+            three_mf_validation["package_valid"] = True
+            three_mf_validation["known_topology_errors"] = known_topology_errors
+            three_mf_validation["validation_profile"] = (
+                "ratio" if ratio_acceptance_active else "diagnostic-preview"
+            )
+            three_mf_validation["errors"] = []
+            three_mf_validation["valid"] = True
+            progress("验证", "3MF 包结构与颜色复检通过；仅保留已标注的网格缺陷", topology_errors=len(known_topology_errors))
+        temporary_output.replace(output_path)
+        runtime_log(
+            "发布",
+            "atomic_publish_done",
+            "验证通过的临时 3MF 已原子发布",
+            output=str(output_path),
+            parts=int(len(colored_3mf_parts)),
+        )
+
+        final_summary = {
+            "output_3mf": str(output_path),
+            "part_count": len(colored_3mf_parts),
+            "body_part_id": report["body_part_id"],
+            "body_part_ids": report.get("body_part_ids", []),
+            "assembly_mode": args.assembly_mode,
+            "assembly_tree_strategy": args.assembly_tree_strategy,
+            "output_layout": args.output_layout,
+            "semantic_direction_overrides": semantic_direction_overrides,
+            "clearance_profile": args.clearance_profile,
+            "clearance_records": clearance_records,
+            "planar_travel_policy": planar_travel_policy,
+            "part_processing_mode": args.part_processing_mode,
+            "processing_classifications": [
+                processing_classifications[index] for index in sorted(processing_classifications)
+            ],
+            "inward_depth_audit": inward_depth_audit,
+            "recognition_surface_profile": args.recognition_surface_profile,
+            "exterior_surface_recognition": exterior_visibility,
+            "recursive_minimal_layers": recursive_minimal_layers,
+            "strict_recursive_execution": report["strict_recursive_execution"],
+            "visual_surface_validation": visual_surface_validation,
+            "colors": export_summary["colors"],
+            "source_filament_colors": export_summary.get("source_filament_colors", []),
+            "source_filament_palette_preserved": export_summary.get("source_filament_palette_preserved", False),
+            "objects": export_summary["objects"],
+            "source_instance_transform": project_settings.get("_source_instance_transform"),
+            "output_application": export_summary.get("application"),
+            "bambu_project_compatible": export_summary.get("bambu_project_compatible", False),
+            "validation": three_mf_validation,
+            "validation_level": (
+                "diagnostic_invalid"
+                if blocking_part_records
+                else ("ratio_accepted" if ratio_acceptance_active else "strict_validated")
+            ),
+            "validation_profile": args.validation_profile,
+            "max_topology_defect_ratio": max_topology_defect_ratio,
+            "invalid_parts": invalid_parts,
+            "ratio_accepted_parts": [record["part_id"] for record in ratio_accepted_part_records],
+            "debug_recursive_3mf_directory": str(debug_layers_dir) if debug_layers_dir else None,
+            "debug_recursive_3mf_part_count": len(debug_stage_records),
+        }
+        progress("导出", "已写入彩色多部件 3MF", output=str(output_path), validation_level=final_summary["validation_level"])

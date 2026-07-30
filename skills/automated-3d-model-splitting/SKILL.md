@@ -41,6 +41,24 @@ Run `--preflight-only` on installation or first use. The script checks `numpy`, 
 
 Relay the script's Chinese preflight, color, recognition, classification, assembly, split, validation, and export annotations during long work. Keep machine-readable JSON lines in logs.
 
+## Offer the Cathead Installation Test
+
+Immediately after installation and a successful `--preflight-only`, ask the user in Chinese whether to test the installation with the repository's `cathead` example. Do not download, read, recognize, or split the example before the user explicitly agrees.
+
+If the user agrees, run:
+
+```bash
+python scripts/run_cathead_example.py --accept
+```
+
+The helper must first reuse `example/cathead.3mf` when the Skill is running from a repository checkout. When the installed Skill does not include the repository-level example directory, it downloads only this fixed public file:
+
+```text
+https://raw.githubusercontent.com/BensonZeng00/automated-3d-model-splitting/main/example/cathead.3mf
+```
+
+It must verify SHA-256 `16bd80f486afc7439be7ded2f17229d6c973dd78c27858cac3f714b8a8b48764` before reading the model. The helper runs preflight again, then recognition/classification, then the ordinary validated export. Relay its progress and give the user the final output path and the complete validation summary required by this Skill. If the user declines, report that installation and preflight succeeded and stop without touching the example.
+
 ## Follow the Three-Stage Workflow
 
 1. Run recognition and classification first:

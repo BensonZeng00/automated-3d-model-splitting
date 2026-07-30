@@ -1,5 +1,7 @@
 # 自动化3d模型拆件
 
+[简体中文（默认）](README.md) | [English](README.en.md) | [日本語](README.ja.md) | [한국어](README.ko.md)
+
 喜欢 3D 打印，但不会建模，也能自己拆件。
 
 很多模型看起来已经涂好了颜色，实际上仍是一整个模型。想把眼睛、嘴巴、衣服或装饰件分开打印，往往要重新学习建模软件，自己切割、补面、挖孔，还要反复调整装配间隙。
@@ -25,10 +27,20 @@
 把下面这句话发给大模型：
 
 ```text
-请从 https://github.com/BensonZeng00/automated-3d-model-splitting 安装 automated-3d-model-splitting Skill，安装所需依赖并完成预检，完成后告诉我结果。
+请从 https://github.com/BensonZeng00/automated-3d-model-splitting 安装 automated-3d-model-splitting Skill，安装所需依赖并完成预检；完成后询问我是否使用 cathead 示例模型测试，如果我同意就自动拆件并告诉我结果。
 ```
 
-剩下的交给大模型处理。
+安装和预检成功后，大模型会询问是否用仓库自带的 `cathead` 模型做第一次测试。选择同意，它会自动取得示例模型、先识别零件，再生成并验证装配版 3MF；选择不同意则不会下载或读取示例。
+
+## 示例：小猫头
+
+这是仓库自带的入门测试模型。左边是原始涂色 3MF，右边是使用本 Skill 自动拆件后的效果：耳朵、额头花纹、眼睛、鼻子和脸颊等颜色区域已经成为可装配的独立零件。
+
+| 原始小猫头 | 自动拆件后 |
+| :---: | :---: |
+| ![原始小猫头模型](example/cathead.png) | ![自动拆件后的小猫头模型](example/cathead-split.png) |
+
+[下载 cathead.3mf 示例模型](example/cathead.3mf)
 
 ## 使用
 

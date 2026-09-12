@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import copy
 import hashlib
+import os
 import tempfile
 
 from .common import *
@@ -12,8 +14,249 @@ from .selection import *
 from .assembly import *
 from .validation import *
 from .inward import *
-from .domain import BoundaryFairingContext, CapDecision
+from .local_connectors import (
+    assembly_interface_policy,
+)
+from .connector_planning import DEFAULT_DEPTH_POLICY
+from .domain import PlanarArcRetopologyContext, CapDecision
 from .reporting import runtime_log
+from .boolean_case_cache import write_boolean_case_cache
+from .stage_cache import RecursiveStageCache
+from .uniform_fit import exact_unscaled_cutter
+
+
+def export_retopology_failure_diagnostics(
+    payload: dict,
+    output_dir: Path,
+) -> dict[str, str]:
+    """Persist compact, source-backed plots for one blocked surface band."""
+
+    os.environ.setdefault(
+        "MPLCONFIGDIR",
+        str(Path(tempfile.gettempdir()) / "split3mf-matplotlib"),
+    )
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.collections import LineCollection, PolyCollection
+
+    destination = Path(output_dir)
+    destination.mkdir(parents=True, exist_ok=True)
+    source = np.asarray(payload["source_points"], dtype=np.float64)
+    result = np.asarray(payload["result_points"], dtype=np.float64)
+    faces = np.asarray(payload["faces"], dtype=np.int64)
+    boundary = np.asarray(payload["boundary_ids"], dtype=np.int64)
+    targets = np.asarray(payload["target_boundary_points"], dtype=np.float64)
+    affected = np.asarray(payload["affected_face_ids"], dtype=np.int64)
+    degenerate = np.asarray(payload["degenerate_face_ids"], dtype=np.int64)
+    reversed_ids = np.asarray(payload["reversed_face_ids"], dtype=np.int64)
+    overstretched = np.asarray(payload["overstretched_face_ids"], dtype=np.int64)
+    bad_ids = np.unique(np.concatenate((degenerate, reversed_ids, overstretched)))
+
+    boundary_source = source[boundary]
+    origin = boundary_source.mean(axis=0)
+    _u, _singular_values, basis = np.linalg.svd(
+        boundary_source - origin[None, :],
+        full_matrices=False,
+    )
+    axis_u = basis[0]
+    axis_v = basis[1]
+
+    def project(points: np.ndarray) -> np.ndarray:
+        centered = np.asarray(points, dtype=np.float64) - origin[None, :]
+        return np.column_stack((centered @ axis_u, centered @ axis_v))
+
+    source_2d = project(boundary_source)
+    target_2d = project(targets)
+    displacement = np.linalg.norm(targets - boundary_source, axis=1)
+    maximum_index = int(np.argmax(displacement))
+    maximum_offset = float(displacement[maximum_index])
+
+    boundary_png = destination / "retopology_failure_boundary.png"
+    figure, axes = plt.subplots(1, 2, figsize=(13.2, 6.4))
+    figure.suptitle("Blocked visible seam: source vs planar-arc target", fontsize=16)
+    for axis in axes:
+        axis.set_aspect("equal", adjustable="box")
+        axis.grid(True, color="#D1D5DB", linewidth=0.7, alpha=0.7)
+        axis.set_xlabel("stable-plane U (mm)")
+        axis.set_ylabel("stable-plane V (mm)")
+    closed_source = np.vstack((source_2d, source_2d[:1]))
+    closed_target = np.vstack((target_2d, target_2d[:1]))
+    axes[0].plot(closed_source[:, 0], closed_source[:, 1], "#2563EB", lw=1.1, label="source")
+    axes[0].plot(closed_target[:, 0], closed_target[:, 1], "#EA580C", lw=1.5, label="target")
+    axes[0].set_title(f"Full loop ({len(boundary):,} boundary vertices)")
+    axes[0].legend(frameon=False)
+    axes[1].plot(closed_source[:, 0], closed_source[:, 1], "#2563EB", lw=1.2)
+    axes[1].plot(closed_target[:, 0], closed_target[:, 1], "#EA580C", lw=1.6)
+    axes[1].plot(
+        [source_2d[maximum_index, 0], target_2d[maximum_index, 0]],
+        [source_2d[maximum_index, 1], target_2d[maximum_index, 1]],
+        "-o",
+        color="#111827",
+        ms=3,
+    )
+    local_center = 0.5 * (source_2d[maximum_index] + target_2d[maximum_index])
+    half_span = max(maximum_offset * 1.4, 0.8)
+    axes[1].set_xlim(local_center[0] - half_span, local_center[0] + half_span)
+    axes[1].set_ylim(local_center[1] - half_span, local_center[1] + half_span)
+    axes[1].set_title(f"Maximum requested move: {maximum_offset:.3f} mm")
+    figure.text(
+        0.5,
+        0.02,
+        "Blue is the original painted seam; orange is the manufacturing target. No failed mesh was exported.",
+        ha="center",
+        fontsize=10,
+    )
+    figure.tight_layout(rect=(0.0, 0.05, 1.0, 0.94))
+    figure.savefig(boundary_png, dpi=180, bbox_inches="tight")
+    plt.close(figure)
+
+    quality_png = destination / "retopology_failure_quality_map.png"
+    display_ids = affected
+    if len(display_ids) > 15000:
+        display_ids = display_ids[
+            np.linspace(0, len(display_ids) - 1, 15000, dtype=np.int64)
+        ]
+    display_triangles = project(result[faces[display_ids]].reshape(-1, 3)).reshape(-1, 3, 2)
+    display_segments = np.concatenate(
+        (
+            display_triangles[:, [0, 1]],
+            display_triangles[:, [1, 2]],
+            display_triangles[:, [2, 0]],
+        ),
+        axis=0,
+    )
+    figure, axis = plt.subplots(figsize=(10.5, 8.2))
+    axis.add_collection(LineCollection(display_segments, colors="#CBD5E1", linewidths=0.25))
+    categories = (
+        (overstretched, "#A855F7", "edge stretch > 8×"),
+        (reversed_ids, "#F97316", "locally reversed"),
+        (degenerate, "#DC2626", "degenerate"),
+    )
+    for face_ids, color, label in categories:
+        if not len(face_ids):
+            continue
+        selected = face_ids[:5000]
+        polygons = project(result[faces[selected]].reshape(-1, 3)).reshape(-1, 3, 2)
+        axis.add_collection(
+            PolyCollection(
+                polygons,
+                facecolors=color,
+                edgecolors=color,
+                linewidths=0.35,
+                alpha=0.72,
+                label=f"{label} ({len(face_ids):,})",
+            )
+        )
+    projected_result = project(result[faces[display_ids]].reshape(-1, 3))
+    axis.update_datalim(projected_result)
+    axis.autoscale_view()
+    axis.set_aspect("equal", adjustable="box")
+    axis.set_xlabel("stable-plane U (mm)")
+    axis.set_ylabel("stable-plane V (mm)")
+    axis.set_title("Actual blocked surface-band quality map")
+    axis.grid(True, color="#E5E7EB", linewidth=0.6)
+    if any(len(face_ids) for face_ids, _color, _label in categories):
+        axis.legend(frameon=False, loc="best")
+    figure.tight_layout()
+    figure.savefig(quality_png, dpi=190, bbox_inches="tight")
+    plt.close(figure)
+
+    section_png = destination / "retopology_failure_45deg_section.png"
+    seed_vertex = int(boundary[maximum_index])
+    incident_ids = np.flatnonzero(np.any(faces == seed_vertex, axis=1))
+    local_vertex_ids = np.unique(faces[incident_ids])
+    local_ids = np.flatnonzero(np.any(np.isin(faces, local_vertex_ids), axis=1))
+    local_ids = local_ids[:1500]
+    incident_source = source[faces[incident_ids]]
+    incident_normals = np.cross(
+        incident_source[:, 1] - incident_source[:, 0],
+        incident_source[:, 2] - incident_source[:, 0],
+    )
+    section_y = incident_normals.sum(axis=0)
+    section_y /= max(float(np.linalg.norm(section_y)), 1e-15)
+    section_x = targets[maximum_index] - boundary_source[maximum_index]
+    section_x -= float(section_x @ section_y) * section_y
+    if float(np.linalg.norm(section_x)) <= 1e-12:
+        section_x = axis_u - float(axis_u @ section_y) * section_y
+    section_x /= max(float(np.linalg.norm(section_x)), 1e-15)
+    section_origin = boundary_source[maximum_index]
+
+    def section_project(points: np.ndarray) -> np.ndarray:
+        centered = np.asarray(points, dtype=np.float64) - section_origin[None, :]
+        return np.column_stack((centered @ section_x, centered @ section_y))
+
+    source_local = section_project(source[faces[local_ids]].reshape(-1, 3)).reshape(-1, 3, 2)
+    result_local = section_project(result[faces[local_ids]].reshape(-1, 3)).reshape(-1, 3, 2)
+    source_segments = np.concatenate(
+        (source_local[:, [0, 1]], source_local[:, [1, 2]], source_local[:, [2, 0]]),
+        axis=0,
+    )
+    result_segments = np.concatenate(
+        (result_local[:, [0, 1]], result_local[:, [1, 2]], result_local[:, [2, 0]]),
+        axis=0,
+    )
+    target_section = section_project(targets[maximum_index][None, :])[0]
+    ray_length = max(3.0, maximum_offset)
+    nominal_end = target_section + ray_length * np.asarray([2.0 ** -0.5, -2.0 ** -0.5])
+    figure, axis = plt.subplots(figsize=(9.5, 7.0))
+    axis.add_collection(LineCollection(source_segments, colors="#2563EB", linewidths=0.65, alpha=0.55, label="source local mesh"))
+    axis.add_collection(LineCollection(result_segments, colors="#EA580C", linewidths=0.65, alpha=0.55, label="deformed local mesh"))
+    axis.plot(0.0, 0.0, "o", color="#2563EB", label="source seam point")
+    axis.plot(target_section[0], target_section[1], "o", color="#EA580C", label="target seam point")
+    axis.plot(
+        [target_section[0], nominal_end[0]],
+        [target_section[1], nominal_end[1]],
+        "--",
+        color="#059669",
+        lw=2.0,
+        label="nominal 45° backing direction",
+    )
+    all_section_points = np.vstack((source_local.reshape(-1, 2), result_local.reshape(-1, 2), nominal_end))
+    axis.update_datalim(all_section_points)
+    axis.autoscale_view()
+    axis.set_aspect("equal", adjustable="box")
+    axis.set_xlabel("local seam travel (mm)")
+    axis.set_ylabel("local surface-normal direction (mm)")
+    axis.set_title("Local section projection at maximum requested seam move")
+    axis.grid(True, color="#E5E7EB", linewidth=0.6)
+    axis.legend(frameon=False, loc="best")
+    figure.tight_layout()
+    figure.savefig(section_png, dpi=190, bbox_inches="tight")
+    plt.close(figure)
+
+    data_path = destination / "retopology_failure_data.npz"
+    np.savez_compressed(
+        data_path,
+        boundary_source=boundary_source,
+        boundary_target=targets,
+        bad_face_ids=bad_ids,
+        bad_source_triangles=source[faces[bad_ids]],
+        bad_result_triangles=result[faces[bad_ids]],
+        degenerate_face_ids=degenerate,
+        reversed_face_ids=reversed_ids,
+        overstretched_face_ids=overstretched,
+    )
+    quality_path = destination / "retopology_failure_quality.json"
+    quality_path.write_text(
+        json.dumps(payload["quality"], ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    artifacts = {
+        "boundary_png": str(boundary_png),
+        "quality_map_png": str(quality_png),
+        "section_png": str(section_png),
+        "data_npz": str(data_path),
+        "quality_json": str(quality_path),
+    }
+    runtime_log(
+        "失败诊断",
+        "retopology_failure_artifacts_written",
+        "表面带失败图与可复用诊断数据已写出",
+        **artifacts,
+    )
+    return artifacts
 
 
 def shared_child_cap_decisions(
@@ -42,8 +285,26 @@ def validate_shared_child_cap_decisions(
     child_index: int,
     decisions: dict[int, CapDecision],
     child_stats: dict,
+    *,
+    interface_geometry: str = "boundary-extrusion",
 ) -> list[dict]:
     """Block publication when a child did not consume its planned cap field."""
+    repair = child_stats.get('actual_backing_validation') or {}
+    if repair.get('repaired'):
+        from .print_tolerance import current
+        geometry = repair.get('construction', {})
+        if not (current().repair_thin_backing and interface_geometry == 'local-connector'
+                and repair.get('source_front_triangles_preserved')
+                and repair.get('after_finalization', {}).get('valid')
+                and repair.get('matching_socket_fit', {}).get('valid')
+                and repair.get('outside_volume_mm3', float('inf')) <= 1e-8
+                and geometry.get('minimum_parent_reserve_mm', 0) >= .05-1e-8
+                and 0 < geometry.get('maximum_depth_mm', 0) <= 10):
+            raise ValueError(f'P{child_index:02d}: incomplete source-following backing safety record')
+        return [dict(loop_index=int(loop_index), cap_mode='source_following_local_normals',
+                     validation='explicitly_rebuilt_complete_child_with_fresh_thickness_and_containment',
+                     original_plan_superseded=True, exact_complete_child_cutter_required=True)
+                for loop_index in sorted(decisions)]
     if not decisions:
         return []
     extensions = {
@@ -59,7 +320,12 @@ def validate_shared_child_cap_decisions(
                 f"{int(loop_index)}"
             )
         actual_mode = str(extension.get("cap_mode"))
-        if actual_mode != str(decision.mode):
+        expected_mode = (
+            "local-connector"
+            if interface_geometry == "local-connector"
+            else str(decision.mode)
+        )
+        if actual_mode != expected_mode:
             raise ValueError(
                 f"P{int(child_index):02d} cap mode changed after planning on "
                 f"loop {int(loop_index)}: planned={decision.mode}, "
@@ -70,6 +336,99 @@ def validate_shared_child_cap_decisions(
         planned_maximum = float(planned_distances.max())
         actual_minimum = float(extension["extension_min_mm"])
         actual_maximum = float(extension["extension_max_mm"])
+        if interface_geometry == "local-connector":
+            if (
+                bool(extension.get("preview_not_printable", False))
+                and os.environ.get("SPLIT3MF_FORCE_PREVIEW", "") == "1"
+            ):
+                validations.append(
+                    {
+                        "loop_index": int(loop_index),
+                        "cap_mode": actual_mode,
+                        "preview_not_printable": True,
+                        "planned_safe_minimum_mm": planned_minimum,
+                        "planned_safe_maximum_mm": planned_maximum,
+                        "validation": "forced_preview_connector_skip",
+                    }
+                )
+                continue
+            planned_connector_safety = local_connector_safe_depth_from_field(
+                planned_distances
+            )
+            planned_connector_budget = float(
+                planned_connector_safety["local_connector_safety_budget_mm"]
+            )
+            actual_connector_budget = float(
+                extension.get(
+                    "local_connector_safety_budget_mm",
+                    planned_connector_budget,
+                )
+            )
+            footprint_probe_applied = bool(
+                extension.get("local_connector_footprint_probe_applied", False)
+            )
+            connector_budget_valid = (
+                0.0
+                < actual_connector_budget
+                <= float(DEFAULT_DEPTH_POLICY.maximum_total_depth_mm) + 1e-9
+                if footprint_probe_applied
+                else np.isclose(
+                    actual_connector_budget,
+                    planned_connector_budget,
+                    atol=1e-9,
+                    rtol=0.0,
+                )
+            )
+            backing_depth = float(
+                extension.get("full_boundary_backing_depth_mm", 0.0)
+            )
+            elastic_shrink_applied = bool(
+                extension.get("elastic_shrink_applied", False)
+            )
+            minimum_backing_depth = float(
+                extension.get("minimum_elastic_backing_depth_mm", 3.0)
+                if elastic_shrink_applied
+                else 3.0
+            )
+            socket_depth = float(
+                extension.get("socket_depth_mm", actual_maximum)
+            )
+            generated_total_depth = backing_depth + socket_depth
+            if not (
+                np.isclose(actual_minimum, actual_maximum, atol=1e-9, rtol=0.0)
+                and backing_depth >= minimum_backing_depth - 1e-9
+                and connector_budget_valid
+                and generated_total_depth <= actual_connector_budget + 1e-9
+                and generated_total_depth
+                <= float(DEFAULT_DEPTH_POLICY.maximum_total_depth_mm) + 1e-9
+            ):
+                raise ValueError(
+                    f"P{int(child_index):02d} local connector depth changed after "
+                    f"planning on loop {int(loop_index)}"
+                )
+            validations.append(
+                {
+                    "loop_index": int(loop_index),
+                    "cap_mode": actual_mode,
+                    "minimum_distance_mm": actual_minimum,
+                    "maximum_distance_mm": actual_maximum,
+                    "planned_safe_minimum_mm": planned_minimum,
+                    "planned_local_connector_budget_mm": planned_connector_budget,
+                    "actual_local_connector_budget_mm": actual_connector_budget,
+                    "footprint_probe_applied": footprint_probe_applied,
+                    "printable_backing_depth_mm": backing_depth,
+                    "elastic_shrink_applied": elastic_shrink_applied,
+                    "elastic_backing_scale": float(
+                        extension.get("elastic_backing_scale", 1.0)
+                    ),
+                    "elastic_lateral_scale": float(
+                        extension.get("elastic_lateral_scale", 1.0)
+                    ),
+                    "generated_total_depth_mm": generated_total_depth,
+                    "status": "local_connector_consumed_shared_safety_budget",
+                }
+            )
+            continue
         if not (
             np.isclose(actual_minimum, planned_minimum, atol=1e-9, rtol=0.0)
             and np.isclose(actual_maximum, planned_maximum, atol=1e-9, rtol=0.0)
@@ -106,7 +465,7 @@ def export_recursive_layer_stage_outputs(
     inward_overrides: dict[int, np.ndarray],
     model_center: np.ndarray,
     max_extension_mm: float,
-    boundary_fairing: BoundaryFairingContext,
+    interface_retopology: PlanarArcRetopologyContext,
     flat_clearance_mm: float,
     fit_clearance_mm: float,
     insert_shrink_mm: float,
@@ -147,7 +506,7 @@ def export_recursive_layer_stage_outputs(
                 part_id=local_part_id,
                 cut_refs=child_refs,
                 max_extension_mm=max_extension_mm,
-                boundary_fairing=boundary_fairing,
+                interface_retopology=interface_retopology,
                 flat_clearance_mm=flat_clearance_mm,
                 fit_clearance_mm=fit_clearance_mm,
                 socket_overcut_mm=socket_overcut_mm,
@@ -156,6 +515,7 @@ def export_recursive_layer_stage_outputs(
                 model_center=model_center,
                 cap_mode=part_cap_mode,
                 planar_extra_limit_mm=planar_extra_limit_mm,
+                lead_in_mm=lead_in_mm,
             )
         else:
             mesh, stats = make_part_mesh(
@@ -166,7 +526,7 @@ def export_recursive_layer_stage_outputs(
                 assembly_parent_index=assembly_parents.get(local_body_index),
                 part_id=local_part_id,
                 max_extension_mm=max_extension_mm,
-                boundary_fairing=boundary_fairing,
+                interface_retopology=interface_retopology,
                 flat_clearance_mm=flat_clearance_mm,
                 fit_clearance_mm=fit_clearance_mm,
                 insert_shrink_mm=insert_shrink_mm,
@@ -239,7 +599,7 @@ def export_recursive_layer_stage_outputs(
                 parent_index=local_body_index,
                 part_id=child_part_id,
                 max_extension_mm=max_extension_mm,
-                boundary_fairing=boundary_fairing,
+                interface_retopology=interface_retopology,
                 flat_clearance_mm=flat_clearance_mm,
                 fit_clearance_mm=fit_clearance_mm,
                 insert_shrink_mm=insert_shrink_mm,
@@ -358,6 +718,18 @@ def recursive_face_color_payload(
     )
 
 
+def recursive_face_paint_token_payload(
+    mesh,
+    default_color_code: str,
+) -> list[str]:
+    """Return Bambu paint tokens for every recursive triangle."""
+    face_count = int(len(mesh.faces))
+    face_codes = list(mesh.metadata.get("face_color_codes", []))
+    if len(face_codes) == face_count:
+        return [str(code) for code in face_codes]
+    return [str(default_color_code) for _ in range(face_count)]
+
+
 def recursive_part_package_payload(entry: dict) -> dict:
     return {
         key: value
@@ -437,6 +809,16 @@ def validate_loaded_recursive_part(
     ]
     if actual_slots != expected_slots:
         raise ValueError(f"recursive input filament-slot meaning changed in {path}")
+    expected_paint_tokens = [
+        str(value)
+        for value in expected_entry.get("face_paint_color_tokens", [])
+    ]
+    actual_paint_tokens = [
+        str(value)
+        for value in result.get("face_paint_color_tokens", [])
+    ]
+    if expected_paint_tokens and actual_paint_tokens != expected_paint_tokens:
+        raise ValueError(f"recursive input Bambu paint tokens changed in {path}")
     return result
 
 
@@ -454,30 +836,72 @@ def reload_recursive_part_input(
     """
     path = Path(path)
     if require_artifact_identity:
-        if "CUMULATIVE" in path.name.upper():
-            raise ValueError(
-                f"recursive input must be a parent-emitted standalone 3MF, not {path.name}"
-            )
-        expected_path_text = str(expected_entry.get("source_3mf_path", ""))
-        expected_sha256 = str(expected_entry.get("source_3mf_sha256", ""))
-        if not expected_path_text or not expected_sha256:
-            raise ValueError(
-                f"recursive input identity is missing for {expected_entry.get('part_id')}"
-            )
-        expected_path = Path(expected_path_text)
-        if path.resolve(strict=True) != expected_path.resolve(strict=True):
-            raise ValueError(
-                f"recursive input path changed for {expected_entry.get('part_id')}: "
-                f"expected {expected_path}, found {path}"
-            )
-        actual_sha256 = recursive_artifact_sha256(path)
-        if actual_sha256 != expected_sha256:
-            raise ValueError(
-                f"recursive input SHA-256 changed for {expected_entry.get('part_id')}: "
-                f"expected {expected_sha256}, found {actual_sha256}"
-            )
+        validate_recursive_artifact_identity(path, expected_entry)
     loaded = load_colored_mesh_objects_3mf(path)
     return validate_loaded_recursive_part(loaded, expected_entry, path)
+
+
+def validate_recursive_artifact_identity(path: Path, expected_entry: dict) -> str:
+    path = Path(path)
+    if "CUMULATIVE" in path.name.upper():
+        raise ValueError(
+            f"recursive input must be a parent-emitted standalone 3MF, not {path.name}"
+        )
+    expected_path_text = str(expected_entry.get("source_3mf_path", ""))
+    expected_sha256 = str(expected_entry.get("source_3mf_sha256", ""))
+    if not expected_path_text or not expected_sha256:
+        raise ValueError(
+            f"recursive input identity is missing for {expected_entry.get('part_id')}"
+        )
+    expected_path = Path(expected_path_text)
+    if path.resolve(strict=True) != expected_path.resolve(strict=True):
+        raise ValueError(
+            f"recursive input path changed for {expected_entry.get('part_id')}: "
+            f"expected {expected_path}, found {path}"
+        )
+    actual_sha256 = recursive_artifact_sha256(path)
+    if actual_sha256 != expected_sha256:
+        raise ValueError(
+            f"recursive input SHA-256 changed for {expected_entry.get('part_id')}: "
+            f"expected {expected_sha256}, found {actual_sha256}"
+        )
+    return actual_sha256
+
+
+class VerifiedRecursiveArtifactCache:
+    """Reuse an exact 3MF parse only after path, hash, and provenance checks."""
+
+    def __init__(self, metrics: dict | None = None) -> None:
+        self._loaded: dict[tuple[str, str], dict] = {}
+        self.metrics = metrics if metrics is not None else {}
+
+    def remember(self, path: Path, sha256: str, loaded: dict) -> None:
+        key = (str(Path(path).resolve(strict=True)), str(sha256))
+        self._loaded[key] = loaded
+
+    def load(self, path: Path, expected_entry: dict, loader=None) -> dict:
+        path = Path(path)
+        sha256 = validate_recursive_artifact_identity(path, expected_entry)
+        key = (str(path.resolve(strict=True)), sha256)
+        if key in self._loaded:
+            self.metrics["verified_recursive_parse_hits"] = int(
+                self.metrics.get("verified_recursive_parse_hits", 0)
+            ) + 1
+            return validate_loaded_recursive_part(
+                [self._loaded[key]], expected_entry, path
+            )
+        self.metrics["verified_recursive_parse_misses"] = int(
+            self.metrics.get("verified_recursive_parse_misses", 0)
+        ) + 1
+        if loader is None:
+            loaded = load_colored_mesh_objects_3mf(path)
+            result = validate_loaded_recursive_part(
+                loaded, expected_entry, path
+            )
+        else:
+            result = loader()
+        self._loaded[key] = result
+        return result
 
 
 def recursive_component_material_key(component: Component) -> tuple[str, object]:
@@ -495,7 +919,7 @@ def recursive_input_geometry_context(
     source_vertices: np.ndarray,
     source_faces: np.ndarray,
     source_components: list[Component],
-    boundary_fairing: BoundaryFairingContext,
+    interface_retopology: PlanarArcRetopologyContext,
 ) -> dict:
     """Rebuild the next recursive step entirely from its parent-emitted 3MF.
 
@@ -710,12 +1134,9 @@ def recursive_input_geometry_context(
             for index in expected_indices
         },
         "model_center": local_vertices.mean(axis=0),
-        "boundary_fairing": BoundaryFairingContext(
-            config=boundary_fairing.config,
-            source_surface_normals=mesh_vertex_inward_normals(
-                local_vertices,
-                local_faces,
-            ),
+        "interface_retopology": PlanarArcRetopologyContext(
+            config=interface_retopology.config,
+            curve_review_sink=interface_retopology.curve_review_sink,
         ),
         "mapping_records": mapping_records,
         "source_vertex_count": int(len(source_vertices)),
@@ -741,9 +1162,10 @@ def execute_strict_recursive_split(
     inward_overrides: dict[int, np.ndarray],
     model_center: np.ndarray,
     max_extension_mm: float,
-    boundary_fairing: BoundaryFairingContext,
+    interface_retopology: PlanarArcRetopologyContext,
     flat_clearance_mm: float,
     fit_clearance_by_part: dict[int, float],
+    boundary_reconciliation_tolerance_mm: float,
     lead_in_mm: float,
     clearance_mode: str,
     sibling_clearance_mm: float,
@@ -756,6 +1178,14 @@ def execute_strict_recursive_split(
     source_application: str | None = None,
     source_filament_colors: list[str] | None = None,
     source_project_settings: dict | None = None,
+    interface_geometry: str = "boundary-extrusion",
+    allow_partial: bool = False,
+    stage_cache: RecursiveStageCache | None = None,
+    run_fingerprint: str = "",
+    stage_implementation_fingerprint: str = "",
+    source_artifact_sha256: str = "",
+    optimization_metrics: dict | None = None,
+    boundary_review=None,
 ) -> tuple[Path | None, list[dict], dict[int, dict], list[dict]]:
     temporary_artifacts = (
         tempfile.TemporaryDirectory(prefix="strict-recursive-3mf-")
@@ -774,6 +1204,10 @@ def execute_strict_recursive_split(
     active_parts: dict[int, dict] = {}
     stage_records: list[dict] = []
     snapshot_records: list[dict] = []
+    optimization_metrics = (
+        optimization_metrics if optimization_metrics is not None else {}
+    )
+    verified_artifacts = VerifiedRecursiveArtifactCache(optimization_metrics)
     expected_internal_indices = {
         int(index) for index, child_indices in assembly_children.items() if child_indices
     }
@@ -817,6 +1251,10 @@ def execute_strict_recursive_split(
             color_info.get("hex", "#C8C8C8"),
             color_info.get("filament_slot"),
         )
+        face_paint_color_tokens = recursive_face_paint_token_payload(
+            mesh,
+            component.color_code,
+        )
         return {
             "part_id": part_id,
             "mesh": mesh,
@@ -826,6 +1264,7 @@ def execute_strict_recursive_split(
             "filament_slot_index": color_info.get("filament_slot"),
             "face_color_hexes": face_color_hexes,
             "face_filament_slot_indices": face_filament_slot_indices,
+            "face_paint_color_tokens": face_paint_color_tokens,
             "source_part_index": int(component_index),
             "contains": [int(index) for index in contains],
             "state_role": state_role,
@@ -934,10 +1373,18 @@ def execute_strict_recursive_split(
             entry,
             package_path,
         )
+        verified_artifacts.remember(
+            package_path,
+            entry["source_3mf_sha256"],
+            reloaded,
+        )
         entry["mesh"] = reloaded["mesh"]
         entry["face_color_hexes"] = reloaded["face_color_hexes"]
         entry["face_filament_slot_indices"] = reloaded[
             "face_filament_slot_indices"
+        ]
+        entry["face_paint_color_tokens"] = reloaded[
+            "face_paint_color_tokens"
         ]
         entry["stats"]["debug_format"] = "3mf"
         report_package_path = (
@@ -967,6 +1414,41 @@ def execute_strict_recursive_split(
         )
         return entry
 
+    def restore_cached_stage(cache_hit: dict) -> tuple[list[dict], list[dict]]:
+        stage_dir = Path(cache_hit["stage_dir"])
+        manifest = cache_hit["manifest"]
+        restored_entries: list[dict] = []
+        for cached_record in manifest.get("entries", []):
+            entry = dict(cached_record["entry"])
+            artifact_path = stage_dir / str(cached_record["artifact"])
+            entry["source_3mf_path"] = str(artifact_path)
+            entry["source_3mf_sha256"] = str(cached_record["sha256"])
+            reloaded = verified_artifacts.load(artifact_path, entry)
+            entry["mesh"] = reloaded["mesh"]
+            entry["face_color_hexes"] = reloaded["face_color_hexes"]
+            entry["face_filament_slot_indices"] = reloaded[
+                "face_filament_slot_indices"
+            ]
+            entry["face_paint_color_tokens"] = reloaded[
+                "face_paint_color_tokens"
+            ]
+            validation = validate_mesh_in_memory(entry["mesh"])
+            if (
+                not validation["winding_consistent"]
+                or validation["inconsistent_shared_edges"]
+                or float(validation["topology_defect_ratio"])
+                > float(max_topology_defect_ratio)
+            ):
+                raise ValueError(
+                    f"cached recursive part failed topology validation: {entry['part_id']}"
+                )
+            restored_entries.append(entry)
+        restored_records = [
+            {**dict(record), "stage_cache_hit": True}
+            for record in manifest.get("stage_records", [])
+        ]
+        return restored_entries, restored_records
+
     for step_order, step in enumerate(recursive_steps):
         local_body_index = int(step["local_body_index"])
         direct_children = [
@@ -994,6 +1476,105 @@ def execute_strict_recursive_split(
                 f"strict recursive step order mismatch at P{local_body_index:02d}"
             )
 
+        cache_key = None
+        cache_input_sha256 = str(source_artifact_sha256)
+        if active_parts:
+            cache_input_entry = active_parts.get(local_body_index)
+            if cache_input_entry is None:
+                raise ValueError(
+                    f"strict recursive step {step_order} cannot consume P{local_body_index:02d}; "
+                    "the previous output does not contain that active subassembly"
+                )
+            cache_input_sha256 = str(
+                cache_input_entry.get("source_3mf_sha256", "")
+            )
+            if stage_cache is not None:
+                validate_recursive_artifact_identity(
+                    Path(str(cache_input_entry.get("source_3mf_path", ""))),
+                    cache_input_entry,
+                )
+        if stage_cache is not None:
+            cache_key = stage_cache.stage_key(
+                run_fingerprint=run_fingerprint,
+                implementation=stage_implementation_fingerprint,
+                step=step,
+                input_artifact_sha256=cache_input_sha256,
+            )
+            cache_hit = stage_cache.lookup(cache_key)
+            if cache_hit is not None:
+                restored_entries, restored_records = restore_cached_stage(
+                    cache_hit
+                )
+                local_candidates = [
+                    entry
+                    for entry in restored_entries
+                    if int(entry["source_part_index"]) == local_body_index
+                ]
+                if len(local_candidates) != 1:
+                    raise ValueError(
+                        f"cached recursive stage {step_order} must contain exactly one "
+                        f"local body P{local_body_index:02d}"
+                    )
+                local_cached_part = local_candidates[0]
+                direct_cached_parts = {
+                    int(entry["source_part_index"]): entry
+                    for entry in restored_entries
+                    if int(entry["source_part_index"]) != local_body_index
+                }
+                if sorted(direct_cached_parts) != sorted(direct_children):
+                    raise ValueError(
+                        f"cached recursive stage {step_order} child coverage mismatch: "
+                        f"expected {sorted(direct_children)}, found {sorted(direct_cached_parts)}"
+                    )
+                active_parts, transition = advance_strict_recursive_state(
+                    active_parts,
+                    local_body_index,
+                    local_cached_part,
+                    direct_cached_parts,
+                )
+                stage_records.extend(restored_records)
+                executed_internal_indices.add(local_body_index)
+                optimization_metrics["stage_cache_hits"] = int(
+                    optimization_metrics.get("stage_cache_hits", 0)
+                ) + 1
+                snapshot_records.append(
+                    {
+                        **transition,
+                        "step_order": int(step_order),
+                        "depth": int(step.get("depth", 0)),
+                        "execution_order": "strict_depth_first_preorder",
+                        "stage_cache_hit": True,
+                        "stage_cache_key": cache_key,
+                        "mesh_count": int(len(active_parts)),
+                        "part_ids": [
+                            active_parts[index]["part_id"]
+                            for index in sorted(active_parts)
+                        ],
+                        "package_validation": {
+                            "valid": True,
+                            "source": "validated_recursive_stage_cache",
+                        },
+                        "reload_validation": [],
+                        "output_3mf": None,
+                    }
+                )
+                runtime_log(
+                    "递归缓存",
+                    "recursive_stage_cache_hit",
+                    "已恢复通过验证的递归阶段，跳过重复几何与布尔",
+                    step_order=int(step_order),
+                    local_body_index=int(local_body_index),
+                    cache_key=str(cache_key),
+                    restored_part_indices=sorted(
+                        int(entry["source_part_index"])
+                        for entry in restored_entries
+                    ),
+                )
+                continue
+            optimization_metrics["stage_cache_misses"] = int(
+                optimization_metrics.get("stage_cache_misses", 0)
+            ) + 1
+
         recursive_input_path = None
         recursive_input_origin_step = None
         step_vertices = vertices
@@ -1003,7 +1584,7 @@ def execute_strict_recursive_split(
         step_boundary_neighbor_lookup = boundary_neighbor_lookup
         step_component_centers = component_centers
         step_model_center = model_center
-        step_boundary_fairing = boundary_fairing
+        step_interface_retopology = interface_retopology
         recursive_geometry_mapping: list[dict] = []
         if active_parts:
             target = active_parts.get(local_body_index)
@@ -1046,10 +1627,14 @@ def execute_strict_recursive_split(
                 expected_sha256=str(target.get("source_3mf_sha256", "")),
                 cumulative_3mf_is_input=False,
             )
-            reloaded_target = reload_recursive_part_input(
+            reloaded_target = verified_artifacts.load(
                 recursive_input_path,
                 target,
-                require_artifact_identity=True,
+                loader=lambda: reload_recursive_part_input(
+                    recursive_input_path,
+                    target,
+                    require_artifact_identity=True,
+                ),
             )
             target["mesh"] = reloaded_target["mesh"]
             target["face_color_hexes"] = reloaded_target["face_color_hexes"]
@@ -1062,7 +1647,7 @@ def execute_strict_recursive_split(
                 source_vertices=vertices,
                 source_faces=faces,
                 source_components=components,
-                boundary_fairing=boundary_fairing,
+                interface_retopology=interface_retopology,
             )
             step_vertices = recursive_context["vertices"]
             step_faces = recursive_context["faces"]
@@ -1073,7 +1658,7 @@ def execute_strict_recursive_split(
             ]
             step_component_centers = recursive_context["component_centers"]
             step_model_center = recursive_context["model_center"]
-            step_boundary_fairing = recursive_context["boundary_fairing"]
+            step_interface_retopology = recursive_context["interface_retopology"]
             recursive_geometry_mapping = recursive_context["mapping_records"]
             runtime_log(
                 "递归输入",
@@ -1091,6 +1676,26 @@ def execute_strict_recursive_split(
             )
         elif assembly_parents.get(local_body_index) is not None:
             raise ValueError("the first strict recursive step must consume the root model")
+
+        if boundary_review is not None:
+            from .boundary_review import owners_from_components, apply_component_ownership
+            stage_owners = owners_from_components(len(step_faces), step_components)
+            checked_owners, boundary_record = boundary_review.prepare(
+                step_vertices, step_faces, stage_owners,
+                context=f"step_{step_order:02d}_P{local_body_index:02d}",
+            )
+            if not np.array_equal(stage_owners, checked_owners):
+                step_components = apply_component_ownership(
+                    step_vertices, step_faces, step_components, checked_owners)
+                step_boundary_neighbor_lookup = component_boundary_neighbor_lookup(
+                    step_faces, step_components)
+                step_component_centers = {
+                    index: step_components[index - 1].center for index in step_component_centers
+                }
+                # Root helper closures use the original component list: do not reuse
+                # their already-computed child references after a local approval.
+                if recursive_input_path is None:
+                    raise ValueError("Root ownership changed after planning; rerun with input-level boundary approval")
 
         layer_dir = artifact_layers_dir / (
             f"layer_{step_order:02d}_INWARD_P{local_body_index:02d}"
@@ -1116,11 +1721,16 @@ def execute_strict_recursive_split(
                     effective_cap_mode=effective_cap_mode,
                     effective_planar_extra_limit=effective_planar_extra_limit,
                     fit_clearance_by_part=fit_clearance_by_part,
+                    boundary_reconciliation_tolerance_mm=(
+                        boundary_reconciliation_tolerance_mm
+                    ),
                     clearance_mode=clearance_mode,
-                    boundary_fairing=step_boundary_fairing,
+                    interface_retopology=step_interface_retopology,
                     max_extension_mm=max_extension_mm,
                     flat_clearance_mm=flat_clearance_mm,
                     bottom_clearance_mm=bottom_clearance_mm,
+                    lead_in_mm=lead_in_mm,
+                    interface_geometry=interface_geometry,
                 )
             )
         local_component = step_components[local_body_index - 1]
@@ -1141,9 +1751,170 @@ def execute_strict_recursive_split(
         local_insert_shrink_mm, local_socket_overcut_mm = clearance_offsets(
             clearance_mode, local_fit_clearance_mm
         )
-        local_top_edge_clearance_mm = min(local_insert_shrink_mm, 0.05)
+        local_top_edge_clearance_mm = visible_top_edge_clearance(
+            local_insert_shrink_mm
+        )
         local_planar_extra_limit_mm = float(
             effective_planar_extra_limit(local_body_index)
+        )
+        interface_policy = assembly_interface_policy(interface_geometry)
+
+        # Child-solid construction may annotate the shared CapDecision objects.
+        # The parent closure must use the original, prevalidated interface state;
+        # otherwise building children first can change which closure faces the
+        # parent emits and leave it open before Boolean subtraction.
+        parent_cut_refs = copy.deepcopy(child_refs)
+
+        # Close the parent while the source arrays and interface-planning state
+        # are still pristine. Child construction intentionally reuses and may
+        # annotate those shared structures, so delaying parent closure until
+        # after child construction makes the result order-dependent.
+        closed_parent_mesh, closed_parent_stats = make_body_cut_mesh(
+            vertices=step_vertices,
+            faces=step_faces,
+            body_component=local_component,
+            part_id=local_part_id,
+            cut_refs=parent_cut_refs,
+            max_extension_mm=max_extension_mm,
+            interface_retopology=step_interface_retopology,
+            flat_clearance_mm=flat_clearance_mm,
+            fit_clearance_mm=local_fit_clearance_mm,
+            socket_overcut_mm=local_socket_overcut_mm,
+            bottom_clearance_mm=bottom_clearance_mm,
+            clearance_mode=clearance_mode,
+            model_center=step_model_center,
+            cap_mode=local_cap_mode,
+            interface_geometry=interface_geometry,
+            planar_extra_limit_mm=local_planar_extra_limit_mm,
+            lead_in_mm=lead_in_mm,
+            preserve_unmatched_source_geometry=bool(
+                recursive_input_path is not None
+            ),
+            defer_local_connector_boolean=bool(
+                interface_policy.complete_child_boolean
+            ),
+        )
+        closed_parent_stats["assembly_interface_policy"] = (
+            interface_policy.as_record()
+        )
+        if str(closed_parent_stats.get("interface_geometry")) != str(
+            interface_geometry
+        ):
+            raise ValueError(
+                "parent closure did not preserve the requested interface geometry: "
+                f"requested={interface_geometry!r}, "
+                f"actual={closed_parent_stats.get('interface_geometry')!r}"
+            )
+        runtime_log(
+            "assembly-boolean",
+            "closed_parent_ready_before_child_prebuild",
+            "Closed parent solid is ready before child construction",
+            step_order=int(step_order),
+            parent_body_index=int(local_body_index),
+            parent_watertight=bool(closed_parent_mesh.is_watertight),
+            parent_face_count=int(len(closed_parent_mesh.faces)),
+        )
+
+        # A compact local connector is authoritative only when its cutter comes
+        # from the complete emitted child.  Boundary extrusions deliberately do
+        # not enter this path: their visible rim is coplanar with the parent and
+        # both sides are instead generated from one shared source-patch field.
+        prebuilt_child_geometry: dict[
+            int,
+            tuple[trimesh.Trimesh, dict, list[trimesh.Trimesh]],
+        ] = {}
+        authoritative_child_indices = (
+            direct_children if interface_policy.complete_child_boolean else []
+        )
+        runtime_log(
+            "assembly-boolean",
+            "complete_child_prebuild_start",
+            "Building complete direct-child solids before parent subtraction",
+            step_order=int(step_order),
+            parent_body_index=int(local_body_index),
+            child_indices=[int(index) for index in authoritative_child_indices],
+            interface_geometry=str(interface_geometry),
+        )
+        for child_index in authoritative_child_indices:
+            subtree = (
+                subtree_by_child.get(child_index)
+                or subtree_component_indices(child_index, assembly_children)
+            )
+            union_component = (
+                union_by_child.get(child_index)
+                or build_subassembly_component(
+                    step_vertices,
+                    step_faces,
+                    step_components,
+                    subtree,
+                    step_components[child_index - 1].color_code,
+                )
+            )
+            child_color = part_color(child_index)
+            child_has_descendants = bool(assembly_children.get(child_index))
+            child_part_id = (
+                f"S{step_order:02d}_P{child_index:02d}_"
+                f"{sanitize_name(child_color['name'])}_"
+                f"{'PENDING_SUBASSEMBLY' if child_has_descendants else 'LEAF_INSERT'}"
+            )
+            child_fit_clearance_mm = float(
+                fit_clearance_by_part[child_index]
+            )
+            child_insert_shrink_mm, _child_socket_overcut_mm = (
+                clearance_offsets(clearance_mode, child_fit_clearance_mm)
+            )
+            child_mesh, child_stats = make_layer_child_subassembly_mesh(
+                vertices=step_vertices,
+                faces=step_faces,
+                source_colors=step_colors,
+                components=step_components,
+                component=union_component,
+                root_child_index=child_index,
+                subtree_indices=subtree,
+                parent_index=local_body_index,
+                part_id=child_part_id,
+                max_extension_mm=max_extension_mm,
+                interface_retopology=step_interface_retopology,
+                flat_clearance_mm=flat_clearance_mm,
+                fit_clearance_mm=child_fit_clearance_mm,
+                insert_shrink_mm=child_insert_shrink_mm,
+                lead_in_mm=lead_in_mm,
+                top_edge_clearance_mm=visible_top_edge_clearance(
+                    child_insert_shrink_mm
+                ),
+                boundary_neighbor_lookup=step_boundary_neighbor_lookup,
+                inward_override=inward_overrides.get(child_index),
+                model_center=step_model_center,
+                cap_mode=effective_cap_mode(child_index),
+                planar_extra_limit_mm=float(
+                    effective_planar_extra_limit(child_index)
+                ),
+                cap_decisions_by_loop=shared_child_cap_decisions(
+                    child_refs,
+                    child_index,
+                ),
+                bottom_clearance_mm=bottom_clearance_mm,
+                interface_geometry=interface_geometry,
+            )
+            local_connector_cutters = list(
+                child_stats.pop(
+                    "_local_connector_boolean_cutters",
+                    child_stats.pop("_boolean_socket_cutters", []),
+                )
+            )
+            prebuilt_child_geometry[int(child_index)] = (
+                child_mesh,
+                child_stats,
+                local_connector_cutters,
+            )
+        runtime_log(
+            "assembly-boolean",
+            "complete_child_prebuild_done",
+            "Complete direct-child solids are ready for parent subtraction",
+            step_order=int(step_order),
+            parent_body_index=int(local_body_index),
+            child_count=int(len(prebuilt_child_geometry)),
+            interface_geometry=str(interface_geometry),
         )
 
         runtime_log(
@@ -1162,27 +1933,176 @@ def execute_strict_recursive_split(
             preserve_unmatched_source_geometry=bool(
                 recursive_input_path is not None
             ),
+            interface_geometry=interface_geometry,
         )
-        local_mesh, local_stats = make_body_cut_mesh(
-            vertices=step_vertices,
-            faces=step_faces,
-            body_component=local_component,
-            part_id=local_part_id,
-            cut_refs=child_refs,
-            max_extension_mm=max_extension_mm,
-            boundary_fairing=step_boundary_fairing,
-            flat_clearance_mm=flat_clearance_mm,
-            fit_clearance_mm=local_fit_clearance_mm,
-            socket_overcut_mm=local_socket_overcut_mm,
-            bottom_clearance_mm=bottom_clearance_mm,
-            clearance_mode=clearance_mode,
-            model_center=step_model_center,
-            cap_mode=local_cap_mode,
-            planar_extra_limit_mm=local_planar_extra_limit_mm,
-            preserve_unmatched_source_geometry=bool(
-                recursive_input_path is not None
-            ),
-        )
+        local_mesh, local_stats = closed_parent_mesh, closed_parent_stats
+        if prebuilt_child_geometry:
+            inherited_boolean_audit = boolean_collapsed_face_audit(
+                closed_parent_mesh
+            )
+            boolean_finalization_policy = BooleanFinalizationPolicy(
+                inherited_collapsed_face_budget=int(
+                    inherited_boolean_audit["collapsed_face_count"]
+                ),
+                inherited_source="closed_parent_before_complete_child_difference",
+            )
+            clearance_cutters = []
+            clearance_cutter_labels: list[str] = []
+            clearance_cutter_records = []
+            for child_index in direct_children:
+                runtime_log(
+                    "assembly-boolean",
+                    "complete_child_proxy_start",
+                    "Building one exact full-size child Boolean cutter",
+                    step_order=int(step_order),
+                    child_index=int(child_index),
+                    source_faces=int(
+                        prebuilt_child_geometry[child_index][0].metadata.get(
+                            "protected_source_face_count",
+                            0,
+                        )
+                    ),
+                )
+                cutter, cutter_record = exact_unscaled_cutter(
+                    prebuilt_child_geometry[child_index][0]
+                )
+                clearance_cutters.append(cutter)
+                clearance_cutter_labels.append(f"P{int(child_index):02d}_exact_unscaled_child")
+                clearance_cutter_records.append(
+                    {
+                        "child_index": int(child_index),
+                        **cutter_record,
+                        "local_connector_cutter_count": 0,
+                        "backing_clearance_cutter_count": 0,
+                        "compact_socket_cutter_count": 0,
+                    }
+                )
+                runtime_log(
+                    "assembly-boolean",
+                    "complete_child_proxy_done",
+                    "Exact full-size child cutter is ready; no additional clearance cutters",
+                    step_order=int(step_order),
+                    child_index=int(child_index),
+                    proxy_faces=int(len(cutter.faces)),
+                    local_connector_cutter_count=0,
+                )
+            boolean_case_cache_path = os.environ.get(
+                "SPLIT3MF_BOOLEAN_CASE_CACHE",
+                "",
+            ).strip()
+            if not boolean_case_cache_path:
+                from .print_tolerance import current
+                recovery_dir = current().recovery_dir
+                if recovery_dir is not None:
+                    boolean_case_cache_path = str(
+                        recovery_dir / 'boolean' / f'step_{step_order:02d}_parent_{local_body_index:02d}.npz'
+                    )
+            if boolean_case_cache_path:
+                cached_path = write_boolean_case_cache(
+                    Path(boolean_case_cache_path),
+                    local_mesh,
+                    clearance_cutters,
+                    labels=clearance_cutter_labels,
+                    metadata={
+                        "step_order": int(step_order),
+                        "parent_body_index": int(local_body_index),
+                        "interface_geometry": str(interface_geometry),
+                    },
+                )
+                runtime_log(
+                    "assembly-boolean",
+                    "boolean_case_cache_written",
+                    "Reusable recursive Boolean harness case is ready",
+                    cache_path=str(cached_path),
+                    cutter_count=int(len(clearance_cutters)),
+                )
+            try:
+                local_mesh, complete_child_boolean_record = subtract_socket_cutters(
+                    local_mesh,
+                    clearance_cutters,
+                    allow_empty_intersection=True,
+                    inherited_collapsed_face_budget=int(
+                        boolean_finalization_policy.inherited_collapsed_face_budget
+                    ),
+                    cleanup_volume_envelope_cap_mm3=(
+                        5e-5
+                        if step_interface_retopology.config.surface_band_validation
+                        == "advisory"
+                        else 1e-5
+                    ),
+                    topology_healthy_export_volume_envelope_cap_mm3=(
+                        5e-3
+                        if step_interface_retopology.config.surface_band_validation
+                        == "advisory"
+                        else 0.0
+                    ),
+                )
+                ratio_accepted_collapsed_faces = int(
+                    complete_child_boolean_record.get(
+                        "ratio_accepted_new_collapsed_faces",
+                        0,
+                    )
+                )
+                micro_accepted_collapsed_faces = int(
+                    complete_child_boolean_record.get(
+                        "micro_accepted_new_collapsed_faces",
+                        0,
+                    )
+                )
+                local_mesh = finalize_boolean_difference_mesh(
+                    local_mesh,
+                    policy=BooleanFinalizationPolicy(
+                        inherited_collapsed_face_budget=int(
+                            boolean_finalization_policy.inherited_collapsed_face_budget
+                        ),
+                        inherited_source=str(
+                            boolean_finalization_policy.inherited_source
+                        ),
+                        ratio_accepted_collapsed_face_budget=(
+                            ratio_accepted_collapsed_faces
+                        ),
+                        maximum_collapsed_face_ratio=0.005,
+                        micro_accepted_collapsed_face_budget=(
+                            micro_accepted_collapsed_faces
+                        ),
+                        maximum_micro_collapsed_face_ratio=0.005,
+                        maximum_micro_collapsed_face_edge_mm=0.25,
+                    ),
+                )
+                local_mesh.metadata["name"] = local_part_id
+            except ValueError as error:
+                if os.environ.get("SPLIT3MF_FORCE_PREVIEW", "") != "1":
+                    raise
+                complete_child_boolean_record = {
+                    "status": "skipped_for_forced_preview",
+                    "error": str(error),
+                    "preview_not_printable": True,
+                }
+                local_mesh.metadata["preview_not_printable"] = True
+            local_stats["complete_child_boolean_record"] = {
+                **complete_child_boolean_record,
+                "boolean_scope": "complete_emitted_exact_unscaled_child_solids",
+                "interface_geometry": str(interface_geometry),
+                "authoritative_clearance_mm": 0.0,
+                "clearance_strategy": "post_split_xyz_uniform_scale_only",
+                "inherited_boolean_collapsed_face_audit": (
+                    inherited_boolean_audit
+                ),
+                "child_indices": [int(index) for index in direct_children],
+                "derived_clearance_cutters": clearance_cutter_records,
+            }
+            local_stats["authoritative_female_boolean_source"] = (
+                "complete_emitted_exact_unscaled_child_solids_only"
+            )
+            local_stats["output_faces"] = int(len(local_mesh.faces))
+            local_stats["output_vertices"] = int(len(local_mesh.vertices))
+            local_bbox = local_mesh.bounds
+            local_stats["bbox_min"] = local_bbox[0].round(6).tolist()
+            local_stats["bbox_max"] = local_bbox[1].round(6).tolist()
+            local_stats["bbox_size_mm"] = (
+                local_bbox[1] - local_bbox[0]
+            ).round(6).tolist()
+            local_stats.update(mesh_runtime_stats(local_mesh))
         runtime_log(
             "递归几何",
             "local_body_cut_done",
@@ -1263,7 +2183,9 @@ def execute_strict_recursive_split(
             child_insert_shrink_mm, _child_socket_overcut_mm = clearance_offsets(
                 clearance_mode, child_fit_clearance_mm
             )
-            child_top_edge_clearance_mm = min(child_insert_shrink_mm, 0.05)
+            child_top_edge_clearance_mm = visible_top_edge_clearance(
+                child_insert_shrink_mm
+            )
             child_cap_decisions = shared_child_cap_decisions(
                 child_refs,
                 child_index,
@@ -1278,32 +2200,39 @@ def execute_strict_recursive_split(
                 state_role=str(child_state_role),
                 subtree_indices=[int(index) for index in subtree],
             )
-            child_mesh, child_stats = make_layer_child_subassembly_mesh(
-                vertices=step_vertices,
-                faces=step_faces,
-                source_colors=step_colors,
-                components=step_components,
-                component=union_component,
-                root_child_index=child_index,
-                subtree_indices=subtree,
-                parent_index=local_body_index,
-                part_id=child_part_id,
-                max_extension_mm=max_extension_mm,
-                boundary_fairing=step_boundary_fairing,
-                flat_clearance_mm=flat_clearance_mm,
-                fit_clearance_mm=child_fit_clearance_mm,
-                insert_shrink_mm=child_insert_shrink_mm,
-                lead_in_mm=lead_in_mm,
-                top_edge_clearance_mm=child_top_edge_clearance_mm,
-                boundary_neighbor_lookup=step_boundary_neighbor_lookup,
-                inward_override=inward_overrides.get(child_index),
-                model_center=step_model_center,
-                cap_mode=effective_cap_mode(child_index),
-                planar_extra_limit_mm=float(
-                    effective_planar_extra_limit(child_index)
-                ),
-                cap_decisions_by_loop=child_cap_decisions,
-            )
+            if child_index in prebuilt_child_geometry:
+                child_mesh, child_stats, _compact_socket_cutters = (
+                    prebuilt_child_geometry[child_index]
+                )
+            else:
+                child_mesh, child_stats = make_layer_child_subassembly_mesh(
+                    vertices=step_vertices,
+                    faces=step_faces,
+                    source_colors=step_colors,
+                    components=step_components,
+                    component=union_component,
+                    root_child_index=child_index,
+                    subtree_indices=subtree,
+                    parent_index=local_body_index,
+                    part_id=child_part_id,
+                    max_extension_mm=max_extension_mm,
+                    interface_retopology=step_interface_retopology,
+                    flat_clearance_mm=flat_clearance_mm,
+                    fit_clearance_mm=child_fit_clearance_mm,
+                    insert_shrink_mm=child_insert_shrink_mm,
+                    lead_in_mm=lead_in_mm,
+                    top_edge_clearance_mm=child_top_edge_clearance_mm,
+                    boundary_neighbor_lookup=step_boundary_neighbor_lookup,
+                    inward_override=inward_overrides.get(child_index),
+                    model_center=step_model_center,
+                    cap_mode=effective_cap_mode(child_index),
+                    planar_extra_limit_mm=float(
+                        effective_planar_extra_limit(child_index)
+                    ),
+                    cap_decisions_by_loop=child_cap_decisions,
+                    bottom_clearance_mm=bottom_clearance_mm,
+                    interface_geometry=interface_geometry,
+                )
             runtime_log(
                 "递归几何",
                 "child_subassembly_build_done",
@@ -1328,6 +2257,7 @@ def execute_strict_recursive_split(
                     child_index,
                     child_cap_decisions,
                     child_stats,
+                    interface_geometry=interface_geometry,
                 )
             )
             child_stats = validate_changed_part(
@@ -1394,6 +2324,50 @@ def execute_strict_recursive_split(
             }
         )
         executed_internal_indices.add(local_body_index)
+
+        if stage_cache is not None and cache_key is not None:
+            changed_entries = [
+                local_active_part,
+                *[
+                    direct_child_parts[index]
+                    for index in sorted(direct_child_parts)
+                ],
+            ]
+            current_stage_records = stage_records[-len(changed_entries) :]
+            try:
+                stage_cache.commit(
+                    key=cache_key,
+                    run_fingerprint=run_fingerprint,
+                    implementation=stage_implementation_fingerprint,
+                    step=step,
+                    input_artifact_sha256=cache_input_sha256,
+                    changed_entries=changed_entries,
+                    stage_records=current_stage_records,
+                )
+                optimization_metrics["stage_cache_commits"] = int(
+                    optimization_metrics.get("stage_cache_commits", 0)
+                ) + 1
+                runtime_log(
+                    "递归缓存",
+                    "recursive_stage_cache_commit",
+                    "本递归阶段已通过验证并写入断点缓存",
+                    step_order=int(step_order),
+                    local_body_index=int(local_body_index),
+                    cache_key=str(cache_key),
+                    changed_part_count=int(len(changed_entries)),
+                )
+            except (OSError, ValueError) as exc:
+                if stage_cache.mode == "strict":
+                    raise
+                runtime_log(
+                    "递归缓存",
+                    "recursive_stage_cache_commit_skipped",
+                    "断点缓存写入失败，本次几何结果继续使用但不缓存",
+                    step_order=int(step_order),
+                    local_body_index=int(local_body_index),
+                    cache_key=str(cache_key),
+                    error=str(exc),
+                )
 
         snapshot_parts = cumulative_snapshot_parts(
             active_parts,
@@ -1548,11 +2522,21 @@ def execute_strict_recursive_split(
             )
             if blocking_reload_parts:
                 snapshot_record["blocking_parts"] = blocking_reload_parts
-                snapshot_records.append(snapshot_record)
-                raise ValueError(
-                    f"strict recursive snapshot {step_order} reload validation failed: "
-                    + ", ".join(blocking_reload_parts)
-                )
+                if allow_partial:
+                    runtime_log(
+                        "recursive-debug",
+                        "partial_snapshot_topology_warning",
+                        "Partial recursive debug snapshot retained topology warnings for manual review",
+                        step_order=int(step_order),
+                        blocking_parts=blocking_reload_parts,
+                        cumulative_3mf=str(layer_package_path),
+                    )
+                else:
+                    snapshot_records.append(snapshot_record)
+                    raise ValueError(
+                        f"strict recursive snapshot {step_order} reload validation failed: "
+                        + ", ".join(blocking_reload_parts)
+                    )
             for record in stage_records[-(1 + len(direct_children)):]:
                 record["layer_3mf"] = serialize_report_path(
                     layer_package_path, output_dir, report_path_mode
@@ -1575,7 +2559,7 @@ def execute_strict_recursive_split(
             cumulative_3mf_is_input=False,
         )
 
-    if executed_internal_indices != expected_internal_indices:
+    if not allow_partial and executed_internal_indices != expected_internal_indices:
         missing = sorted(expected_internal_indices - executed_internal_indices)
         extra = sorted(executed_internal_indices - expected_internal_indices)
         raise ValueError(
@@ -1583,7 +2567,7 @@ def execute_strict_recursive_split(
         )
     final_indices = sorted(active_parts)
     expected_final_indices = list(range(1, len(components) + 1))
-    if final_indices != expected_final_indices:
+    if not allow_partial and final_indices != expected_final_indices:
         raise ValueError(
             f"strict recursive execution did not finish with every part active: "
             f"expected {expected_final_indices}, found {final_indices}"
@@ -1600,5 +2584,7 @@ def execute_strict_recursive_split(
         final_part_indices=final_indices,
         stage_record_count=int(len(stage_records)),
         snapshot_record_count=int(len(snapshot_records)),
+        partial_debug_run=bool(allow_partial),
     )
     return layers_dir, stage_records, active_parts, snapshot_records
+

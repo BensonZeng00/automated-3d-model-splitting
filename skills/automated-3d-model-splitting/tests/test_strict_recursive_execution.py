@@ -21,6 +21,7 @@ common.load_core_dependencies()
 from split3mf.assembly import (
     advance_strict_recursive_state,
     build_recursive_minimal_layers,
+    group_mixed_parent_loop_children,
 )
 from split3mf.common import Component, trimesh
 from split3mf.debug_export import (
@@ -33,8 +34,8 @@ from split3mf.debug_export import (
     validate_shared_child_cap_decisions,
 )
 from split3mf.domain import (
-    BoundaryFairingConfig,
-    BoundaryFairingContext,
+    PlanarArcRetopologyConfig,
+    PlanarArcRetopologyContext,
     CapDecision,
 )
 from split3mf.package_io import (
@@ -43,7 +44,11 @@ from split3mf.package_io import (
     load_colored_mesh_objects_3mf,
     validate_colored_parts_3mf,
 )
-from split3mf.inward import finalize_recursive_colored_mesh
+from split3mf.inward import (
+    build_layer_child_cut_references,
+    finalize_recursive_colored_mesh,
+    make_layer_child_subassembly_mesh,
+)
 from split3mf.recognition import component_owned_face_colors
 
 
@@ -106,6 +111,94 @@ class StrictRecursiveExecutionTests(unittest.TestCase):
             7: [],
         }
 
+    def test_recursive_executor_keeps_local_and_pending_visible_top_rings_unshrunk(self) -> None:
+        source = inspect.getsource(execute_strict_recursive_split)
+        self.assertIn(
+            "local_top_edge_clearance_mm = visible_top_edge_clearance(",
+            source,
+        )
+        self.assertIn(
+            "child_top_edge_clearance_mm = visible_top_edge_clearance(",
+            source,
+        )
+
+    def test_recursive_parent_receives_requested_interface_geometry(self) -> None:
+        source = inspect.getsource(execute_strict_recursive_split)
+        self.assertIn("interface_geometry=interface_geometry", source)
+        self.assertIn(
+            'closed_parent_stats.get("interface_geometry")',
+            source,
+        )
+
+    def test_parent_uses_one_authoritative_complete_child_boolean_path(self) -> None:
+        source = inspect.getsource(execute_strict_recursive_split)
+        self.assertIn(
+            "defer_local_connector_boolean=bool(\n                interface_policy.complete_child_boolean",
+            source,
+        )
+        self.assertIn(
+            '"complete_emitted_exact_unscaled_child_solids_only"',
+            source,
+        )
+        self.assertIn(
+            '"boolean_scope": "complete_emitted_exact_unscaled_child_solids"',
+            source,
+        )
+        self.assertIn("exact_unscaled_cutter(", source)
+        self.assertNotIn("build_boolean_cutter_proxy_from_final_part(", source)
+        self.assertNotIn("clearance_cutters.extend(local_connector_cutters)", source)
+
+    def test_pending_builder_enforces_zero_visible_top_clearance(self) -> None:
+        source = inspect.getsource(make_layer_child_subassembly_mesh)
+        self.assertIn(
+            "top_edge_clearance_mm = visible_top_edge_clearance(",
+            source,
+        )
+
+    def test_cap_planner_and_pending_builder_share_retopology_context(self) -> None:
+        source = inspect.getsource(build_layer_child_cut_references)
+        self.assertIn(
+            "interface_retopology,\n                local_faces=local_faces,",
+            source,
+        )
+        self.assertIn(
+            "boundary_loop_interior_conormals(\n                planned_vertices, local_faces, loop",
+            source,
+        )
+
+    def test_retopology_target_is_never_partially_backed_off(self) -> None:
+        source = inspect.getsource(build_layer_child_cut_references)
+        self.assertIn("large_cap_loop = len(loop) > 512", source)
+        self.assertNotIn("evaluate_backoff_factor", source)
+        self.assertNotIn("backoff_factor", source)
+
+    def test_preflight_uses_retopologized_visible_ring_for_patch_quality(self) -> None:
+        source = inspect.getsource(build_layer_child_cut_references)
+        self.assertRegex(
+            source,
+            r"cap_decision_patch_quality_preflight\(\s+"
+            r"cap_decision,\s+inward,\s+source_points,",
+        )
+        self.assertIn(
+            "source_points = planned_vertices[loop_array]",
+            source,
+        )
+        self.assertNotIn(
+            "source_points = local_vertices[loop_array]",
+            source,
+        )
+
+    def test_local_connector_preflight_uses_production_geometry(self) -> None:
+        source = inspect.getsource(build_layer_child_cut_references)
+        self.assertIn(
+            "initial_cap_quality = preflight_local_connector_patch(",
+            source,
+        )
+        self.assertIn(
+            'if interface_geometry == "local-connector":',
+            source,
+        )
+
     def test_steps_follow_strict_depth_first_preorder(self) -> None:
         steps = build_recursive_minimal_layers(self.parents, self.children)
         self.assertEqual(
@@ -123,14 +216,78 @@ class StrictRecursiveExecutionTests(unittest.TestCase):
             )
         )
 
+    def test_mixed_parent_loop_children_become_one_subassembly(self) -> None:
+        def component(index: int, area: float, faces: int) -> Component:
+            return Component(
+                color_code=f"C{index}",
+                global_faces=np.arange(faces, dtype=np.int64),
+                face_count=faces,
+                area=area,
+                bbox_min=np.zeros(3, dtype=np.float64),
+                bbox_max=np.ones(3, dtype=np.float64),
+                center=np.zeros(3, dtype=np.float64),
+            )
+
+        components = [
+            component(1, 100.0, 1000),
+            component(2, 20.0, 200),
+            component(3, 40.0, 400),
+            component(4, 5.0, 50),
+        ]
+        parents = {1: None, 2: 1, 3: 1, 4: 1}
+        records = [
+            {"part_index": index, "parent_index": parent}
+            for index, parent in sorted(parents.items())
+        ]
+        adjacency = {
+            (1, 2): {"shared_edges": 80, "shared_vertex_count": 81},
+            (1, 3): {"shared_edges": 70, "shared_vertex_count": 71},
+            (1, 4): {"shared_edges": 30, "shared_vertex_count": 31},
+            (2, 3): {"shared_edges": 12, "shared_vertex_count": 13},
+        }
+        loop_records = [
+            {
+                "component_index": 1,
+                "loop_index": 0,
+                "edge_count": 150,
+                "neighbor_counts": {"2": 80, "3": 70},
+            },
+            {
+                "component_index": 1,
+                "loop_index": 1,
+                "edge_count": 30,
+                "neighbor_counts": {"4": 30},
+            },
+        ]
+
+        grouped_parents, grouped_children, grouped_records, changes = (
+            group_mixed_parent_loop_children(
+                components,
+                adjacency,
+                parents,
+                records,
+                loop_records,
+            )
+        )
+
+        self.assertEqual(grouped_parents, {1: None, 2: 3, 3: 1, 4: 1})
+        self.assertEqual(grouped_children, {1: [3, 4], 3: [2]})
+        self.assertEqual(len(changes), 1)
+        self.assertEqual(changes[0]["reason"], "grouped_mixed_parent_boundary_subassembly")
+        self.assertEqual(grouped_records[1]["mixed_parent_loop_group"]["sibling_group_indices"], [2, 3])
     def test_pipeline_binds_the_strict_executor_with_the_current_signature(self) -> None:
         parameters = inspect.signature(execute_strict_recursive_split).parameters
         self.assertIn("recursive_steps", parameters)
+        self.assertIn("boundary_reconciliation_tolerance_mm", parameters)
         pipeline_source = (
             SCRIPTS / "split3mf" / "pipeline.py"
         ).read_text(encoding="utf-8")
         self.assertIn(
-            "recursive_steps=recursive_minimal_layers",
+            "recursive_steps=recursive_execution_steps",
+            pipeline_source,
+        )
+        self.assertIn(
+            "boundary_reconciliation_tolerance_mm=args.fit_clearance_mm",
             pipeline_source,
         )
         self.assertNotIn(
@@ -181,6 +338,7 @@ class StrictRecursiveExecutionTests(unittest.TestCase):
 
     def test_recursive_executor_emits_monitoring_checkpoints_without_weakening_input_identity(self) -> None:
         source = inspect.getsource(execute_strict_recursive_split)
+        self.assertIn("boundary_reconciliation_tolerance_mm", source)
         for event in (
             "recursive_executor_start",
             "recursive_step_start",
@@ -517,18 +675,9 @@ class StrictRecursiveExecutionTests(unittest.TestCase):
                 faces=source_faces,
                 process=False,
             )
-            fairing = BoundaryFairingContext(
-                config=BoundaryFairingConfig(
-                    mode="constrained",
-                    radius_mm=0.5,
-                    max_displacement_mm=0.075,
-                    feature_angle_degrees=45.0,
-                    fidelity_weight=1.0,
-                    legacy_iterations=1,
-                    legacy_lambda=0.5,
-                    legacy_mu=-0.53,
-                ),
-                source_surface_normals=np.zeros_like(source_vertices),
+            retopology = PlanarArcRetopologyContext(
+                config=PlanarArcRetopologyConfig(),
+                curve_review_sink=lambda failure: None,
             )
             context = recursive_input_geometry_context(
                 reloaded_target={
@@ -541,7 +690,7 @@ class StrictRecursiveExecutionTests(unittest.TestCase):
                 source_vertices=source_vertices,
                 source_faces=source_faces,
                 source_components=source_components,
-                boundary_fairing=fairing,
+                interface_retopology=retopology,
             )
             np.testing.assert_allclose(
                 context["vertices"],
@@ -563,6 +712,8 @@ class StrictRecursiveExecutionTests(unittest.TestCase):
                 serialized_vertices.mean(axis=0),
             )
             self.assertEqual(context["reloaded_face_count"], 8)
+            self.assertIs(context['interface_retopology'].curve_review_sink,
+                          retopology.curve_review_sink)
         finally:
             common.COLOR_INFO.clear()
             common.COLOR_INFO.update(original_color_info)
@@ -639,6 +790,38 @@ class StrictRecursiveExecutionTests(unittest.TestCase):
                 decisions={0: decision},
                 child_stats=child_stats,
             )
+
+    def test_recursive_export_accepts_local_connector_safety_budget(self) -> None:
+        decision = CapDecision(
+            mode="local-offset",
+            source_vertex_ids=(10, 11),
+            fit_points=np.zeros((2, 3), dtype=np.float64),
+            directions=np.tile(np.asarray([0.0, 0.0, 1.0]), (2, 1)),
+            distances=np.asarray([5.0, 5.0]),
+            record={"cap_mode": "local-offset"},
+        )
+        child_stats = {
+            "loop_extensions": [
+                {
+                    "loop_index": 0,
+                    "cap_mode": "local-connector",
+                    "extension_min_mm": 1.75,
+                    "extension_max_mm": 1.75,
+                    "full_boundary_backing_depth_mm": 3.0,
+                    "socket_depth_mm": 2.0,
+                }
+            ]
+        }
+        validations = validate_shared_child_cap_decisions(
+            child_index=2,
+            decisions={0: decision},
+            child_stats=child_stats,
+            interface_geometry="local-connector",
+        )
+        self.assertEqual(
+            validations[0]["status"],
+            "local_connector_consumed_shared_safety_budget",
+        )
 
 
 if __name__ == "__main__":

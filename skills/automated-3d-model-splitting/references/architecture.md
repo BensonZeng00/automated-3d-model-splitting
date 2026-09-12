@@ -9,14 +9,15 @@
 `split3mf.pipeline.SplitPipeline` owns one complete split run. It coordinates services in this order:
 
 1. read and normalize the source project;
-2. recognize connected painted components;
+2. recognize connected painted components, apply the <=2 mm adjacent merge, screen long strips regardless of face count, auto-merge remaining noise-sized regions, and review long strips plus remaining sub-threshold regions until source-matched user decisions are supplied;
 3. select the root body from geometry and separator evidence;
 4. infer the recursive-minimal assembly tree and deterministic depth-first execution steps;
 5. plan safe inward directions and adaptive caps;
-6. execute strict tree recursion, reloading each pending subassembly from the independent colored 3MF emitted by its parent step while replacing one active subassembly at a time;
-7. compare source and assembled generated surfaces across deterministic depth views;
-8. write the temporary grouped multi-object 3MF;
-9. reload, validate, and atomically publish the result.
+6. preflight every recursive interface before the first expensive Boolean;
+7. execute strict tree recursion, reloading each pending subassembly from the independent colored 3MF emitted by its parent step while replacing one active subassembly at a time;
+8. compare source and assembled generated surfaces across deterministic depth views;
+9. write the temporary grouped multi-object 3MF;
+10. reload, validate, and atomically publish the result.
 
 The pipeline may coordinate policy but must not duplicate geometry, XML, ZIP, or validation algorithms.
 
@@ -28,7 +29,7 @@ The pipeline may coordinate policy but must not duplicate geometry, XML, ZIP, or
 - `LoadedProject`: normalized mesh and project metadata;
 - `RecognitionResult`: recognized components and provenance;
 - `AssemblyPlan`: parent, child, depth, and recursive-layer records;
-- `CapDecision`: selected cap policy and measured travel;
+- `CapDecision`: selected cap policy, measured travel, and the original source-loop points used for bounded parent/socket correspondence;
 - `PartBuildResult`: built mesh plus annotations;
 - `ValidationReport`: package and topology validation result.
 
@@ -36,41 +37,330 @@ Prefer these explicit records when data crosses stage boundaries. Do not introdu
 
 ## Services
 
+- `cutting_reference.py` maps the existing sequential Boolean cutter-step
+  intersection volumes to final child annotations. These original removal
+  volumes stay fixed through scaling and seating. `overlap_policy.py` applies
+  the default strictly-below-1% ratio without changing numerical precision.
+- `assembly_review.py` measures all unresolved pair intersections and source-front
+  occlusion for the default manual-adjustment handoff. It never repairs geometry
+  and supports read-only reassessment under the current acceptance policy.
+  `assembly_visibility.py` catches only typed
+  seating failures for this path and retains validated difference candidates.
+- `assembly_case.py` persists checksum-bound, already-scaled source/part geometry,
+  color annotations, tree identities and options for `tools/replay_assembly.py`.
+  Replaying the final fit stage must not apply another uniform scale.
+
+- `backing_repair.py` validates actual complete-child backing before each parent
+  Boolean and owns the explicitly enabled source-following reconstruction.
+  `backing_thickness.py` screens every interior source-face centroid along its
+  own normal, without filtering by the component-average axis. `local_ray_probe.py`
+  provides exact finite ray tests with a conservative spatial broad phase.
+  `curved_backing.py` retains front triangles and back-face material provenance.
+  `inward.py` passes accepted replacements through the normal colored finalizer;
+  recursion consumes the new full-size solid, not any pre-repair cutter.
+
+- `boolean_parent.py` supplies the complete current recursive source shell for
+  exact child subtraction, retaining curved child patches until the Boolean.
+- `surface_rays.py` performs exact parallel ray/triangle queries without an
+  optional spatial-index dependency. `insert_visibility.py` checks front
+  ownership even for nearly coincident parent membranes.
+- `assembly_visibility.py` validates compact final insert fronts and applies
+  only measured, bounded leaf seating through `assembly_seating.py`. Rigid pose
+  records are separate from uniform scaling; shapes and cutters remain intact.
+- The default-enabled `post_fit_difference.py` repair runs before seating.
+  It returns private tree-ordered candidates, subtracting final ancestors from
+  scaled inserts with face/material provenance. `post_fit_audit.py` owns exact
+  nearest-surface queries and sampled local-normal thickness checks. Caller
+  meshes are committed only after assembly validation succeeds; the pipeline
+  then refreshes mesh statistics and runs the normal visual/package gates.
+  This shape change is recorded separately from uniform scaling. The CLI offers
+  `--no-post-fit-parent-difference` for an explicit diagnostic opt-out.
+
 - `ThreeMFReader` reads vendor packages and resolves build/component transforms.
 - `VendorPaintDecoder` restores composite `paint_color` subdivision streams.
 - `PartRecognizer` groups material-equivalent, edge-connected exterior paint.
+- `small_component_review.py` excludes auto-noise regions at or below the configured face threshold, renders deterministic whole-model and local-zoom PNG sheets for the remaining review candidates, writes the review manifest/template, and validates complete user-confirmed decisions. It does not call an image model itself; the Codex skill inspects the images and asks the user.
+- `explicit_merge.py` applies user-authorized recognition-space body merges,
+  preserves the first member as the body identity, recomputes component
+  geometry, and records the original-to-effective index mapping. Per-face
+  material arrays remain owned by the pipeline and are not recolored.
 - `BodySelector` scores body candidates and excludes definite structural separators.
 - `AssemblyPlanner` infers and repairs the recursive-minimal parent tree, plans depth-first steps, and validates state transitions.
 - `InwardDirectionPlanner` creates locally safe, smoothed inward directions.
-- `BoundaryFairingService` fairs cut-loop positions with physical arc-length weights, feature locks, source-normal constraints, and a hard displacement bound.
+- `HiddenInterfacePlanner` proposes deterministic parent-interior direction fields only when the baseline interface is thinner than the 0.45 mm load-bearing minimum. `inward.py` remains responsible for passing each candidate through the complete cap, reserve, and authoritative thickness gates before adoption.
+- `GuidedInternalCutPlanner` converts a high-confidence image-guided internal-section constraint into a symmetric child/socket `CapDecision`. It localizes entry inset to measured thin arcs, ranks bounded parent-interior direction and plane-shift candidates, locks the already-retopologized visible rim, and emits the source-id fit ring and diagnostics consumed unchanged by both sides.
+- `InterfaceRetopologyService` owns the actual shared visible seam and its topology-connected C2 surface-band deformation. It moves child and parent seam vertices to one canonical planar-arc target, preserves vertices outside the band, and blocks degenerate, topologically inconsistent, mismatched, excessively stretched, or materially clustered fold results. On a large band only, at most 0.05% nondegenerate source-normal outliers may remain advisory when each result angle is at least 3 degrees and edge-connected clusters contain at most two faces.
+- `ConnectorSurfaceService` regularizes the hidden 45-degree annulus. Index-aligned rings use complete intermediate rings; unequal rings use conforming internal refinement followed by bounded convex-quad edge flips that break inherited radial spoke chains without moving either boundary. Both shared rim rings remain immutable after visible retopology.
+- `LocalConnectorPlanningService` owns immutable manufacturing/depth policy,
+  rim and footprint safety selection, and the pure priority allocator that
+  reduces compact-peg engagement to zero before reducing backing; it does not
+  mutate meshes.
+- `ConnectorTopologyService` triangulates and audits exact polygon-with-hole
+  annuli, then propagates consistent face winding.
+- `annulus_projection.py` checks oriented area coverage and nonincident edge
+  crossings for every strip strategy. Proven source projection ears are
+  restored around a separately audited simple core; generated folds have no
+  print-area exemption.
+- `surface_direction.py` guards the material side using oriented source-rim
+  normals. `average_outward_normal` uses the model center only if the normal
+  sum vanishes; recessed surfaces must not be reversed by a radial heuristic.
+- `backing_shape.py` measures within-layer dihedrals independently of ring
+  transitions. Missing samples are reported as unevaluated, not zero degrees.
+- `rim_chord_repair.py` separates generated diagonals co-owned by source
+  triangles using conforming inward collars, without moving source vertices
+  or rim edges. `source_ear_repair.py` restores bounded source-ear paths of up
+  to four triangles under one cumulative physical patch budget.
+- `InterfaceRetopologyService` owns the only cut-boundary policy: stable-plane projection, 384 equal-physical-arc samples, a 24-control periodic cubic B-spline in the plane, an 8-control periodic cubic B-spline for stable-plane-normal height, no source-extrema restoration, source-id-aligned evaluation, and safe-direction 3-D restoration. `planar_arc.py` contains the reusable numerical kernel. Targets outside 45% of the configured local band are rejected without partial backoff.
 - `AdaptiveCapPlanner` tries flat caps first and selects local-offset fallback only when needed.
 - `BoundaryTriangulator` closes single-loop and holed boundaries without center fans.
 - `PartMeshBuilder` builds inserts, body cuts, sockets, and subassemblies.
+- `FullTreePreflightService` visits every recursive parent and materializes its
+  interface decisions before Boolean execution; it owns no mesh mutation.
+- `RecursiveStageCache` stores only validated content-addressed recursive
+  stages and verifies every artifact SHA-256 before returning a hit.
 - `ThreeMFWriter` serializes the standard colored multi-object package.
 - `ValidationService` checks in-memory meshes and reloads the written package.
 - `ValidationService` also performs offline multi-view surface/depth consistency checks; it never controls a slicer UI.
 
 Services should be stateless where practical. Inject or replace collaborators through `SplitPipeline` rather than reaching into CLI parsing.
 
+## Performance invariants
+
+- `boundary_correspondence.py` proves a bounded sampled source-loop match
+  before the cap remapper increases its geometric projection allowance.
+  Exact-ID handling and visible source coordinates remain unchanged.
+- `subdivision_proof.py` verifies complete edge-fan coverage using actual
+  replacement geometry; aggregate area alone is not a coverage proof.
+- `cap_backoff.py` computes a proposed translation from one measured depth
+  constraint. `cap_template.py` owns the required fresh thickness query and
+  may publish only a result passing that query.
+
+- `region_review.py` partitions physical long-strip candidates and ordinary
+  face-count candidates consistently for recognition, image review, and
+  confirmed decisions. It measures visible source faces and never merges.
+- Production preserves audited hidden annuli before optional refinement;
+  direct refinement calls retain their diagnostic defaults. The CLI selects
+  production preservation through `PrintTolerance`.
+- An empty semantic-review list returns before global adjacency/projection
+  work. Disconnected needle spans share one total affected-area budget.
+
+- Candidate screening may use a preferred-depth ceiling, but the selected
+  inward field must always receive one unrestricted authoritative thickness
+  audit before geometry is emitted.
+- Parent-thickness broad phases must be conservative: active-only triangle
+  buckets and segmented capsule covers may reduce exact ray/triangle tests but
+  must never exclude a triangle that can intersect the finite probe segment.
+- Dense polygon ear clipping may spatially query reflex vertices and update
+  only neighbors of a removed ear. It must still preserve every source boundary
+  edge and emit exactly `n - 2` nondegenerate faces for a simple `n`-point loop.
+- Keep generic mesh cleanup unless a replacement proves both faster and
+  topology-equivalent on a real vendor benchmark. A faster invalid mesh is not
+  an optimization.
+- Run `tools/run_inward_performance_harness.py` together with the connector
+  harness and the full unit suite after changing these paths.
+
 ## Module ownership
 
 - `cli.py`: arguments, preflight, dependency loading, exit behavior;
 - `project.py`: project metadata, material slots, unit and transform resolution;
 - `recognition.py`: paint decoding and component recognition;
+- `explicit_merge.py`: explicit multi-material body merging after recognition;
+- `interface_retreat.py`: opt-in, user-confirmed source-face ownership retreat
+  across an existing child/parent seam, with deterministic geodesic growth,
+  material preservation, and connectivity/size safety gates;
+- `small_component_review.py`: sub-threshold review rendering, manifest generation, and confirmed-decision validation;
 - `selection.py`: structural evidence and root-body selection;
 - `assembly.py`: parent inference, cycle repair, recursive layers;
-- `inward.py`: safe directions, cap planning, inward mesh construction;
-- `boundary_fairing.py`: cut-loop position fairing and source-id canonicalization;
-- `mesh.py`: generic mesh and boundary operations;
+- `inward.py`: recursive inward orchestration, thickness probing, cap planning,
+  mesh-buffer construction adapters, and translated copies of already-emitted
+  connector attachments used as private backing-clearance cutters;
+- `hidden_interface.py`: pure hidden-interface candidate generation, local-inward projection, authoritative thickness ranking, and evidence records;
+- `connector_planning.py`: immutable connector depth policy, independent
+  backing/engagement budgets, elastic priority allocation, and compact-footprint
+  safety planning;
+- `connector_geometry.py`: planar projection, line-preserving/Clipper2 inset,
+  and continuous 45-degree backing lead/floor rings;
+- `connector_topology.py`: constrained annulus strategies, exact boundary/area
+  audit, and shared-edge face-orientation propagation. Rings with at least
+  1024 source vertices get one linear nearest-seam probe before the
+  constrained solver, and dense star-shaped annuli get a linear zipper probe;
+  both fast paths must pass the unchanged strict audit. Dense failed solver
+  cases stop before the quadratic visible-bridge fallback. Hidden backing
+  annuli with at least 2048 already-audited faces bypass optional recursive
+  flat-shading refinement, preserving their accepted topology and both rings;
+- `projected_micro_folds.py`: isolates bounded local self-crossings in a curved
+  rim's planar projection, retaining the exact 3-D ears. The topology service
+  solves the reduced simple annulus, restores every ear and original boundary
+  edge, then runs its unchanged full 3-D strip audit. All ears share the physical
+  micro-patch area budget; no source vertices move. `tools/replay_connector_strip.py`
+  replays captured strip inputs without restarting the model pipeline.
+- `local_connectors.py`: deterministic compact peg/socket plans, Boolean
+  sequencing, ratio audit, and the immutable per-interface assembly strategy;
+- `boolean_cutters.py`: non-serialized complete-child exterior proxies,
+  deterministic remote source-patch re-entry detection, and a boundary-cap
+  proxy fallback which keeps generated attachments but cannot punch through a
+  second parent exterior wall; one isolated area-weighted
+  source-normal cancellation may be recovered from its valid one-ring or
+  largest incident oriented face, while clusters and count excesses remain
+  blocking source-patch defects;
+- `boolean_case_cache.py`: compressed parent/cutter regression cases for the
+  standalone Boolean replay harness;
+- `planar_arc.py`: stable-plane equal-arc reconstruction and source-id canonicalization;
+- `interface_retopology.py`: production facade for shared child/parent interface targets;
+- `surface_quality.py`: reusable scale-independent source-triangle quality,
+  directed shared-edge winding, and local retriangulation-rim audits used by
+  visible interface retopology;
+- `mesh.py`: generic mesh and boundary operations, including per-closed-shell
+  outward-orientation repair so a dominant positive body cannot hide an
+  inverted detached micro-shell, plus provenance-gated removal of new
+  near-coplanar zero-thickness Boolean shells already covered by the retained
+  body surface;
+- `mesh_finalization.py`: source-face-prefix-preserving cleanup, selective
+  open-boundary welding, residual closure without global source-face deletion,
+  and strict topology audit;
+- `source_ear_repair.py`: restores a generated closure chord onto two existing
+  open source edges when a protected micro-ear was skipped. It changes only
+  generated triangles, shares one physical patch budget and retains every
+  source face and vertex; finalization still requires closed oriented topology.
 - `package_io.py`: 3MF component-assembly serialization and package metadata;
-- `validation.py`: topology and package validation;
+- `validation.py`: topology, per-shell outward-orientation, and package validation;
 - `debug_export.py`: strict parent-emitted-part 3MF recursion plus explicitly requested standalone colored-part and cumulative audit exports;
+- `recursive_preflight.py`: whole-tree interface-plan orchestration and typed
+  pass/warn/block records;
+- `stage_cache.py`: run/stage fingerprints, atomic validated checkpoint
+  manifests, and artifact-integrity checks;
 - `reporting.py`: user and machine-readable result reporting;
 - `common.py`: small shared constants and pure helpers only.
 
 Avoid circular imports. A lower-level module must not import `pipeline.py` or `cli.py`.
 
+Performance ownership follows the same boundaries. `inward.py` decides
+whether provisional connector cutters are needed at all; deferred recursive
+parents receive only their source-plane preclosure. `connector_topology.py`
+owns spatial seam lookup, linear candidate ranking, and the unchanged strict
+strip audit. `local_connectors.py` keeps the accepted Manifold parent resident
+across sequential differences while still exporting and auditing every
+intermediate result. These optimizations may remove redundant work, but may
+not weaken topology, volume, or winding gates. Default ratio validation may
+preserve zero-volume Boolean seam faces up to 0.5% only while the solid remains
+watertight, winding-consistent, and free of boundary or over-shared edges.
+
+Assembly construction uses one fit policy, owned by `uniform_fit.py`:
+exact complete-child subtraction first, uniform scaling after all recursive
+steps. `debug_export.py` constructs exact cutter copies without overshoot or
+auxiliary clearance tools. `pipeline.py` applies the final transform before
+mesh/visual/package validation. Public legacy clearance switches and translated
+attachment-cutter functions are removed. The geometry builders remain reusable.
+
+Every accepted sequential Boolean is also compared with its immediate pre-cut
+parent before the resident Manifold is advanced. A detached shell may be
+removed only when it is absent from the parent vertex provenance, is bounded
+to the documented micro-shell face/volume/thickness limits, and lies entirely
+within the cover tolerance of the dominant result shell. The cleaned mesh must
+pass the same watertightness, winding, collapsed-face, and Boolean-volume audit
+and must be re-imported as the resident Manifold for later cutters. This is not
+a generic component filter: source-supported detached shells remain immutable.
+
+## Connector harness
+
+`tools/run_connector_harness.py` exercises square, curved, dense concave-V, and
+unequal-count ripple boundaries without loading a vendor model. Each ordinary
+case calls the complete production male-backing builder in addition to the
+public planning, backing-geometry, and topology services. Run it before a full
+3MF:
+
+```bash
+python tools/run_connector_harness.py --case all --strategy auto
+```
+
+Every case must retain a continuous 3.0 mm backing with no vertical-skirt
+fallback, keep the compact connector inside the backing, preserve both annulus
+boundaries exactly, match outer-minus-hole area, record measured taper angles,
+emit closed backing-clearance and compact-socket cutters in that order with
+0.30 mm per-side and bottom relief, and contain no degenerate, over-shared,
+needle, or annulus-leaving faces.
+
+`tools/run_elastic_connector_harness.py` separately exercises the complete
+3.0 mm backing plus 5.0 mm engagement case, engagement-only reduction,
+zero engagement, backing reduction after zero engagement, and a thin-rim/
+thick-center split budget. Every case must emit closed, consistently wound
+synthetic child and parent solids. Zero engagement must omit both compact peg
+and compact socket rather than generating coincident zero-depth rings.
+The same harness also plans a 2089-point dense boundary. Polygon containment
+and edge-clearance queries must use the bounded-memory vectorized service and
+finish inside the harness time budget; reintroducing per-point/per-edge Python
+loops is a performance regression even when the resulting geometry matches.
+
+## General tolerance services (2.0.6)
+
+`tolerance_policy.py` owns ratio and physical-span semantics. `micro_regions.py` merges <=2 mm connected regions before tiny-component review. Ownership and material arrays remain separate. `micro_openings.py` appends source-hole caps after component policy and before tree construction, verifies exact rim closure and directed internal edges, then extends paint and component membership. Failed candidates remain unresolved. Existing assembly and mesh validation still decide deliverability.
+
+Boundary cycle decomposition uses an explicit stack. Inward conormals accumulate only faces incident to the requested ring, retaining source order. `prepare_debug_directory` returns an atomically reserved new `Path`; callers must use that returned path. A collision never removes earlier artifacts. See [tolerance-and-runtime-policy.md](tolerance-and-runtime-policy.md) for ratios, reporting, and execution recovery.
+
 ## Compatibility invariants
+
+### Conditional boundary clarification
+
+`boundary_clarity.py` builds shared-edge adjacency once per geometry assessment.
+Pairwise branching seams trigger reviewed local ownership search; endpoint-only defects first use automatic nearest stable adjacent ownership and the general residual >1% warning policy;
+ordinary triangulation, waviness, and valid three-material junctions do not.
+This is a topology-based ambiguity detector, not a complete semantic segmentation
+or self-intersection detector. Existing printable-geometry checks still apply.
+
+`boundary_review.py` gates raw input, recognized root ownership before planning,
+and every newly computed recursive stage after reloading its current mesh. Clear
+boundaries return without candidate search or preview generation. Endpoint-only cases never require a review preview: `nearest_boundary.py` applies at most three improving local ownership rounds, preserves parts and connectivity, and reports residual ratios. Remaining branching cases
+try at most three local weighting variants inside a two-hop face band. Candidate
+labels cannot remove a part or increase its disconnected-region count; vertices,
+triangles, and paint are not edited by this service. Original/generated face roles
+are not inferred from color when provenance is absent.
+
+`boundary_preview.py` emits assembly and local X-ray candidate comparisons. CLI
+stops with exit code 4 before cutting when review is needed. Candidate topology
+passing is not semantic or print acceptance. `--boundary-review-json` accepts an
+explicit user-confirmed decision, bound to both input and regenerated candidate
+fingerprints; a `decisions` list supports independent recursive-stage approvals.
+Never set `user_confirmed` without actual user approval. Unmatched approvals do
+not approve another stage. `--boundary-check-only` stops after the input gate.
+Changes to these modules and approval-file contents invalidate stage caches.
+
+When the user explicitly requests keeping an approved visible boundary unchanged,
+that same fingerprint-bound decision may set `preserve_visible_boundary: true`.
+Only after successful input approval does the pipeline activate the immutable
+`preserve_confirmed_seam` context field. `confirmed_seam.py` keeps source points,
+face membership, and paint unchanged instead of fitting another visible spline.
+It still audits finite coordinates, unique seam ids, shared-loop edges, and source
+indexed winding. It reports inherited source degeneracies without deleting them;
+all generated-geometry, thickness, Boolean, and package gates remain unchanged.
+This is an explicit reviewed geometry constraint, never an automatic fallback
+after a rejected spline and never a global relaxation of validation defaults.
+
+Regression command: `python -m unittest discover -s tests -p test_boundary_clarity.py`.
+
+### Conditional projected-curve clarity (2026-09-05)
+
+Ownership topology and curve geometry are separate checks. A degree-two seam
+can still generate crossing orange target segments. `planar_arc.py` now checks
+the actual source-ID-ordered target before the displacement gate or surface work.
+`curve_clarity.py` proposes local small-lobe removal only when projected crossings
+exist: at most three width profiles, bounded loop cuts, cumulative area budget,
+and no convex hull or global refit. Clear curves allocate no candidate mapping.
+Sparse weights retain candidate-to-old-target provenance, not mesh vertex IDs.
+The depth difference between crossing segments is reported; a 2-D crossing is
+not proof of a 3-D self-intersection. Every topology-changing proposal requires
+review and surface remeshing; it is never forced onto the original vertex list.
+
+`CurveClarityRequired` reaches the context's `curve_review_sink`, which exports
+actual before/after curves plus numerical NPZ/JSON through `curve_preview.py` and
+raises `BoundaryReviewRequired` (CLI exit 4). Existing ownership approvals do not
+approve a new geometric contour. Explicit immutable-seam mode still preserves
+the user-selected original seam and bypasses spline construction. This release
+does not implement applying a topology-changing contour to a surface mesh.
+
+Regression: `python -m unittest discover -s tests -p test_curve_clarity.py`.
+Replay: `python tools/review_curve_clarity.py CAPTURE.npz OUTPUT_DIRECTORY`.
+The replay expects `source`, `target`, and optional `guide` arrays, and plots the
+actual edited polyline, not a cosmetically simplified representation.
 
 An architecture-only refactor must preserve:
 
@@ -81,3 +371,11 @@ An architecture-only refactor must preserve:
 - complete output 3MF bytes for deterministic golden inputs.
 
 Before installing an architecture change, compile all modules, run `--version` and `--preflight-only`, then compare complete output SHA-256 values against the pre-refactor Panda and Speedboat baselines.
+
+## Printing tolerance and replay (2.1)
+
+`visual_ray_confirmation.py` is the narrow-phase check for centroid-screen intrusion candidates. It reuses `surface_rays.first_surface_hit` for signed depth and original face identity, and tests complete assembled triangles for occlusion. `validation.py` retains threshold policy and aggregate counters. Exact confirmation changes the evidence quality, not the acceptance limits.
+
+Curved leaf recovery uses `scripts/repair_curved_insert.py` as a separate orchestration entry point. `curved_repair_io.py` owns normalized stage loading and oriented source matching; `curved_backing.py` owns source-following solid construction; `backing_thickness.py` owns directional thickness evidence. They reuse uniform scaling, exact Boolean operations, seating, visual validation and package I/O. `assembly_visibility.py` checks both ownership and solid intersection; `assembly_seating.py` owns the bounded axial/contact-pose search and structured failure measurements. No module identifies a repair case by filename or color name. See `curved-backing-repair.md` for supported scope and acceptance gates.
+
+`print_tolerance.py` owns a context-scoped immutable physical tolerance. CLI selects it; geometry modules read this policy without model-name checks or task-specific approvals. `surface_preservation.py` distinguishes original triangle identity from preserved surface coverage. `edge_index.py` supports local incremental boundary closure. `quad_regularization.py` batches candidate geometry while retaining sequential flip selection. `finalization_case.py` stores non-pickle input/candidate snapshots and validated, implementation-matched local results; `tools/replay_finalization.py` replays this stage independently. Existing recursive cache remains responsible for whole successful recursive steps. Default source seams bypass unnecessary visible smoothing; optional smoothing remains explicit.

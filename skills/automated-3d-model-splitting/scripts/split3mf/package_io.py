@@ -188,6 +188,7 @@ def load_colored_mesh_objects_3mf(path: Path) -> list[dict]:
                 f"{path}: object {object_element.attrib.get('name')} has invalid pindex"
             ) from exc
         face_color_indices: list[int] = []
+        face_paint_color_tokens: list[str | None] = []
         for triangle in triangle_elements:
             triangle_pid = triangle.attrib.get(
                 "pid", object_element.attrib.get("pid")
@@ -216,6 +217,7 @@ def load_colored_mesh_objects_3mf(path: Path) -> list[dict]:
                     f"color index {color_index} is outside the palette"
                 )
             face_color_indices.append(color_index)
+            face_paint_color_tokens.append(triangle.attrib.get("paint_color"))
 
         metadata_element = object_element.find(
             CORE_NS
@@ -250,6 +252,7 @@ def load_colored_mesh_objects_3mf(path: Path) -> list[dict]:
                     palette[index] for index in face_color_indices
                 ],
                 "face_filament_slot_indices": face_color_indices,
+                "face_paint_color_tokens": face_paint_color_tokens,
             }
         )
     return loaded
@@ -260,6 +263,48 @@ def format_3mf_float(value: float) -> str:
     if abs(number) < 5e-12:
         number = 0.0
     return format(number, ".10g")
+
+
+def mesh_ready_for_3mf_serialization(
+    mesh: trimesh.Trimesh,
+) -> tuple[trimesh.Trimesh, dict]:
+    """Orient closed shells on the exact coordinate grid written to 3MF.
+
+    A Boolean can leave disconnected cavity or micro-shell components whose
+    containment sample lies within a few ulps of a neighbouring surface.
+    Auditing full-precision vertices and then rounding each coordinate during
+    XML serialization may change that containment classification.  Quantize
+    first, repair only triangle winding, and make the writer and reload audit
+    operate on precisely the same geometry.
+    """
+
+    serialized_vertices = np.asarray(
+        [
+            [float(format_3mf_float(value)) for value in vertex]
+            for vertex in np.asarray(mesh.vertices, dtype=np.float64)
+        ],
+        dtype=np.float64,
+    )
+    result = trimesh.Trimesh(
+        vertices=serialized_vertices,
+        faces=np.asarray(mesh.faces, dtype=np.int64).copy(),
+        process=False,
+        metadata=mesh.metadata.copy(),
+    )
+    orientation_record = orient_mesh_faces_consistently(result)
+    orientation_audit = watertight_component_orientation_audit(result)
+    if bool(result.is_watertight) and (
+        not bool(result.is_winding_consistent)
+        or orientation_audit.get("inward_closed_component_count")
+    ):
+        raise ValueError(
+            "3MF serialization-grid orientation repair did not converge"
+        )
+    return result, {
+        "coordinate_format": ".10g",
+        "orientation_repair": orientation_record,
+        "orientation_audit": orientation_audit,
+    }
 
 
 def xml_document_bytes(root: ET.Element) -> bytes:
@@ -449,7 +494,12 @@ def export_colored_parts_3mf(
     build_records = []
     for part_offset, part in enumerate(parts):
         offset = part_offset + 2
-        mesh = part["mesh"]
+        mesh, serialization_record = mesh_ready_for_3mf_serialization(
+            part["mesh"]
+        )
+        part.setdefault("annotation", {})[
+            "serialization_grid_orientation"
+        ] = serialization_record
         rgba = normalize_3mf_color(part["color_hex"])
         part_color_index = int(part_color_indices[part_offset])
         object_element = ET.SubElement(
@@ -489,6 +539,28 @@ def export_colored_parts_3mf(
             )
         triangles_element = ET.SubElement(mesh_element, CORE_NS + "triangles")
         per_face_indices = face_color_indices[part_offset]
+        raw_paint_tokens = part.get("face_paint_color_tokens")
+        if raw_paint_tokens is None:
+            raw_paint_tokens = part.get("face_color_codes")
+        paint_tokens = None
+        if raw_paint_tokens is not None:
+            raw_paint_tokens = list(raw_paint_tokens)
+            if len(raw_paint_tokens) != len(mesh.faces):
+                raise ValueError(
+                    f"{part['part_id']} has {len(mesh.faces)} faces but "
+                    f"{len(raw_paint_tokens)} Bambu paint tokens"
+                )
+            present_paint_tokens = [
+                value for value in raw_paint_tokens if value not in (None, "")
+            ]
+            if present_paint_tokens and len(present_paint_tokens) != len(
+                raw_paint_tokens
+            ):
+                raise ValueError(
+                    f"{part['part_id']} has a partial Bambu paint-token payload"
+                )
+            if present_paint_tokens:
+                paint_tokens = [str(value) for value in raw_paint_tokens]
         for face_offset, face in enumerate(np.asarray(mesh.faces, dtype=np.int64)):
             attributes = {
                 "v1": str(int(face[0])),
@@ -505,6 +577,8 @@ def export_colored_parts_3mf(
                         "p3": str(color_index),
                     }
                 )
+            if paint_tokens is not None:
+                attributes["paint_color"] = paint_tokens[face_offset]
             ET.SubElement(
                 triangles_element,
                 CORE_NS + "triangle",
@@ -520,6 +594,7 @@ def export_colored_parts_3mf(
                 "vertices": int(len(mesh.vertices)),
                 "triangles": int(len(mesh.faces)),
                 "annotation": annotation,
+                "face_paint_color_tokens": paint_tokens,
             }
         )
 
@@ -895,6 +970,19 @@ def validate_colored_parts_3mf(
                         actual_face_indices.append(int(present[0]))
                 if actual_face_indices != expected_face_indices:
                     part_errors.append("per-triangle color meaning mismatch")
+            expected_paint_tokens = expected.get("face_paint_color_tokens")
+            if expected_paint_tokens is None:
+                expected_paint_tokens = expected.get("face_color_codes")
+            if expected_paint_tokens is not None:
+                expected_paint_tokens = [
+                    str(value) for value in expected_paint_tokens
+                ]
+                actual_paint_tokens = [
+                    triangle.attrib.get("paint_color")
+                    for triangle in triangle_elements
+                ]
+                if actual_paint_tokens != expected_paint_tokens:
+                    part_errors.append("Bambu per-triangle paint_color mismatch")
         if len(vertices) != len(expected["mesh"].vertices) or len(faces) != len(expected["mesh"].faces):
             part_errors.append("serialized mesh count mismatch")
         if len(vertices) and len(faces):
@@ -920,6 +1008,14 @@ def validate_colored_parts_3mf(
                 part_errors.append("reloaded mesh is not watertight")
             if not reloaded_mesh.is_winding_consistent:
                 part_errors.append("reloaded mesh winding is inconsistent")
+            component_orientation = watertight_component_orientation_audit(
+                reloaded_mesh
+            )
+            if component_orientation.get("inward_closed_component_count"):
+                part_errors.append(
+                    "reloaded mesh has inward-oriented closed components: "
+                    f"{component_orientation['inward_closed_component_count']}"
+                )
             if reloaded_open_edges:
                 part_errors.append(f"reloaded mesh has {reloaded_open_edges} open edges")
             if include_loaded_objects:
@@ -945,6 +1041,10 @@ def validate_colored_parts_3mf(
                             if valid_loaded_face_indices
                             else []
                         ),
+                        "face_paint_color_tokens": [
+                            triangle.attrib.get("paint_color")
+                            for triangle in triangle_elements
+                        ],
                     }
                 )
         object_checks.append(
@@ -995,12 +1095,18 @@ def prepare_output_3mf(path: Path, overwrite: bool) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
 
-def prepare_debug_directory(path: Path, overwrite: bool) -> None:
-    if path.exists() and any(path.iterdir()):
-        if not overwrite:
-            raise ValueError(f"Debug directory is not empty: {path}. Pass --overwrite explicitly to reuse it.")
-        shutil.rmtree(path)
-    path.mkdir(parents=True, exist_ok=True)
+def prepare_debug_directory(path: Path, overwrite: bool = False) -> Path:
+    """Atomically reserve a fresh run; final-output overwrite never erases logs."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    for sequence in range(1000000):
+        candidate = path if sequence == 0 else path.with_name(f"{path.name}_run{sequence:04d}")
+        try:
+            candidate.mkdir()
+        except FileExistsError:
+            continue
+        return candidate
+    raise OSError(f"Cannot reserve a unique debug directory beside {path}")
 
 
 

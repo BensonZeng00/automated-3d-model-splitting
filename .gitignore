@@ -25,6 +25,17 @@ dist/
 *.log
 artifacts/
 test-output/
+outputs/
+
+# Local experiment, recovery and installed-skill backup workspaces.
+# Dated root workspaces are local runs; maintained artifacts belong under artifacts/.
+/*_20[0-9][0-9][01][0-9][0-3][0-9]*/
+/batch_cachefree_*/
+/diagnose_upstream_*/
+/experiment_*/
+/rebuild_*/
+/skill_sync_backups/
+/st_fresh_*/
 
 # Editors and operating systems
 .idea/

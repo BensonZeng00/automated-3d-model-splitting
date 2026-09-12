@@ -56,19 +56,34 @@ def inspect_output(path: Path) -> dict[str, object]:
         for item in root.findall("m:metadata", namespace)
     }
     application = metadata.get("Application", "")
-    if "automated-3d-model-splitting 1.3.5" not in application:
+    if "automated-3d-model-splitting 2.1.0" not in application:
         raise AssertionError(f"unexpected generator metadata: {application!r}")
+
+    cutting_references = []
+    for obj in mesh_objects:
+        element = obj.find("m:metadata[@name='automated-3d-model-splitting:annotation']", namespace)
+        annotation = json.loads(element.text)
+        if annotation.get('parent_part'):
+            reference = annotation.get('assembly_cutting_reference', {})
+            if (reference.get('parent_part') != annotation['parent_part']
+                    or reference.get('cutting_volume_mm3', 0) <= 0
+                    or not reference.get('fixed_before_uniform_scaling')):
+                raise AssertionError('final child is missing its original measured cutting volume')
+            cutting_references.append(reference)
+    if len(cutting_references) != 1:
+        raise AssertionError('expected one measured cutting interface')
 
     return {
         "mesh_parts": len(mesh_objects),
         "assembly_objects": len(assembly_objects),
         "assembly_components": len(components),
         "build_items": len(build_items),
+        "cutting_references": len(cutting_references),
         "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
     }
 
 
-def main() -> int:
+def main(*, entry_script: Path = ENTRY_SCRIPT, working_directory: Path | None = None) -> int:
     with tempfile.TemporaryDirectory(prefix="split3mf-release-") as temporary:
         directory = Path(temporary)
         source = write_fixture(directory / "synthetic-painted-cube.3mf")
@@ -78,7 +93,7 @@ def main() -> int:
             "-X",
             "utf8",
             "-B",
-            str(ENTRY_SCRIPT),
+            str(entry_script),
             "--input",
             str(source),
             "--output",
@@ -95,16 +110,15 @@ def main() -> int:
             "64",
             "--visual-max-intrusion-ratio",
             "0.05",
-            "--boundary-fairing-mode",
-            "off",
+            "--boundary-shape",
+            "source",
             "--lead-in-mm",
             "0",
-            "--fit-clearance-mm",
-            "0.10",
             "--overwrite",
         ]
         completed = subprocess.run(
             command,
+            cwd=working_directory,
             capture_output=True,
             text=True,
             encoding="utf-8",

@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .common import Component
 
@@ -19,34 +19,56 @@ class SplitConfig:
 
 
 @dataclass(frozen=True)
-class BoundaryFairingConfig:
-    mode: str
-    radius_mm: float
-    max_displacement_mm: float
-    feature_angle_degrees: float
-    fidelity_weight: float
-    legacy_iterations: int
-    legacy_lambda: float
-    legacy_mu: float
+class PlanarArcRetopologyConfig:
+    """One production boundary policy; there are intentionally no legacy modes."""
+
+    target_samples: int = 384
+    smooth_passes: int = 28
+    retopology_band_mm: float = 3.0
+    target_slope_degrees: float = 45.0
+    minimum_slope_degrees: float = 30.0
+    maximum_slope_degrees: float = 75.0
+    maximum_band_fraction: float = 0.45
+    connector_slope_validation: str = "advisory"
+    surface_band_validation: str = "strict"
+    connector_surface_validation: str = "strict"
+    preserve_confirmed_seam: bool = False
 
     @classmethod
-    def from_namespace(cls, namespace: argparse.Namespace) -> "BoundaryFairingConfig":
-        return cls(
-            mode=str(namespace.boundary_fairing_mode),
-            radius_mm=float(namespace.boundary_fairing_radius_mm),
-            max_displacement_mm=float(namespace.boundary_max_displacement_mm),
-            feature_angle_degrees=float(namespace.boundary_feature_angle_deg),
-            fidelity_weight=float(namespace.boundary_fidelity_weight),
-            legacy_iterations=int(namespace.smooth_iterations),
-            legacy_lambda=float(namespace.lambda_factor),
-            legacy_mu=float(namespace.mu_factor),
+    def from_namespace(cls, namespace: argparse.Namespace) -> "PlanarArcRetopologyConfig":
+        surface_band_validation = str(
+            getattr(namespace, "surface_band_validation", "strict")
         )
+        return cls(
+            preserve_confirmed_seam=getattr(namespace, 'boundary_shape', 'source') == 'source',
+            target_samples=int(namespace.boundary_target_samples),
+            smooth_passes=int(namespace.boundary_smooth_passes),
+            retopology_band_mm=float(namespace.boundary_retopology_band_mm),
+            connector_slope_validation=str(
+                getattr(namespace, "connector_slope_validation", "advisory")
+            ),
+            # A visually reviewed target may use more of the explicitly
+            # requested band, but it must still remain inside that real
+            # surface neighborhood. Strict mode keeps the original margin.
+            maximum_band_fraction=(
+                0.60 if surface_band_validation == "advisory" else 0.45
+            ),
+            surface_band_validation=surface_band_validation,
+            connector_surface_validation=str(
+                getattr(namespace, "connector_surface_validation", "strict")
+            ),
+        )
+
+    @property
+    def maximum_safe_target_offset_mm(self) -> float:
+        return float(self.retopology_band_mm * self.maximum_band_fraction)
 
 
 @dataclass(frozen=True)
-class BoundaryFairingContext:
-    config: BoundaryFairingConfig
-    source_surface_normals: Any
+class PlanarArcRetopologyContext:
+    config: PlanarArcRetopologyConfig
+    failure_sink: Callable[[dict[str, Any]], None] | None = None
+    curve_review_sink: Callable[[Any], None] | None = None
 
 
 @dataclass
@@ -62,6 +84,7 @@ class RecognitionResult:
     components: list[Component]
     ignored: list[dict[str, Any]] = field(default_factory=list)
     merged_tiny: list[dict[str, Any]] = field(default_factory=list)
+    semantic_preserved_tiny: list[dict[str, Any]] = field(default_factory=list)
     exterior_record: dict[str, Any] = field(default_factory=dict)
 
 
@@ -82,6 +105,10 @@ class CapDecision:
     directions: Any
     distances: Any
     record: dict[str, Any]
+    source_points: Any | None = None
+    cap_template_points: Any | None = None
+    cap_template_faces: Any | None = None
+    cap_template_boundary_ids: tuple[int, ...] | None = None
 
 
 @dataclass

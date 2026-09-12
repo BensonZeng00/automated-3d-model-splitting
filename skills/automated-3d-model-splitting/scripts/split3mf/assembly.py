@@ -129,7 +129,7 @@ def parse_part_index_tokens(raw: str | None) -> set[int]:
     indices: set[int] = set()
     if not raw:
         return indices
-    for token in re.split(r"[,\\s]+", raw):
+    for token in re.split(r"[,\s]+", raw):
         token = token.strip()
         if not token:
             continue
@@ -188,7 +188,12 @@ def parse_part_index(value) -> int | None:
 
 def load_visual_semantics(path: Path | None) -> dict:
     if path is None:
-        return {"source": None, "parts": {}, "parent_relations": []}
+        return {
+            "source": None,
+            "parts": {},
+            "parent_relations": [],
+            "interface_retreats": [],
+        }
     raw = json.loads(path.read_text(encoding="utf-8"))
     parts: dict[int, dict] = {}
     raw_parts = raw.get("parts", {})
@@ -216,6 +221,7 @@ def load_visual_semantics(path: Path | None) -> dict:
             "source_views": value.get("source_views", []),
             "force_inward_vector": value.get("force_inward_vector"),
             "force_parent_direction": bool(value.get("force_parent_direction", False)),
+            "guided_internal_cut": value.get("guided_internal_cut"),
         }
 
     raw_relations = raw.get("parent_relations") or raw.get("relations") or []
@@ -241,10 +247,48 @@ def load_visual_semantics(path: Path | None) -> dict:
             }
         )
 
+    interface_retreats = []
+    for item in raw.get("interface_retreats", []):
+        if not isinstance(item, dict):
+            continue
+        child_index = parse_part_index(
+            item.get("child") or item.get("child_part")
+        )
+        parent_index = parse_part_index(
+            item.get("parent") or item.get("parent_part")
+        )
+        if child_index is None or parent_index is None:
+            continue
+        confidence = item.get("confidence", "UNKNOWN")
+        interface_retreats.append(
+            {
+                "child_index": int(child_index),
+                "parent_index": int(parent_index),
+                "seed_point_mm": item.get("seed_point_mm"),
+                "seed_radius_mm": item.get("seed_radius_mm", 2.0),
+                "retreat_distance_mm": item.get("retreat_distance_mm"),
+                "maximum_parent_face_fraction": item.get(
+                    "maximum_parent_face_fraction",
+                    0.25,
+                ),
+                "confidence": confidence,
+                "confidence_score": confidence_score(confidence),
+                "reason": str(
+                    item.get("reason")
+                    or item.get("visual_evidence")
+                    or item.get("evidence")
+                    or ""
+                ),
+                "source_views": item.get("source_views", []),
+                "apply": bool(item.get("apply", True)),
+            }
+        )
+
     return {
         "source": str(path),
         "parts": parts,
         "parent_relations": parent_relations,
+        "interface_retreats": interface_retreats,
         "raw": raw,
     }
 
@@ -646,6 +690,193 @@ def refine_mixed_boundary_parents(
     refined_children = rebuild_assembly_children(refined_parents)
     refined_records = [record_by_part[index] for index in sorted(record_by_part)]
     return refined_parents, refined_children, refined_records, changes, loop_records
+
+
+def group_mixed_parent_loop_children(
+    components: list[Component],
+    adjacency: dict[tuple[int, int], dict],
+    parents: dict[int, int | None],
+    records: list[dict],
+    loop_records: list[dict],
+    min_shared_edges: int = 3,
+) -> tuple[dict[int, int | None], dict[int, list[int]], list[dict], list[dict]]:
+    """Group sibling color patches whose union owns one parent boundary loop.
+
+    At a three-color junction a closed loop on the parent can be composed of
+    arcs belonging to two or more direct children.  Treating every child as an
+    independent parent socket pairs different closed source loops (for
+    example, parent A+B versus child A+C).  Build one recursive subassembly for
+    the sibling group so the parent cut follows the group's exact outer loop;
+    the internal color seams are split at the next recursive layer.
+    """
+    refined_parents = dict(parents)
+    record_by_part = {int(record["part_index"]): dict(record) for record in records}
+    changes: list[dict] = []
+
+    for loop_record in sorted(
+        loop_records,
+        key=lambda record: (
+            int(record["component_index"]),
+            int(record["loop_index"]),
+        ),
+    ):
+        parent_index = int(loop_record["component_index"])
+        def direct_branch_root(component_index: int) -> int | None:
+            current = int(component_index)
+            seen: set[int] = set()
+            while current not in seen:
+                seen.add(current)
+                owner = refined_parents.get(current)
+                if owner == parent_index:
+                    return current
+                if owner is None:
+                    return None
+                current = int(owner)
+            return None
+
+        loop_neighbors_by_branch: dict[int, set[int]] = collections.defaultdict(set)
+        for neighbor_index, edge_count in loop_record.get("neighbor_counts", {}).items():
+            if int(edge_count) < int(min_shared_edges):
+                continue
+            neighbor_index = int(neighbor_index)
+            branch_root = direct_branch_root(neighbor_index)
+            if branch_root is not None:
+                loop_neighbors_by_branch[int(branch_root)].add(neighbor_index)
+        direct_branches = sorted(loop_neighbors_by_branch)
+        if len(direct_branches) < 2:
+            continue
+
+        branch_members: dict[int, set[int]] = collections.defaultdict(set)
+        for component_index in range(1, len(components) + 1):
+            branch_root = direct_branch_root(component_index)
+            if branch_root in loop_neighbors_by_branch:
+                branch_members[int(branch_root)].add(int(component_index))
+
+        # Form connected sibling groups using their source shared-boundary
+        # graph.  Components merely appearing on the same parent loop but not
+        # touching each other must remain independent.
+        remaining = set(direct_branches)
+        sibling_groups: list[set[int]] = []
+        while remaining:
+            seed = min(remaining)
+            group = {seed}
+            frontier = [seed]
+            remaining.remove(seed)
+            while frontier:
+                left = frontier.pop()
+                for right in sorted(list(remaining)):
+                    connected = any(
+                        int(
+                            (
+                                adjacency_record_between(adjacency, left_member, right_member)
+                                or {}
+                            ).get("shared_edges", 0)
+                        )
+                        >= int(min_shared_edges)
+                        for left_member in branch_members[int(left)]
+                        for right_member in branch_members[int(right)]
+                    )
+                    if not connected:
+                        continue
+                    remaining.remove(right)
+                    group.add(right)
+                    frontier.append(right)
+            sibling_groups.append(group)
+
+        for group in sibling_groups:
+            if len(group) < 2:
+                continue
+            anchor = max(
+                group,
+                key=lambda index: (
+                    float(components[index - 1].area),
+                    int(components[index - 1].face_count),
+                    -int(index),
+                ),
+            )
+            attached = {int(anchor)}
+            pending = set(int(index) for index in group if int(index) != int(anchor))
+            while pending:
+                candidates = []
+                for child_branch_root in sorted(pending):
+                    # Reparent the root of the pending branch to the exact
+                    # component it touches inside an already attached branch.
+                    # This preserves the whole pending subtree and records a
+                    # real source interface (P02->P14 in the lulumo case).
+                    for attached_branch_root in sorted(attached):
+                        for candidate_parent in sorted(
+                            branch_members[int(attached_branch_root)]
+                        ):
+                            edge_record = adjacency_record_between(
+                                adjacency,
+                                child_branch_root,
+                                candidate_parent,
+                            )
+                            shared_edges = int(edge_record.get("shared_edges", 0)) if edge_record else 0
+                            if shared_edges < int(min_shared_edges):
+                                continue
+                            candidates.append(
+                                (
+                                    shared_edges,
+                                    float(components[candidate_parent - 1].area),
+                                    int(components[candidate_parent - 1].face_count),
+                                    -int(child_branch_root),
+                                    -int(candidate_parent),
+                                    int(child_branch_root),
+                                    int(candidate_parent),
+                                    int(attached_branch_root),
+                                    edge_record,
+                                )
+                            )
+                if not candidates:
+                    break
+                (
+                    *_rank,
+                    child_index,
+                    new_parent_index,
+                    attached_branch_root,
+                    edge_record,
+                ) = max(candidates)
+                previous_parent_index = refined_parents.get(child_index)
+                refined_parents[child_index] = int(new_parent_index)
+                shared_edges = int(edge_record.get("shared_edges", 0))
+                shared_vertices = int(edge_record.get("shared_vertex_count", 0))
+                evidence = {
+                    "parent_loop_owner_index": int(parent_index),
+                    "parent_loop_index": int(loop_record["loop_index"]),
+                    "parent_loop_edges": int(loop_record["edge_count"]),
+                    "sibling_group_indices": sorted(int(index) for index in group),
+                    "subassembly_anchor_index": int(anchor),
+                    "attached_branch_root_index": int(attached_branch_root),
+                }
+                record = record_by_part.get(child_index, {"part_index": child_index})
+                record.update(
+                    {
+                        "previous_parent_index": previous_parent_index,
+                        "parent_index": int(new_parent_index),
+                        "shared_edges_to_parent": shared_edges,
+                        "shared_vertices_to_parent": shared_vertices,
+                        "reason": "grouped_mixed_parent_boundary_subassembly",
+                        "mixed_parent_loop_group": evidence,
+                    }
+                )
+                record_by_part[child_index] = record
+                changes.append(
+                    {
+                        "part_index": int(child_index),
+                        "previous_parent_index": previous_parent_index,
+                        "new_parent_index": int(new_parent_index),
+                        "shared_edges_to_new_parent": shared_edges,
+                        "reason": "grouped_mixed_parent_boundary_subassembly",
+                        **evidence,
+                    }
+                )
+                pending.remove(child_index)
+                attached.add(child_index)
+
+    refined_children = rebuild_assembly_children(refined_parents)
+    refined_records = [record_by_part[index] for index in sorted(record_by_part)]
+    return refined_parents, refined_children, refined_records, changes
 
 
 def build_strongest_path_assembly_tree(

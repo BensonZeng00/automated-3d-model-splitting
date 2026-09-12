@@ -8,7 +8,7 @@ import unittest
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 TECHNICAL_ID = "automated-3d-model-splitting"
-VERSION = "1.3.5"
+VERSION = "2.1.0"
 
 
 class ReleaseIdentityTests(unittest.TestCase):
@@ -29,7 +29,11 @@ class ReleaseIdentityTests(unittest.TestCase):
         self.assertIn(f"${TECHNICAL_ID}", agent)
 
     def test_schema_ids_use_public_identity(self) -> None:
-        for filename in ("color-map.schema.json", "visual-semantics.schema.json"):
+        for filename in (
+            "color-map.schema.json",
+            "visual-semantics.schema.json",
+            "tiny-component-review.schema.json",
+        ):
             schema = json.loads(self.read(f"references/{filename}"))
             self.assertIn(TECHNICAL_ID, schema["$id"])
 

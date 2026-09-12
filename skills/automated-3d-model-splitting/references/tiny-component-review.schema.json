@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:openai:skill:automated-3d-model-splitting:tiny-component-review:1.6.0",
+  "title": "User-confirmed small-component image review",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "source",
+    "source_face_count",
+    "min_faces",
+    "auto_noise_max_faces",
+    "user_confirmed",
+    "merge_unselected",
+    "items"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "source": {"type": "string", "minLength": 1},
+    "source_face_count": {"type": "integer", "minimum": 1},
+    "min_faces": {"type": "integer", "minimum": 1},
+    "auto_noise_max_faces": {"type": "integer", "minimum": 0},
+    "user_confirmed": {"const": true},
+    "merge_unselected": {"const": true},
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "fragment_id",
+          "source_min_face_index",
+          "semantic_label",
+          "visual_confidence",
+          "preserve"
+        ],
+        "properties": {
+          "fragment_id": {"type": "integer", "minimum": 1},
+          "source_min_face_index": {"type": "integer", "minimum": 0},
+          "semantic_label": {"type": "string", "minLength": 1},
+          "visual_confidence": {
+            "oneOf": [
+              {"type": "number", "minimum": 0, "maximum": 1},
+              {"enum": ["VERYLOW", "LOW", "MED", "MEDIUM", "HIGH", "UNKNOWN"]}
+            ]
+          },
+          "preserve": {"type": "boolean"}
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": false
+}

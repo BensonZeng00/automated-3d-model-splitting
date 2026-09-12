@@ -1,7 +1,7 @@
 from .domain import (
     AssemblyPlan,
-    BoundaryFairingConfig,
-    BoundaryFairingContext,
+    PlanarArcRetopologyConfig,
+    PlanarArcRetopologyContext,
     CapDecision,
     LoadedProject,
     PartBuildResult,
@@ -12,8 +12,8 @@ from .domain import (
 
 __all__ = [
     "AssemblyPlan",
-    "BoundaryFairingConfig",
-    "BoundaryFairingContext",
+    "PlanarArcRetopologyConfig",
+    "PlanarArcRetopologyContext",
     "CapDecision",
     "LoadedProject",
     "PartBuildResult",
@@ -21,3 +21,4 @@ __all__ = [
     "SplitConfig",
     "ValidationReport",
 ]
+

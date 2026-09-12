@@ -1,6 +1,19 @@
 # Final 3MF Contract
 
-By default, write exactly one final file. Do not write STL, GLB, JSON, Markdown, recursive previews, or diagnostics without the corresponding explicit switch.
+Unresolved assembled fit follows [manual-assembly-fit.md](manual-assembly-fit.md):
+default manual mode exports individually validated meshes with measured fit and
+visual issues recorded in each object's `assembly_fit` annotation and a
+`ASSEMBLY REVIEW` package title. Ask the user to observe and judge printing
+impact, adjusting only if needed. Per-pair intersections below the default
+1% of the corresponding actual cutting volume do not create this label or a
+user warning. Record the frozen denominator in `assembly_cutting_reference`.
+Raw failed assembly checks remain
+false. This overrides assembly-view publication blocking below, never the
+individual geometry, source-material or package-integrity contract.
+
+Apply the default print-tolerance policy in [print-tolerance-and-replay.md](print-tolerance-and-replay.md). Source seams are preserved by default; planar smoothing applies only to explicit `--boundary-shape smooth`. Equivalent surface subdivision and harmless defects up to the configured area are reported as tolerance-accepted, without dropping selected parts. Microscopic closed-shell orientation is advisory as described in that policy.
+
+Deliver one final grouped 3MF. Required small-component/long-strip review and task-owned recovery files are intermediate artifacts; follow [manual-failure-handoff.md](manual-failure-handoff.md). Other previews and diagnostics require the corresponding explicit switch.
 
 ## Recognition and Classification Provenance
 
@@ -22,19 +35,17 @@ Bake the source package's unique build/component instance transform into the ver
 
 Every non-body part uses the same recursive inward extrusion, cap, socket, clearance, and lead-in behavior. Through-like structural measurements are body-selection evidence only and must not create macro partitions, direct cuts, or root separator objects.
 
-Execute recursion as a strict parent-to-child 3MF transition. A parent step must serialize each direct child as an independent colored 3MF, including per-triangle color properties and source filament slots. When the child is later visited in depth-first preorder, reload that exact parent-emitted file as the recursive input; do not extract the child from the most recent cumulative package. Replace exactly one pending subassembly and retain every untouched mesh. When debug output is requested, also serialize and reload the complete cumulative state after each replacement as an audit only. Use the final recursive state as the final package mesh source instead of rebuilding parts in a separate batch.
+Execute recursion as a strict parent-to-child 3MF transition. A parent step must serialize each direct child as an independent colored 3MF, including per-triangle color properties and source filament slots. For Bambu inputs it must also serialize the source-compatible per-triangle `paint_color` token; the object-level extruder remains only a default. When the child is later visited in depth-first preorder, reload that exact parent-emitted file as the recursive input; do not extract the child from the most recent cumulative package. Replace exactly one pending subassembly and retain every untouched mesh. When debug output is requested, also serialize and reload the complete cumulative state after each replacement as an audit only. Use the final recursive state as the final package mesh source instead of rebuilding parts in a separate batch.
 
-Default to a 1.0 mm effective minimum and a measured safe maximum of `min(5 mm, parent thickness - 0.05 mm)`. Permit different boundary-point depths when all bottom points lie on one coherent plane. Use local-offset only when that plane's deepest required distance exceeds the safe maximum. Record measured parent thickness, reserve, preferred/effective minimum, safe maximum, required planar maximum, selected cap mode, and minimum/maximum generated inward travel for every part.
+Default to a 3.0 mm preferred minimum and a measured safe maximum of `min(10 mm, parent thickness - 0.05 mm)`. Permit different boundary-point depths when all bottom points lie on one coherent plane, and place that plane at the deepest position whose minimum and maximum travel remain inside the effective and safe bounds. Use local-offset at the measured safe maximum only when no coherent plane satisfies both bounds. Form the subsurface interface as an outer-large, inner-small taper with an approximately 45-degree slope derived from the actual lateral fit offset. Record measured parent thickness, reserve, preferred/effective minimum, safe maximum, required planar maximum, selected cap mode, minimum/maximum generated inward travel, and target/measured taper angles for every part.
 
-For recursive parents, keep the parent's own outer cap in local-offset mode while allowing matching child sockets to follow each child's bounded cap policy. Prevalidate every direct child, including root-level children and nested leaves, before constructing the parent socket. Carry one source-vertex-keyed `CapDecision` into both builds so the parent socket uses the child's final selected mode, direction field, and actual distance field. Reserve bottom clearance inside the total-travel budget, and record any topology-driven retry with before/after defect-edge counts. Replanning an existing child cap from the parent path is a package-blocking consistency error.
+For recursive parents, preserve the existing parent-contact shell. Prevalidate every direct child and carry one source-vertex-keyed `CapDecision` into both builds so the parent socket uses the child's selected mode, direction field, and actual distance field. Do not force local-offset solely because a part owns children. Replanning a child cap independently from the parent path is a package-blocking consistency error.
 
-Within the 3.0 mm global ceiling, use a 0.40 mm default extra allowance for nested leaf details (2.4 mm total at the default target) to control oblique parent-wall exposure. Record this effective per-part allowance separately from the global ceiling.
+Apply the same measured deepest-safe policy to nested leaf details. All pre-cut fit, floor, and sibling clearances are zero: subtract the exact full-size child, then uniformly scale final inward parts once (default 0.99). By default, subtract final ancestor solids from scaled inserts before seating and retain all thickness, source-surface, topology and material gates. Record `post_fit_difference` separately from the actual scale and any validated seating transform; see [uniform-fit.md](uniform-fit.md). Use `--no-post-fit-parent-difference` only for an explicit diagnostic opt-out.
 
-Cap nested leaf effective fit clearance at 0.10 mm. Record both the pre-cap feature-adaptive clearance and the effective clearance used by the insert and its matching socket.
+Default `--boundary-shape source` preserves the visible source ring. Explicit `smooth` uses the fitted shared seam described in [boundary-smoothing.md](boundary-smoothing.md); record actual displacement and quality checks. Both modes share child/parent source-id correspondence.
 
-Default cut-loop position smoothing uses constrained arc-length fairing with a 1.20 mm physical scale and a 0.075 mm hard displacement limit. Record the selected fairing mode and, for every loop, its feature locks, maximum and RMS displacement, length change, and solver status. Matching parent and insert loops must use the same source-normal field and source-id canonical order.
-
-For curved or multi-loop boundaries, use per-boundary-vertex safe local inward directions. When directions differ within one ring, use a fixed-depth `local-offset` cap instead of claiming a shared flat plane. Record corrected and remaining outward-directed vertex counts; remaining must be zero. Parent sockets must reuse the child's direction map keyed by source vertex id.
+For curved or multi-loop boundaries, use per-boundary-vertex safe local inward directions. Differing directions alone do not require local-offset: first test a coherent plane with varying travel along the safe direction field, and use local-offset only when no coherent plane satisfies the measured bounds. Record corrected and remaining outward-directed vertex counts; remaining must be zero. Parent sockets must reuse the child's direction map keyed by source vertex id.
 
 ## Package
 
@@ -44,7 +55,7 @@ When the input is a Bambu Studio project, retain its `BambuStudio-*` application
 
 Each object annotation must include part id, raw token, resolved color, filament slot, mapping source, resolution status, recognition basis, occluded-paint exclusion, selected processing mode and body evidence, assembly parent/depth, inward cap and depth settings, fit settings, edge diagnostics, and validation level.
 
-Synthetic geometry inherits the owning part's resolved color.
+Synthetic geometry inherits the owning local source boundary's resolved color. This equals the part color for a single-color part. For a multicolor pending subassembly, generated parent-contact walls and caps must follow the incident boundary-face materials rather than the wrapper object's default/root color.
 
 Preserve every source filament color in original zero-based slot order, including unused and duplicate-colored slots. A source-mapped object's `pindex` must equal its resolved `filament_slot_index`, and the color stored at that index must equal the resolved source color. Do not derive palette order from object order. Append only colors produced by explicit overrides or fallback resolution.
 

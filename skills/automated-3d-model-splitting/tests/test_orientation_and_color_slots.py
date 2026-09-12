@@ -18,7 +18,9 @@ from split3mf import common
 
 common.load_core_dependencies()
 
-from split3mf.common import CORE_NS, MATERIAL_NS, trimesh
+from split3mf.common import CORE_NS, MATERIAL_NS, VERSION, trimesh
+from split3mf.inward import finalize_recursive_colored_mesh
+from split3mf.mesh import orient_mesh_faces_consistently
 from split3mf.package_io import export_colored_parts_3mf, validate_colored_parts_3mf
 from split3mf.validation import finalize_large_partition_mesh, validate_mesh_in_memory
 
@@ -33,6 +35,171 @@ def tetrahedron() -> trimesh.Trimesh:
 
 
 class OrientationRepairTests(unittest.TestCase):
+    def test_nested_negative_shell_is_accepted_as_cavity(self) -> None:
+        outer = trimesh.creation.box(extents=(8.0, 8.0, 8.0))
+        cavity = trimesh.creation.box(extents=(2.0, 2.0, 2.0))
+        cavity.invert()
+        mesh = trimesh.util.concatenate((outer, cavity))
+
+        validation = validate_mesh_in_memory(mesh)
+
+        self.assertTrue(validation["watertight"])
+        self.assertTrue(validation["winding_consistent"])
+        self.assertEqual(validation["inward_closed_components"], 0)
+        orientation = validation["closed_component_orientation"]
+        self.assertEqual(orientation["negative_signed_component_count"], 1)
+        self.assertEqual(sorted(orientation["component_containment_depths"]), [0, 1])
+        self.assertTrue(orientation["all_closed_components_outward"])
+
+    def test_outward_orientation_is_checked_per_closed_component(self) -> None:
+        dominant = trimesh.creation.box(extents=(8.0, 8.0, 8.0))
+        fragment = trimesh.creation.box(extents=(0.4, 0.6, 0.8))
+        fragment.apply_translation((0.0, -5.0, -3.0))
+        fragment.invert()
+        mesh = trimesh.util.concatenate((dominant, fragment))
+        vertices_before = np.asarray(mesh.vertices).copy()
+        memberships_before = np.sort(np.asarray(mesh.faces), axis=1)
+
+        before = validate_mesh_in_memory(mesh)
+        self.assertTrue(before["watertight"])
+        self.assertTrue(before["winding_consistent"])
+        self.assertEqual(before["inward_closed_components"], 1)
+
+        record = orient_mesh_faces_consistently(mesh)
+        after = validate_mesh_in_memory(mesh)
+
+        self.assertEqual(record["inverted_closed_component_count"], 1)
+        self.assertEqual(after["inward_closed_components"], 0)
+        self.assertTrue(after["all_closed_components_outward"])
+        np.testing.assert_array_equal(mesh.vertices, vertices_before)
+        np.testing.assert_array_equal(
+            np.sort(mesh.faces, axis=1),
+            memberships_before,
+        )
+
+    def test_recursive_finalizer_protects_thin_source_triangle(self) -> None:
+        vertices = np.asarray(
+            [
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.5, 1e-10, 0.0],
+                [0.0, 0.0, 1.0],
+            ],
+            dtype=np.float64,
+        )
+        faces = np.asarray(
+            [[0, 2, 1], [0, 1, 3], [1, 2, 3], [2, 0, 3]],
+            dtype=np.int64,
+        )
+        mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
+        self.assertLess(np.count_nonzero(mesh.nondegenerate_faces()), 4)
+
+        repaired = finalize_recursive_colored_mesh(
+            mesh,
+            ["8"] * 4,
+            [1] * 4,
+            "8",
+            protected_source_face_count=4,
+        )
+
+        self.assertEqual(len(repaired.faces), 4)
+        self.assertEqual(repaired.metadata["protected_source_face_count"], 4)
+
+    def test_recursive_finalizer_preserves_coordinate_coincident_source_faces(self) -> None:
+        first = tetrahedron()
+        vertices = np.vstack(
+            [np.asarray(first.vertices), np.asarray(first.vertices)]
+        )
+        faces = np.vstack(
+            [np.asarray(first.faces), np.asarray(first.faces) + 4]
+        )
+        mesh = trimesh.Trimesh(
+            vertices=vertices,
+            faces=faces,
+            process=False,
+        )
+
+        repaired = finalize_recursive_colored_mesh(
+            mesh,
+            ["8"] * 8,
+            [1] * 8,
+            "8",
+            protected_source_face_count=8,
+        )
+
+        self.assertEqual(len(repaired.faces), 8)
+        self.assertEqual(len(repaired.vertices), 8)
+        self.assertEqual(len(repaired.metadata["face_color_codes"]), 8)
+
+    def test_recursive_finalizer_selectively_welds_identity_seam_without_dropping_faces(self) -> None:
+        vertices = np.array(
+            [
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+            ],
+            dtype=np.float64,
+        )
+        faces = np.array(
+            [
+                [0, 2, 1],
+                [0, 1, 3],
+                [1, 2, 3],
+                [5, 4, 3],
+            ],
+            dtype=np.int64,
+        )
+        mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
+        self.assertGreater(validate_mesh_in_memory(mesh)["open_edges"], 0)
+
+        repaired = finalize_recursive_colored_mesh(
+            mesh,
+            ["8"] * 4,
+            [1] * 4,
+            "8",
+            protected_source_face_count=4,
+        )
+
+        validation = validate_mesh_in_memory(repaired)
+        self.assertEqual(len(repaired.faces), 4)
+        self.assertEqual(validation["open_edges"], 0)
+        self.assertEqual(validation["over_shared_edges"], 0)
+        self.assertTrue(
+            repaired.metadata["selective_open_boundary_weld"]["accepted"]
+        )
+
+    def test_recursive_hole_fill_inherits_adjacent_material(self) -> None:
+        mesh = trimesh.creation.box(extents=(2.0, 2.0, 2.0))
+        keep = np.asarray(mesh.face_normals[:, 2] < 0.9, dtype=bool)
+        mesh.update_faces(keep)
+        mesh.remove_unreferenced_vertices()
+        source_face_count = int(len(mesh.faces))
+        self.assertEqual(validate_mesh_in_memory(mesh)["open_edges"], 4)
+
+        repaired = finalize_recursive_colored_mesh(
+            mesh,
+            ["8"] * source_face_count,
+            [1] * source_face_count,
+            "1C",
+        )
+
+        after = validate_mesh_in_memory(repaired)
+        self.assertTrue(after["watertight"])
+        self.assertTrue(after["winding_consistent"])
+        self.assertGreater(len(repaired.faces), source_face_count)
+        self.assertEqual(set(repaired.metadata["face_color_codes"]), {"8"})
+        self.assertEqual(
+            repaired.metadata["recursive_finalize_inferred_face_materials"],
+            len(repaired.faces) - source_face_count,
+        )
+        self.assertEqual(
+            repaired.metadata["recursive_finalize_defaulted_face_materials"],
+            0,
+        )
+
     def test_large_partition_finalizer_repairs_winding_without_geometry_changes(self) -> None:
         mesh = tetrahedron()
         mesh.faces[0] = mesh.faces[0][::-1]
@@ -92,6 +259,42 @@ class OrientationRepairTests(unittest.TestCase):
         self.assertEqual(after["open_edges"], 0)
         self.assertEqual(after["inconsistent_shared_edges"], 0)
         self.assertEqual(len(repaired.faces), 6)
+
+    def test_large_partition_finalizer_closes_a_multi_segment_collinear_t_junction(self) -> None:
+        vertices = np.array(
+            [
+                [0.0, 0.0, 0.0],
+                [4.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [1.0, 0.0, 0.0],
+                [2.0, 0.0, 0.0],
+                [3.0, 0.0, 0.0],
+            ],
+            dtype=np.float64,
+        )
+        faces = np.array(
+            [
+                [0, 2, 4],
+                [4, 2, 5],
+                [5, 2, 6],
+                [6, 2, 1],
+                [0, 1, 3],
+                [1, 2, 3],
+                [2, 0, 3],
+            ],
+            dtype=np.int64,
+        )
+        mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
+        self.assertEqual(validate_mesh_in_memory(mesh)["open_edges"], 5)
+
+        repaired = finalize_large_partition_mesh(mesh)
+        after = validate_mesh_in_memory(repaired)
+        self.assertTrue(after["watertight"])
+        self.assertTrue(after["winding_consistent"])
+        self.assertEqual(after["open_edges"], 0)
+        self.assertEqual(after["inconsistent_shared_edges"], 0)
+        self.assertEqual(len(repaired.faces), 10)
 
 
 class SourceColorSlotTests(unittest.TestCase):
@@ -320,7 +523,10 @@ class SourceColorSlotTests(unittest.TestCase):
             for element in root.findall(CORE_NS + "metadata")
         }
         self.assertFalse(summary["bambu_project_compatible"])
-        self.assertEqual(metadata["Application"], "automated-3d-model-splitting 1.3.5")
+        self.assertEqual(
+            metadata["Application"],
+            f"automated-3d-model-splitting {VERSION}",
+        )
         self.assertNotIn("BambuStudio:3mfVersion", metadata)
         self.assertNotIn("Metadata/project_settings.config", entries)
 

@@ -53,11 +53,18 @@ def write_markdown_report(path: Path, report: dict) -> None:
         f"- Triangle count: `{report['source_face_count']}`",
         f"- Minimum faces kept per component: `{report['min_faces']}`",
         f"- Tiny component policy: `{report.get('tiny_component_policy', 'ignore')}`",
+        f"- Auto-noise face threshold: `<= {report.get('tiny_component_auto_noise_max_faces', 100)}`",
+        f"- Auto-merged noise regions: `{report.get('auto_noise_component_count', 0)}`",
+        f"- Semantic-preserved tiny components: `{report.get('semantic_preserved_tiny_component_count', 0)}`",
         f"- Merged tiny components: `{report.get('merged_tiny_component_count', 0)}`",
+        f"- Interface retopology: `{report.get('interface_retopology_mode', 'planar-arc-retopology')}`",
+        f"- Equal arc samples: `{report.get('boundary_target_samples', 384)}`",
+        f"- Cyclic binomial passes: `{report.get('boundary_smooth_passes', 28)}`",
+        f"- Retopology band: `{report.get('boundary_retopology_band_mm', 3.0)} mm`",
         (
-            f"- Boundary fairing: `{report.get('boundary_fairing_mode', 'taubin')}`, "
-            f"radius `{report.get('boundary_fairing_radius_mm', 0.0)} mm`, "
-            f"maximum displacement `{report.get('boundary_max_displacement_mm', 0.0)} mm`"
+            f"- Interface slope: target `{report.get('boundary_target_slope_deg', 45.0)}°`, "
+            f"allowed `{report.get('boundary_min_slope_deg', 30.0)}–"
+            f"{report.get('boundary_max_slope_deg', 75.0)}°`"
         ),
         f"- Requested inward cap depth: `{report.get('requested_max_extension_mm', report['max_extension_mm'])} mm`",
         f"- Minimum flat-bottom depth: `{report.get('minimum_flat_bottom_depth_mm', MINIMUM_INWARD_DEPTH_MM)} mm`",
@@ -80,6 +87,7 @@ def write_markdown_report(path: Path, report: dict) -> None:
         f"- Visual semantics source: `{report.get('visual_semantics_source') or 'none'}`",
         f"- Visual semantic min confidence: `{report.get('visual_semantic_min_confidence', 'MED')}`",
         f"- Body part: `{report.get('body_part_id', 'none')}`",
+        f"- Explicit multi-material body merge: `{report.get('explicit_body_merge') or 'none'}`",
         f"- Exported parts: `{len(report['parts'])}`",
         f"- Recursive layer stage output: `{report.get('recursive_layer_stage_output_dir') or 'none'}`",
         f"- Ignored tiny components: `{len(report['ignored_tiny_components'])}`",
@@ -272,6 +280,19 @@ def write_markdown_report(path: Path, report: dict) -> None:
                 f"- P{int(record['part_index']):02d} -> {parent_text}: `{status}`, "
                 f"alignment_dot=`{float(record.get('alignment_dot', 0.0)):.3f}`, threshold=`{record.get('threshold')}`"
             )
+    lines.extend(["", "## Semantic-Preserved Tiny Components", ""])
+    semantic_preserved = report.get("semantic_preserved_tiny_components", [])
+    if not semantic_preserved:
+        lines.append("- None")
+    else:
+        for item in semantic_preserved:
+            lines.append(
+                f"- Fragment `{int(item['fragment_id'])}` `{item['color_code']}`: "
+                f"`{int(item['faces'])}` faces, score=`{float(item['semantic_keep_score']):.3f}`, "
+                f"loops=`{int(item['boundary_loop_count'])}`, "
+                f"projected span=`{float(item['projected_max_span_pixels']):.2f}px`, "
+                f"decision=`{item['semantic_decision']}`"
+            )
     lines.extend(["", "## Merged Tiny Components", ""])
     merged_tiny = report.get("merged_tiny_components", [])
     if not merged_tiny:
@@ -303,3 +324,4 @@ def write_markdown_report(path: Path, report: dict) -> None:
                 f"- `{color}`: `{len(items)}` components, `{total_faces}` faces, `{total_area:.6f} mm^2` total area"
             )
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+

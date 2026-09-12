@@ -28,6 +28,10 @@
     "parent_relations": {
       "type": "array",
       "items": {"$ref": "#/$defs/relation"}
+    },
+    "interface_retreats": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/interfaceRetreat"}
     }
   },
   "additionalProperties": false,
@@ -48,9 +52,44 @@
           "minItems": 3,
           "maxItems": 3
         },
-        "force_parent_direction": {"type": "boolean"}
+        "force_parent_direction": {"type": "boolean"},
+        "guided_internal_cut": {"$ref": "#/$defs/guidedInternalCut"}
       },
       "additionalProperties": true
+    },
+    "guidedInternalCut": {
+      "type": "object",
+      "properties": {
+        "entry_direction": {
+          "type": "array",
+          "items": {"type": "number"},
+          "minItems": 3,
+          "maxItems": 3
+        },
+        "target_plane_normal": {
+          "type": "array",
+          "items": {"type": "number"},
+          "minItems": 3,
+          "maxItems": 3
+        },
+        "target_plane_point_mm": {
+          "type": "array",
+          "items": {"type": "number"},
+          "minItems": 3,
+          "maxItems": 3
+        },
+        "minimum_depth_mm": {"type": "number", "exclusiveMinimum": 0},
+        "maximum_depth_mm": {"type": "number", "exclusiveMinimum": 0},
+        "entry_inset_mm": {"type": "number", "minimum": 0},
+        "maximum_parallel_shift_mm": {"type": "number", "minimum": 0},
+        "require_planar": {"type": "boolean"}
+      },
+      "required": [
+        "entry_direction",
+        "target_plane_normal",
+        "target_plane_point_mm"
+      ],
+      "additionalProperties": false
     },
     "relation": {
       "type": "object",
@@ -65,6 +104,37 @@
       },
       "required": ["child", "parent"],
       "additionalProperties": true
+    },
+    "interfaceRetreat": {
+      "type": "object",
+      "properties": {
+        "child": {"$ref": "#/$defs/partId"},
+        "parent": {"$ref": "#/$defs/partId"},
+        "seed_point_mm": {
+          "type": "array",
+          "items": {"type": "number"},
+          "minItems": 3,
+          "maxItems": 3
+        },
+        "seed_radius_mm": {"type": "number", "exclusiveMinimum": 0},
+        "retreat_distance_mm": {"type": "number", "exclusiveMinimum": 0},
+        "maximum_parent_face_fraction": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "exclusiveMaximum": 1
+        },
+        "confidence": {"$ref": "#/$defs/confidence"},
+        "reason": {"type": "string"},
+        "source_views": {"type": "array", "items": {"type": "string"}},
+        "apply": {"type": "boolean"}
+      },
+      "required": [
+        "child",
+        "parent",
+        "seed_point_mm",
+        "retreat_distance_mm"
+      ],
+      "additionalProperties": false
     }
   }
 }

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+from dataclasses import replace
+
 from .common import *
 from .project import *
 from .recognition import *
@@ -11,7 +14,21 @@ from .validation import *
 from .inward import *
 from .debug_export import *
 from .reporting import *
-from .domain import BoundaryFairingConfig, BoundaryFairingContext, SplitConfig
+from .small_component_review import *
+from .domain import PlanarArcRetopologyConfig, PlanarArcRetopologyContext, SplitConfig
+from .recursive_preflight import FullTreePreflightError, FullTreePreflightService
+from .explicit_merge import merge_body_components, parse_part_group
+from .interface_retreat import apply_visual_interface_retreats
+from .uniform_fit import scale_finished_insert
+from .guided_internal_cut import GuidedInternalCutSpec
+from .boundary_review import BoundaryReviewService, owners_from_components, apply_component_ownership
+from .stage_cache import (
+    RecursiveStageCache,
+    fingerprint_payload,
+    implementation_fingerprint,
+    normalized_run_arguments,
+    sha256_file,
+)
 
 
 class SplitPipeline:
@@ -30,6 +47,7 @@ class SplitPipeline:
         self.mesh_builder = PartMeshBuilder()
         self.writer = ThreeMFWriter()
         self.validator = ValidationService()
+        self.full_tree_preflight = FullTreePreflightService()
 
     def run(self) -> None:
         args = self.config.namespace
@@ -38,7 +56,7 @@ class SplitPipeline:
         requested_max_extension_mm = float(args.max_extension_mm)
         args.max_extension_mm = max(
             requested_max_extension_mm,
-            DEFAULT_EFFECTIVE_MINIMUM_INWARD_DEPTH_MM,
+            0.4,
         )
         maximum_planar_travel_mm = min(
             max(float(args.max_planar_travel_mm), args.max_extension_mm),
@@ -57,12 +75,12 @@ class SplitPipeline:
             "preferred_minimum_inward_depth_mm": float(args.max_extension_mm),
             "global_safety_ceiling_mm": maximum_planar_travel_mm,
             "parent_thickness_clearance_mm": PARENT_THICKNESS_CLEARANCE_MM,
-            "parent_thickness_rule": "min(global ceiling, 5 mm, parent thickness - 0.05 mm)",
+            "parent_thickness_rule": "min(global ceiling, 10 mm, parent thickness - 0.05 mm)",
             "requested_planar_extra_limit_mm": requested_planar_extra_limit_mm,
             "effective_planar_extra_limit_mm": float(args.planar_extra_limit_mm),
         }
         insert_shrink_mm, socket_overcut_mm = clearance_offsets(args.clearance_mode, args.fit_clearance_mm)
-        top_edge_clearance_mm = min(insert_shrink_mm, 0.05)
+        top_edge_clearance_mm = visible_top_edge_clearance(insert_shrink_mm)
         force_flat_part_indices = parse_part_index_tokens(args.force_flat_parts)
         try:
             part_mode_overrides = parse_part_mode_overrides(args.part_mode_overrides)
@@ -80,6 +98,11 @@ class SplitPipeline:
         )
         try:
             prepare_output_3mf(output_path, args.overwrite)
+            debug_root = None
+            if args.debug_recursive_3mf:
+                debug_root = prepare_debug_directory(
+                    output_path.with_name(output_path.stem + "_debug"), args.overwrite)
+                runtime_log("运行", "debug_directory_reserved", "已分配独立调试目录", path=str(debug_root))
             vertices, faces, colors, project_settings = self.reader.read(
                 input_path,
                 model_entry=args.model_entry,
@@ -96,9 +119,21 @@ class SplitPipeline:
             source_unit=project_settings.get("_source_unit", "millimeter"),
             selected_model_entry=project_settings.get("_selected_model_entry"),
         )
-        boundary_fairing = BoundaryFairingContext(
-            config=BoundaryFairingConfig.from_namespace(args),
-            source_surface_normals=mesh_vertex_inward_normals(vertices, faces),
+        retopology_failure_sink = None
+        if bool(args.diagnostic_preview):
+            failure_output_dir = output_path.parent / (
+                output_path.stem + "_diagnostics"
+            )
+
+            def retopology_failure_sink(payload: dict) -> None:
+                export_retopology_failure_diagnostics(
+                    payload,
+                    failure_output_dir,
+                )
+
+        interface_retopology = PlanarArcRetopologyContext(
+            config=PlanarArcRetopologyConfig.from_namespace(args),
+            failure_sink=retopology_failure_sink,
         )
         new_color_info, new_color_order = build_color_info_map(
             project_settings,
@@ -106,6 +141,30 @@ class SplitPipeline:
             Path(args.color_map_json).expanduser() if args.color_map_json else None,
         )
         COLOR_CATALOG.replace(new_color_info, new_color_order)
+        boundary_review = BoundaryReviewService(
+            output_path.with_name(output_path.stem + "_boundary_review"),
+            getattr(args, "boundary_review_json", None),
+            preserve_source_branches=(getattr(args, "boundary_shape", "source") == "source"),
+        )
+        interface_retopology = replace(interface_retopology,
+            curve_review_sink=boundary_review.review_curve)
+        source_owners, _ = material_connectivity_labels(colors)
+        boundary_display_colors = {
+            owner: COLOR_INFO.get(color, {}).get("hex", "#aaaaaa")
+            for owner, color in zip(source_owners, colors)
+        }
+        clarified_owners, clarity_record = boundary_review.prepare(
+            vertices, faces, source_owners, context="input",
+            display_colors=boundary_display_colors,
+        )
+        ownership_changed = np.flatnonzero(np.asarray(source_owners) != clarified_owners)
+        if clarity_record.get('status') == 'user_confirmed' and clarity_record.get('preserve_visible_boundary'):
+            interface_retopology = replace(interface_retopology,
+                config=replace(interface_retopology.config, preserve_confirmed_seam=True))
+            runtime_log('分界', 'confirmed_seam_locked', '已按用户确认锁定可见分界；仅生成内部配合面')
+        if getattr(args, "boundary_check_only", False):
+            print("boundary_check=" + json.dumps(clarity_record, ensure_ascii=False), flush=True)
+            return
         source_filament_colors = project_settings.get("filament_colour") or []
         if not isinstance(source_filament_colors, list):
             source_filament_colors = []
@@ -140,6 +199,7 @@ class SplitPipeline:
                 colors,
                 visible_faces,
                 body_color_override=args.body_color,
+                faces=faces,
             )
         else:
             visible_faces = np.ones(len(faces), dtype=bool)
@@ -160,6 +220,8 @@ class SplitPipeline:
                 "base_color_source": "not_applied",
                 "reassigned_occluded_faces": 0,
                 "already_base_occluded_faces": 0,
+                "protected_enclosed_occluded_faces": 0,
+                "protected_enclosed_by_source_token": [],
                 "reassigned_by_source_token": [],
             }
         runtime_log(
@@ -177,6 +239,10 @@ class SplitPipeline:
             flush=True,
         )
         recognition_colors, material_connectivity = material_connectivity_labels(recognition_token_colors)
+        if len(ownership_changed):
+            recognition_colors = np.asarray(recognition_colors, dtype=object)
+            recognition_colors[ownership_changed] = clarified_owners[ownership_changed]
+            recognition_colors = recognition_colors.tolist()
         if material_connectivity["merged_material_groups"]:
             progress(
                 "颜色",
@@ -191,7 +257,124 @@ class SplitPipeline:
             minimum_faces=int(args.min_faces),
         )
         groups = connected_components_by_color(faces, recognition_colors)
-        if args.tiny_component_policy == "merge":
+        from .micro_regions import merge_micro_regions
+        from .micro_openings import seal_micro_openings
+        all_components, _ = summarize_components(
+            vertices, faces, recognition_colors, groups, 1, display_colors=recognition_token_colors)
+        all_components, micro_region_records = merge_micro_regions(vertices, faces, all_components)
+        groups = [component.global_faces for component in all_components]
+        micro_policy_changed = any(item['action'] == 'merged' for item in micro_region_records)
+        if micro_region_records:
+            runtime_log("识别", "micro_region_merge", "已处理最大跨度不超过 2 mm 的微小区域", records=micro_region_records)
+        tiny_component_review = None
+        auto_noise_component_count = 0
+        if args.tiny_component_policy == "semantic":
+            normalized_groups = [np.asarray(group, dtype=np.int64) for group in groups]
+            from .region_review import partition_review_groups
+            _, auto_noise_groups, tiny_groups = partition_review_groups(
+                vertices, faces, normalized_groups, args.min_faces,
+                args.tiny_component_auto_noise_max_faces, visible_faces)
+            auto_noise_component_count = int(len(auto_noise_groups))
+            review_records = classify_tiny_groups_semantically(
+                vertices=vertices,
+                faces=faces,
+                connectivity_colors=recognition_colors,
+                display_colors=recognition_token_colors,
+                all_groups=normalized_groups,
+                tiny_groups=tiny_groups,
+                min_faces=args.min_faces,
+                visible_faces=visible_faces,
+                view_count=args.exterior_view_count,
+                depth_map_resolution=args.exterior_depth_map_resolution,
+            )
+            if tiny_groups and not args.tiny_component_review_json:
+                review_dir = (
+                    Path(args.tiny_component_review_dir).expanduser()
+                    if args.tiny_component_review_dir
+                    else default_tiny_component_review_dir(input_path)
+                )
+                tiny_component_review = build_tiny_component_review(
+                    input_path=input_path,
+                    review_dir=review_dir,
+                    vertices=vertices,
+                    faces=faces,
+                    connectivity_colors=recognition_colors,
+                    display_colors=recognition_token_colors,
+                    groups=normalized_groups,
+                    min_faces=args.min_faces,
+                    auto_noise_max_faces=args.tiny_component_auto_noise_max_faces,
+                    visible_faces=visible_faces,
+                    view_count=args.exterior_view_count,
+                    depth_map_resolution=args.exterior_depth_map_resolution,
+                    image_resolution=args.tiny_component_review_resolution,
+                )
+                print(
+                    "tiny_component_review_required="
+                    + json.dumps(tiny_component_review, ensure_ascii=False, sort_keys=True),
+                    flush=True,
+                )
+                progress(
+                    "识别",
+                    "检测到小区域或长细条噪声候选；已生成多视图，请询问用户选择保留项",
+                    candidates=len(tiny_groups),
+                    auto_noise=len(auto_noise_groups),
+                    manifest=tiny_component_review["manifest_path"],
+                    decisions=tiny_component_review["decision_path"],
+                )
+                raise SystemExit(4)
+            if tiny_groups:
+                review_json_path = Path(args.tiny_component_review_json).expanduser()
+                try:
+                    review_decisions = load_confirmed_tiny_component_decisions(
+                        review_json_path,
+                        input_path=input_path,
+                        source_face_count=len(faces),
+                        min_faces=args.min_faces,
+                        auto_noise_max_faces=args.tiny_component_auto_noise_max_faces,
+                        expected_records=review_records,
+                    )
+                except (OSError, ValueError) as exc:
+                    parser.error(str(exc))
+                tiny_component_review = {
+                    "status": "user_confirmed",
+                    "source": str(review_json_path),
+                    "candidate_count": int(len(tiny_groups)),
+                    "auto_noise_count": int(len(auto_noise_groups)),
+                    "preserved_count": int(
+                        sum(bool(item["preserve"]) for item in review_decisions.values())
+                    ),
+                    "merged_count": int(
+                        sum(not bool(item["preserve"]) for item in review_decisions.values())
+                    ),
+                }
+            else:
+                review_decisions = {}
+                tiny_component_review = {
+                    "status": "not_required",
+                    "candidate_count": 0,
+                    "auto_noise_count": int(len(auto_noise_groups)),
+                    "preserved_count": 0,
+                    "merged_count": 0,
+                }
+            (
+                components,
+                ignored,
+                merged_tiny_components,
+                semantic_preserved_tiny_components,
+            ) = merge_tiny_groups_with_user_review(
+                vertices,
+                faces,
+                recognition_colors,
+                groups,
+                args.min_faces,
+                review_decisions,
+                auto_noise_max_faces=args.tiny_component_auto_noise_max_faces,
+                display_colors=recognition_token_colors,
+                visible_faces=visible_faces,
+                view_count=args.exterior_view_count,
+                depth_map_resolution=args.exterior_depth_map_resolution,
+            )
+        elif args.tiny_component_policy == "merge":
             components, ignored, merged_tiny_components = merge_tiny_groups_into_components(
                 vertices,
                 faces,
@@ -200,6 +383,7 @@ class SplitPipeline:
                 args.min_faces,
                 display_colors=recognition_token_colors,
             )
+            semantic_preserved_tiny_components = []
         else:
             components, ignored = summarize_components(
                 vertices,
@@ -210,12 +394,57 @@ class SplitPipeline:
                 display_colors=recognition_token_colors,
             )
             merged_tiny_components = []
+            semantic_preserved_tiny_components = []
         if not components:
             raise SystemExit(f"No effective components found with --min-faces={args.min_faces}")
+        source_face_count_before_caps = len(faces)
+        faces, colors, components, micro_opening_records = seal_micro_openings(
+            vertices, faces, colors, components)
+        if len(faces) > source_face_count_before_caps:
+            recognition_token_colors = list(recognition_token_colors) + colors[source_face_count_before_caps:]
+            micro_policy_changed = True
+        if micro_opening_records:
+            runtime_log("修复", "micro_opening_merge", "已审计最大跨度不超过 2 mm 的网格小口", records=micro_opening_records)
+        component_owners = owners_from_components(len(faces), components)
+        checked_component_owners, _ = boundary_review.prepare(
+            vertices, faces, component_owners, context="recognized_root")
+        component_ownership_changed = not np.array_equal(component_owners, checked_component_owners)
+        if component_ownership_changed:
+            components = apply_component_ownership(vertices, faces, components, checked_component_owners)
         recursive_face_colors = component_owned_face_colors(
             recognition_token_colors,
             components,
         )
+        if len(ownership_changed) or component_ownership_changed or micro_policy_changed:
+            # Ownership is a separate field: approval must never repaint source faces.
+            recursive_face_colors = list(colors)
+        explicit_body_merge = None
+        explicit_body_index = None
+        if args.merge_body_parts:
+            try:
+                requested_merge_indices = parse_part_group(args.merge_body_parts)
+                merge_result = merge_body_components(
+                    vertices,
+                    faces,
+                    components,
+                    requested_merge_indices,
+                )
+            except ValueError as exc:
+                parser.error(str(exc))
+            components = merge_result.components
+            explicit_body_index = int(merge_result.body_index)
+            explicit_body_merge = merge_result.record
+            runtime_log(
+                "主体",
+                "explicit_body_merge_done",
+                "已将指定识别部件合并为保留逐面的多材料主体",
+                requested_parts=explicit_body_merge[
+                    "requested_original_part_indices"
+                ],
+                effective_body_index=explicit_body_index,
+                effective_components=int(len(components)),
+                per_face_materials_preserved=True,
+            )
         runtime_log(
             "识别",
             "component_connectivity_done",
@@ -223,7 +452,28 @@ class SplitPipeline:
             raw_groups=int(len(groups)),
             effective_components=int(len(components)),
             merged_tiny_components=int(len(merged_tiny_components)),
+            semantic_preserved_tiny_components=int(len(semantic_preserved_tiny_components)),
+            auto_noise_components=int(auto_noise_component_count),
         )
+        if args.tiny_component_policy == "semantic":
+            print(
+                "tiny_component_review="
+                + json.dumps(
+                    {
+                        "threshold_faces": int(args.min_faces),
+                        "auto_noise_max_faces": int(args.tiny_component_auto_noise_max_faces),
+                        "review": tiny_component_review,
+                        "auto_noise_count": int(auto_noise_component_count),
+                        "preserved_count": int(len(semantic_preserved_tiny_components)),
+                        "merged_count": int(len(merged_tiny_components)),
+                        "preserved": semantic_preserved_tiny_components,
+                        "merged": merged_tiny_components,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+                flush=True,
+            )
         model_center = vertices.mean(axis=0)
         runtime_log(
             "主体",
@@ -247,7 +497,7 @@ class SplitPipeline:
             components,
             args.body_strategy,
             args.body_color,
-            args.body_index,
+            explicit_body_index if explicit_body_index is not None else args.body_index,
             excluded_auto_indices=excluded_auto_body_indices,
             auto_selection_evidence=body_separator_evidence,
         )
@@ -272,8 +522,46 @@ class SplitPipeline:
         )
         visual_semantics = load_visual_semantics(Path(args.visual_semantics_json).expanduser() if args.visual_semantics_json else None)
         visual_semantic_min_confidence = confidence_score(args.visual_semantic_min_confidence, default=0.65)
+        components, interface_retreat_records = apply_visual_interface_retreats(
+            vertices,
+            faces,
+            components,
+            visual_semantics.get("interface_retreats", []),
+            visual_semantic_min_confidence,
+        )
+        if interface_retreat_records["applied"]:
+            body_component = components[int(body_index) - 1]
+            body_separator_evidence = body_selection_separator_evidence(
+                vertices=vertices,
+                faces=faces,
+                components=components,
+                model_center=model_center,
+                min_faces=args.min_faces,
+            )
+            runtime_log(
+                "切面内收",
+                "interface_retreat_done",
+                "已按视觉语义将局部薄边表皮转移到子件，源材料保持不变",
+                applied=interface_retreat_records["applied"],
+                rejected=interface_retreat_records["rejected"],
+            )
         recognition = component_recognition_records(vertices, faces, components, body_component, colors)
         recognition = annotate_recognition_with_visual_semantics(recognition, visual_semantics.get("parts", {}))
+        confirmed_tiny_labels = {
+            int(record["source_min_face_index"]): record
+            for record in semantic_preserved_tiny_components
+        }
+        for component_index, component in enumerate(components, start=1):
+            source_min_face_index = int(np.min(component.global_faces))
+            confirmed_tiny = confirmed_tiny_labels.get(source_min_face_index)
+            if confirmed_tiny is None:
+                continue
+            record = recognition[component_index - 1]
+            record["tiny_component_review_label"] = str(confirmed_tiny["semantic_label"])
+            record["tiny_component_review_confidence"] = str(
+                confirmed_tiny.get("visual_confidence", "UNKNOWN")
+            )
+            record["tiny_component_review_user_confirmed"] = True
         invalid_mode_override_indices = sorted(index for index in part_mode_overrides if index < 1 or index > len(components))
         if invalid_mode_override_indices:
             parser.error(
@@ -415,6 +703,33 @@ class SplitPipeline:
                     args.min_assembly_shared_edges,
                 )
                 cycle_breaks = cycle_breaks + recursive_cycle_breaks
+                (
+                    assembly_parents,
+                    assembly_children,
+                    assembly_records,
+                    mixed_parent_loop_groups,
+                ) = group_mixed_parent_loop_children(
+                    components,
+                    component_adjacency,
+                    assembly_parents,
+                    assembly_records,
+                    boundary_loop_neighbors,
+                )
+                mixed_boundary_reparents = (
+                    mixed_boundary_reparents + mixed_parent_loop_groups
+                )
+                runtime_log(
+                    "装配诊断",
+                    "mixed_parent_loop_grouping_done",
+                    "混合父边界环子装配分组完成",
+                    parent_map={
+                        str(int(child_index)): (
+                            None if parent_index is None else int(parent_index)
+                        )
+                        for child_index, parent_index in sorted(assembly_parents.items())
+                    },
+                    grouping_changes=mixed_parent_loop_groups,
+                )
         else:
             assembly_parents = {
                 index: (None if index == body_index else body_index)
@@ -492,13 +807,13 @@ class SplitPipeline:
             if not is_nested_leaf:
                 continue
             original_clearance = float(effective_fit_clearance_by_part[nested_leaf_index])
-            nested_clearance = min(original_clearance, 0.10)
+            nested_clearance = min(original_clearance, 0.40)
             effective_fit_clearance_by_part[nested_leaf_index] = nested_clearance
             for clearance_record in clearance_records:
                 if int(clearance_record["part_index"]) == int(nested_leaf_index):
                     clearance_record["pre_nested_detail_clearance_mm"] = original_clearance
                     clearance_record["effective_fit_clearance_mm"] = nested_clearance
-                    clearance_record["nested_detail_clearance_cap_mm"] = 0.10
+                    clearance_record["nested_detail_clearance_cap_mm"] = 0.40
                     clearance_record["reason"] = (
                         "nested_detail_oblique_wall_exposure_cap"
                         if nested_clearance < original_clearance - 1e-12
@@ -529,17 +844,19 @@ class SplitPipeline:
             inward_override_records.append(override_record)
 
         semantic_direction_overrides = {"applied": [], "rejected": []}
+        guided_internal_cuts_by_part: dict[int, GuidedInternalCutSpec] = {}
         for part_index, semantic in sorted(visual_semantics.get("parts", {}).items()):
             part_index = int(part_index)
             requested_vector = semantic.get("force_inward_vector")
             force_parent = bool(semantic.get("force_parent_direction", False))
+            guided_mapping = semantic.get("guided_internal_cut")
             confidence = float(semantic.get("confidence_score", 0.0))
             rejection = {
                 "part_index": part_index,
                 "confidence": semantic.get("confidence", "UNKNOWN"),
                 "confidence_score": confidence,
             }
-            if requested_vector is None and not force_parent:
+            if requested_vector is None and not force_parent and guided_mapping is None:
                 continue
             if confidence < visual_semantic_min_confidence:
                 rejection["reject_reason"] = "semantic_confidence_below_threshold"
@@ -550,7 +867,27 @@ class SplitPipeline:
                 semantic_direction_overrides["rejected"].append(rejection)
                 continue
             direction_source = "force_inward_vector"
-            if requested_vector is not None:
+            if guided_mapping is not None:
+                try:
+                    guided_spec = GuidedInternalCutSpec.from_mapping(
+                        guided_mapping
+                    )
+                except (TypeError, ValueError) as exc:
+                    rejection["reject_reason"] = "invalid_guided_internal_cut"
+                    rejection["error"] = str(exc)
+                    semantic_direction_overrides["rejected"].append(rejection)
+                    continue
+                parent_index = assembly_parents.get(part_index)
+                if parent_index is None:
+                    rejection["reject_reason"] = (
+                        "guided_internal_cut_without_parent"
+                    )
+                    semantic_direction_overrides["rejected"].append(rejection)
+                    continue
+                guided_internal_cuts_by_part[part_index] = guided_spec
+                direction = guided_spec.entry_direction.copy()
+                direction_source = "guided_internal_cut"
+            elif requested_vector is not None:
                 try:
                     direction = np.asarray(requested_vector, dtype=np.float64)
                 except (TypeError, ValueError):
@@ -643,14 +980,18 @@ class SplitPipeline:
                     model_center=model_center,
                     boundary_neighbor_lookup=boundary_neighbor_lookup,
                     inward_overrides=inward_overrides,
+                    guided_internal_cuts_by_part=guided_internal_cuts_by_part,
                     effective_cap_mode=effective_cap_mode,
                     effective_planar_extra_limit=effective_planar_extra_limit,
                     fit_clearance_by_part=effective_fit_clearance_by_part,
+                    boundary_reconciliation_tolerance_mm=args.fit_clearance_mm,
                     clearance_mode=args.clearance_mode,
-                    boundary_fairing=boundary_fairing,
+                    interface_retopology=interface_retopology,
                     max_extension_mm=args.max_extension_mm,
                     flat_clearance_mm=args.flat_clearance_mm,
                     bottom_clearance_mm=args.bottom_clearance_mm,
+                    lead_in_mm=args.lead_in_mm,
+                    interface_geometry=args.interface_geometry,
                 )
             return layer_child_context_cache[parent_index]
 
@@ -674,6 +1015,43 @@ class SplitPipeline:
                     ref_with_mode["processing_mode"] = "inward"
                     refs.append(ref_with_mode)
             return refs
+
+        full_tree_preflight_record = {
+            "status": "SKIPPED",
+            "reason": "disabled_or_non_recursive",
+        }
+        if bool(args.full_tree_preflight) and recursive_assembly_enabled:
+            runtime_log(
+                "递归预检",
+                "full_tree_preflight_start",
+                "开始在首个大布尔前检查整棵装配树",
+                parent_count=int(len(recursive_minimal_layers)),
+            )
+            try:
+                full_tree_preflight_record = self.full_tree_preflight.run(
+                    recursive_minimal_layers,
+                    layer_child_context,
+                ).as_record()
+            except FullTreePreflightError as exc:
+                full_tree_preflight_record = exc.report.as_record()
+                print(
+                    "full_tree_preflight="
+                    + json.dumps(full_tree_preflight_record, ensure_ascii=False),
+                    file=sys.stderr,
+                    flush=True,
+                )
+                raise SystemExit(3)
+            runtime_log(
+                "递归预检",
+                "full_tree_preflight_done",
+                "整棵装配树的接口安全预检完成",
+                interface_count=int(
+                    full_tree_preflight_record.get("interface_count", 0)
+                ),
+                elapsed_seconds=float(
+                    full_tree_preflight_record.get("elapsed_seconds", 0.0)
+                ),
+            )
 
         component_centers = {
             index: component.center
@@ -713,8 +1091,13 @@ class SplitPipeline:
             ),
             "min_faces": args.min_faces,
             "tiny_component_policy": args.tiny_component_policy,
+            "tiny_component_auto_noise_max_faces": args.tiny_component_auto_noise_max_faces,
+            "auto_noise_component_count": auto_noise_component_count,
+            "tiny_component_review": tiny_component_review,
             "merged_tiny_component_count": len(merged_tiny_components),
             "merged_tiny_components": merged_tiny_components,
+            "semantic_preserved_tiny_component_count": len(semantic_preserved_tiny_components),
+            "semantic_preserved_tiny_components": semantic_preserved_tiny_components,
             "material_connectivity": material_connectivity,
             "requested_max_extension_mm": requested_max_extension_mm,
             "minimum_flat_bottom_depth_mm": MINIMUM_INWARD_DEPTH_MM,
@@ -742,17 +1125,17 @@ class SplitPipeline:
             "insert_shrink_mm": insert_shrink_mm,
             "socket_overcut_mm": socket_overcut_mm,
             "top_edge_clearance_mm": top_edge_clearance_mm,
-            "boundary_fairing_mode": args.boundary_fairing_mode,
-            "boundary_fairing_radius_mm": args.boundary_fairing_radius_mm,
-            "boundary_max_displacement_mm": args.boundary_max_displacement_mm,
-            "boundary_feature_angle_deg": args.boundary_feature_angle_deg,
-            "boundary_fidelity_weight": args.boundary_fidelity_weight,
-            "legacy_taubin_smooth_iterations": args.smooth_iterations,
-            "legacy_taubin_lambda_factor": args.lambda_factor,
-            "legacy_taubin_mu_factor": args.mu_factor,
+            "interface_retopology_mode": "planar-arc-retopology",
+            "boundary_target_samples": args.boundary_target_samples,
+            "boundary_smooth_passes": args.boundary_smooth_passes,
+            "boundary_retopology_band_mm": args.boundary_retopology_band_mm,
+            "boundary_target_slope_deg": interface_retopology.config.target_slope_degrees,
+            "boundary_min_slope_deg": interface_retopology.config.minimum_slope_degrees,
+            "boundary_max_slope_deg": interface_retopology.config.maximum_slope_degrees,
             "body_strategy": args.body_strategy,
             "body_color": args.body_color,
             "body_index": args.body_index,
+            "explicit_body_merge": explicit_body_merge,
             "selected_body_index": body_index_for_overrides,
             "automatic_body_excluded_separator_indices": sorted(excluded_auto_body_indices),
             "body_selection_separator_evidence": [
@@ -764,6 +1147,13 @@ class SplitPipeline:
             "min_assembly_shared_edges": args.min_assembly_shared_edges,
             "assembly_direction_override_dot": args.assembly_direction_override_dot,
             "semantic_direction_overrides": semantic_direction_overrides,
+            "guided_internal_cuts": [
+                {
+                    "part_index": int(index),
+                    **spec.as_record(),
+                }
+                for index, spec in sorted(guided_internal_cuts_by_part.items())
+            ],
             "clearance_profile": args.clearance_profile,
             "clearance_records": clearance_records,
             "output_layout": args.output_layout,
@@ -775,6 +1165,7 @@ class SplitPipeline:
                 for index in sorted(visual_semantics.get("parts", {}))
             ],
             "visual_semantic_parent_overrides": visual_semantic_parent_overrides,
+            "visual_interface_retreats": interface_retreat_records,
             "inward_direction_overrides": inward_override_records,
             "mixed_boundary_reparents": mixed_boundary_reparents,
             "recursive_minimal_reparents": recursive_minimal_reparents,
@@ -791,6 +1182,7 @@ class SplitPipeline:
                 for (left, right), record in sorted(component_adjacency.items())
             ],
             "assembly_tree": assembly_records,
+            "full_tree_preflight": full_tree_preflight_record,
             "project_filament_colours": project_settings.get("filament_colour", []),
             "color_info": COLOR_INFO,
             "recognition": recognition,
@@ -798,19 +1190,85 @@ class SplitPipeline:
             "body_part_ids": [],
             "parts": [],
             "ignored_tiny_components": ignored,
+            "micro_regions": micro_region_records,
+            "micro_openings": micro_opening_records,
         }
-        debug_root = None
-        if args.debug_recursive_3mf:
-            debug_root = output_path.with_name(output_path.stem + "_debug")
-            try:
-                prepare_debug_directory(debug_root, args.overwrite)
-            except ValueError as exc:
-                parser.error(str(exc))
+        if args.debug_recursive_steps is not None:
+            if not args.debug_recursive_3mf:
+                parser.error("--debug-recursive-steps requires --debug-recursive-3mf")
+            if int(args.debug_recursive_steps) <= 0:
+                parser.error("--debug-recursive-steps must be positive")
+        recursive_execution_steps = list(recursive_minimal_layers)
+        partial_recursive_debug = args.debug_recursive_steps is not None
+        if partial_recursive_debug:
+            recursive_execution_steps = recursive_execution_steps[
+                : int(args.debug_recursive_steps)
+            ]
+        source_artifact_sha256 = sha256_file(input_path)
+        component_identity = []
+        for component_index, component in enumerate(components, start=1):
+            face_indices = np.asarray(component.global_faces, dtype=np.int64)
+            component_identity.append(
+                {
+                    "component_index": int(component_index),
+                    "color_code": str(component.color_code),
+                    "face_count": int(len(face_indices)),
+                    "face_indices_sha256": hashlib.sha256(
+                        face_indices.tobytes()
+                    ).hexdigest(),
+                }
+            )
+        run_fingerprint = fingerprint_payload(
+            {
+                "source_sha256": source_artifact_sha256,
+                "arguments": normalized_run_arguments(args),
+                "components": component_identity,
+                "assembly_parents": assembly_parents,
+                "assembly_children": assembly_children,
+                "recursive_steps": recursive_execution_steps,
+                "fit_clearance_by_part": effective_fit_clearance_by_part,
+                "inward_overrides": inward_overrides,
+                "body_index": int(body_index_for_overrides),
+            }
+        )
+        stage_implementation_fingerprint = implementation_fingerprint(
+            Path(__file__).resolve().parent
+        )
+        recursive_stage_cache = (
+            None
+            if args.resume == "off"
+            else RecursiveStageCache(Path(args.cache_dir), mode=args.resume)
+        )
+        optimization_metrics = {
+            "run_fingerprint": run_fingerprint,
+            "source_sha256": source_artifact_sha256,
+            "stage_cache_mode": str(args.resume),
+            "stage_cache_directory": (
+                None
+                if recursive_stage_cache is None
+                else str(recursive_stage_cache.root)
+            ),
+            "stage_cache_hits": 0,
+            "stage_cache_misses": 0,
+            "stage_cache_commits": 0,
+            "verified_recursive_parse_hits": 0,
+            "verified_recursive_parse_misses": 0,
+        }
+        report["optimization"] = optimization_metrics
+        report["boundary_clarity"] = boundary_review.records
+        runtime_log(
+            "递归缓存",
+            "recursive_stage_cache_context_ready",
+            "递归阶段缓存上下文已建立",
+            run_fingerprint=str(run_fingerprint),
+            implementation_fingerprint=str(stage_implementation_fingerprint),
+            cache_enabled=bool(recursive_stage_cache is not None),
+        )
         runtime_log(
             "递归",
             "strict_recursion_start",
             "开始严格深度优先递归拆件",
-            steps=int(len(recursive_minimal_layers)),
+            steps=int(len(recursive_execution_steps)),
             root_body_index=body_index_for_overrides,
             debug_output=bool(args.debug_recursive_3mf),
         )
@@ -830,15 +1288,16 @@ class SplitPipeline:
                 components=components,
                 assembly_parents=assembly_parents,
                 assembly_children=assembly_children,
-                recursive_steps=recursive_minimal_layers,
+                recursive_steps=recursive_execution_steps,
                 boundary_neighbor_lookup=boundary_neighbor_lookup,
                 component_centers=component_centers,
                 inward_overrides=inward_overrides,
                 model_center=model_center,
                 max_extension_mm=args.max_extension_mm,
-                boundary_fairing=boundary_fairing,
+                interface_retopology=interface_retopology,
                 flat_clearance_mm=args.flat_clearance_mm,
                 fit_clearance_by_part=effective_fit_clearance_by_part,
+                boundary_reconciliation_tolerance_mm=args.fit_clearance_mm,
                 lead_in_mm=args.lead_in_mm,
                 clearance_mode=args.clearance_mode,
                 sibling_clearance_mm=args.sibling_clearance_mm,
@@ -853,6 +1312,16 @@ class SplitPipeline:
                     "filament_colour", []
                 ),
                 source_project_settings=project_settings,
+                interface_geometry=args.interface_geometry,
+                allow_partial=partial_recursive_debug,
+                stage_cache=recursive_stage_cache,
+                run_fingerprint=run_fingerprint,
+                stage_implementation_fingerprint=(
+                    stage_implementation_fingerprint
+                ),
+                source_artifact_sha256=source_artifact_sha256,
+                optimization_metrics=optimization_metrics,
+                boundary_review=boundary_review,
             )
         except ValueError as exc:
             print(
@@ -865,10 +1334,32 @@ class SplitPipeline:
             "递归",
             "strict_recursion_done",
             "严格递归拆件完成，最终活动部件已物化",
-            steps=int(len(recursive_minimal_layers)),
+            steps=int(len(recursive_execution_steps)),
             final_parts=int(len(strict_active_parts)),
             final_active_indices=sorted(strict_active_parts),
         )
+
+        if partial_recursive_debug:
+            latest_snapshot = (
+                strict_snapshot_records[-1] if strict_snapshot_records else {}
+            )
+            print(
+                "partial_recursive_debug="
+                + json.dumps(
+                    {
+                        "completed_steps": int(len(recursive_execution_steps)),
+                        "requested_steps": int(args.debug_recursive_steps),
+                        "active_part_indices": sorted(strict_active_parts),
+                        "cumulative_3mf": latest_snapshot.get("output_3mf"),
+                        "debug_directory": str(strict_layers_dir),
+                        "interface_geometry": str(args.interface_geometry),
+                        "final_deliverable_written": False,
+                    },
+                    ensure_ascii=False,
+                ),
+                flush=True,
+            )
+            return
 
         debug_layers_dir = strict_layers_dir if args.debug_recursive_3mf else None
         debug_stage_records = (
@@ -879,7 +1370,7 @@ class SplitPipeline:
             + json.dumps(
                 {
                     "execution_order": "strict_depth_first_preorder",
-                    "step_count": len(recursive_minimal_layers),
+                    "step_count": len(recursive_execution_steps),
                     "final_active_indices": sorted(strict_active_parts),
                     "parent_emitted_part_3mf_is_recursive_input": True,
                     "cumulative_3mf_is_recursive_input": False,
@@ -893,7 +1384,7 @@ class SplitPipeline:
         )
         report["strict_recursive_execution"] = {
             "execution_order": "strict_depth_first_preorder",
-            "step_count": len(recursive_minimal_layers),
+            "step_count": len(recursive_execution_steps),
             "final_active_indices": sorted(strict_active_parts),
             "parent_emitted_part_3mf_is_recursive_input": True,
             "cumulative_3mf_is_recursive_input": False,
@@ -999,7 +1490,9 @@ class SplitPipeline:
             part_insert_shrink_mm, part_socket_overcut_mm = clearance_offsets(
                 args.clearance_mode, part_fit_clearance_mm
             )
-            part_top_edge_clearance_mm = min(part_insert_shrink_mm, 0.05)
+            part_top_edge_clearance_mm = visible_top_edge_clearance(
+                part_insert_shrink_mm
+            )
             selected_processing_mode = processing_mode_by_part[index]
             progress("拆分", f"正在生成 P{index:02d}/{len(components):02d}", color_code=component.color_code, cap_mode=part_cap_mode)
             if index in body_root_indices:
@@ -1045,6 +1538,11 @@ class SplitPipeline:
                 if assembly_parents.get(index) is None
                 else ("subassembly_body" if assembly_children.get(index) else "leaf_insert")
             )
+            if selected_processing_mode == "inward":
+                mesh, scaling = scale_finished_insert(mesh, args.post_split_uniform_scale)
+                stats["post_split_uniform_scaling"] = scaling
+                runtime_log("配合", "post_split_uniform_scale", "原尺寸扣除完成，公件 XYZ 等比缩小",
+                            part_id=part_id, **scaling)
             mesh_validation = validate_mesh_in_memory(mesh)
             source_validation = report["source_mesh_validation"]
             mesh_validation["source_mesh_had_defects"] = bool(
@@ -1079,6 +1577,9 @@ class SplitPipeline:
                         )
                     ),
                     "mesh": mesh,
+                    **{field: strict_entry[field] for field in
+                       ('face_color_hexes', 'face_filament_slot_indices', 'face_color_codes')
+                       if field in strict_entry},
                     "annotation": {
                         "recognition_basis": args.recognition_surface_profile,
                         "occluded_paint_excluded": args.recognition_surface_profile == "exterior-visible",
@@ -1110,11 +1611,14 @@ class SplitPipeline:
                         "geometry_cap_mode": stats.get("geometry_cap_mode", part_cap_mode),
                         "fixed_inward_depth_mm": stats.get("fixed_inward_depth_mm", args.max_extension_mm),
                         "maximum_generated_inward_travel_mm": stats.get("maximum_generated_inward_travel_mm", 0.0),
-                        "boundary_fairing_mode": args.boundary_fairing_mode,
-                        "boundary_fairing_radius_mm": float(args.boundary_fairing_radius_mm),
-                        "boundary_max_displacement_mm": float(args.boundary_max_displacement_mm),
-                        "boundary_feature_angle_deg": float(args.boundary_feature_angle_deg),
-                        "boundary_fairing_records": stats.get("boundary_fairing_records", []),
+                        "interface_retopology_mode": "planar-arc-retopology",
+                        "boundary_target_samples": int(args.boundary_target_samples),
+                        "boundary_smooth_passes": int(args.boundary_smooth_passes),
+                        "boundary_retopology_band_mm": float(args.boundary_retopology_band_mm),
+                        "boundary_target_slope_deg": float(interface_retopology.config.target_slope_degrees),
+                        "boundary_min_slope_deg": float(interface_retopology.config.minimum_slope_degrees),
+                        "boundary_max_slope_deg": float(interface_retopology.config.maximum_slope_degrees),
+                        "interface_retopology_records": stats.get("interface_retopology_records", []),
                         "local_inward_direction_records": stats.get("local_inward_direction_records", []),
                         "local_inward_outward_vertices_before": stats.get("local_inward_outward_vertices_before", 0),
                         "local_inward_outward_vertices_after": stats.get("local_inward_outward_vertices_after", 0),
@@ -1123,11 +1627,14 @@ class SplitPipeline:
                         "requested_fit_clearance_mm": float(args.fit_clearance_mm),
                         "effective_fit_clearance_mm": part_fit_clearance_mm,
                         "fit_clearance_mm": part_fit_clearance_mm,
+                        "fit_strategy": "exact_subtract_then_uniform_scale",
+                        "post_split_uniform_scaling": stats.get("post_split_uniform_scaling"),
                         "lead_in_mm": float(args.lead_in_mm),
                         "validation_level": (
                             "strict"
                             if mesh_validation["watertight"]
                             and mesh_validation["winding_consistent"]
+                            and not mesh_validation.get("inward_closed_components")
                             and not (
                                 mesh_validation["open_edges"]
                                 or mesh_validation["over_shared_edges"]
@@ -1185,6 +1692,12 @@ class SplitPipeline:
             resolution=int(args.visual_validation_resolution),
             generated_parts=int(len(colored_3mf_parts)),
         )
+        from .cutting_reference import attach_cutting_references
+        attach_cutting_references(colored_3mf_parts, {
+            f'P{int(index):02d}': entry['stats'].get('complete_child_boolean_record', {})
+            for index, entry in strict_active_parts.items()})
+        manual_adjustment_required = False
+        seating_validation = {}
         if args.visual_validation_profile == "off":
             visual_surface_validation = {
                 "valid": True,
@@ -1197,6 +1710,38 @@ class SplitPipeline:
             source_part_by_face = np.zeros(len(faces), dtype=np.int32)
             for component_index, component in enumerate(components, start=1):
                 source_part_by_face[np.asarray(component.global_faces, dtype=np.int64)] = component_index
+            from .assembly_visibility import validate_and_seat_assembly
+            seating_validation = validate_and_seat_assembly(
+                colored_3mf_parts, vertices, faces, source_part_by_face,
+                area_budget_mm2=args.micro_defect_area_mm2,
+                allow_coupled_seating=args.allow_coupled_seating,
+                overlap_tolerance_mm3=args.seating_overlap_tolerance_mm3,
+                ignore_overlap_ratio=args.assembly_ignore_overlap_ratio,
+                penetration_tolerance_mm=args.seating_penetration_tolerance_mm,
+                recovery_dir=args.recovery_dir,
+                post_fit_difference=args.post_fit_parent_difference,
+                surface_tolerance_mm=args.print_surface_tolerance_mm,
+                allow_manual_adjustment=args.assembly_fit_validation == 'manual',
+            )
+            report['insert_surface_visibility'] = seating_validation
+            for part, stats in zip(colored_3mf_parts, report['parts']):
+                trimming = part['annotation'].get('post_fit_difference')
+                if trimming:
+                    stats['post_fit_difference'] = trimming
+                    stats['mesh_validation'] = validate_mesh_in_memory(part['mesh'])
+                    part['annotation']['mesh_validation'] = stats['mesh_validation']
+                    stats['output_faces'] = int(len(part['mesh'].faces))
+                    stats['output_vertices'] = int(len(part['mesh'].vertices))
+                    stats['bbox_min'] = part['mesh'].bounds[0].tolist()
+                    stats['bbox_max'] = part['mesh'].bounds[1].tolist()
+                seating = part['annotation'].get('post_fit_seating')
+                if seating is not None:
+                    stats['post_fit_seating'] = seating
+                    stats['bbox_min'] = part['mesh'].bounds[0].tolist()
+                    stats['bbox_max'] = part['mesh'].bounds[1].tolist()
+                    runtime_log('配合', 'insert_seating_corrected',
+                                '按实测干涉校正公件落座位置，形状和槽位保持不变',
+                                part_id=part['part_id'], **seating)
             visual_surface_validation = validate_multiview_visual_consistency(
                 vertices,
                 faces,
@@ -1208,9 +1753,24 @@ class SplitPipeline:
                 max_intrusion_ratio=args.visual_max_intrusion_ratio,
                 max_material_mismatch_ratio=args.visual_max_material_mismatch_ratio,
                 max_local_material_mismatch_ratio=args.visual_max_local_material_mismatch_ratio,
+                max_local_material_mismatch_pixels=args.visual_max_local_material_mismatch_pixels,
+                local_material_mismatch_gate=(
+                    "both"
+                    if args.surface_band_validation == "advisory"
+                    else "either"
+                ),
                 min_coverage_ratio=args.visual_min_coverage_ratio,
             )
             visual_surface_validation["profile"] = args.visual_validation_profile
+            if args.assembly_fit_validation == 'manual':
+                from .assembly_review import annotate_manual_adjustment
+                manual_adjustment_required = annotate_manual_adjustment(
+                    colored_3mf_parts, seating_validation, visual_surface_validation)
+                visual_surface_validation['manual_adjustment_required'] = manual_adjustment_required
+                if manual_adjustment_required:
+                    progress('装配', '拆件继续导出，请观察装配差异并判断是否影响打印，必要时手动调整',
+                             affected_parts=seating_validation.get('affected_parts', []),
+                             visual_errors=visual_surface_validation.get('errors', []))
         runtime_log(
             "视觉验证",
             "multiview_validation_done",
@@ -1235,6 +1795,7 @@ class SplitPipeline:
             args.visual_validation_profile == "strict"
             and not visual_surface_validation.get("valid", False)
             and not args.diagnostic_preview
+            and not manual_adjustment_required
         ):
             print(
                 "visual_validation_failures="
@@ -1256,6 +1817,12 @@ class SplitPipeline:
                 "open_edge_ratio": part["mesh_validation"]["open_edge_ratio"],
                 "over_shared_edge_ratio": part["mesh_validation"]["over_shared_edge_ratio"],
                 "inconsistent_orientation_ratio": part["mesh_validation"]["inconsistent_orientation_ratio"],
+                "inward_closed_components": part["mesh_validation"].get(
+                    "inward_closed_components"
+                ),
+                "all_closed_components_outward": part["mesh_validation"].get(
+                    "all_closed_components_outward"
+                ),
                 "open_edge_metrics": part["mesh_validation"]["open_edge_metrics"],
                 "over_shared_edge_metrics": part["mesh_validation"]["over_shared_edge_metrics"],
                 "inconsistent_edge_metrics": part["mesh_validation"]["inconsistent_edge_metrics"],
@@ -1270,6 +1837,7 @@ class SplitPipeline:
             or part["mesh_validation"]["open_edges"]
             or part["mesh_validation"]["over_shared_edges"]
             or part["mesh_validation"]["inconsistent_shared_edges"]
+            or part["mesh_validation"].get("inward_closed_components")
         ]
         invalid_parts = [record["part_id"] for record in invalid_part_records]
         max_topology_defect_ratio = max(float(args.max_topology_defect_ratio), 0.0)
@@ -1280,6 +1848,7 @@ class SplitPipeline:
             for record in invalid_part_records:
                 standard_ratio_accepted = bool(
                     not record["inconsistent_shared_edges"]
+                    and not record.get("inward_closed_components")
                     and record["winding_consistent"]
                     and float(record["topology_defect_ratio"])
                     <= max_topology_defect_ratio
@@ -1362,9 +1931,10 @@ class SplitPipeline:
                 f"DIAGNOSTIC INVALID PREVIEW - {input_path.stem}"
                 if blocking_part_records
                 else (
-                    f"RATIO ACCEPTED - {input_path.stem} split printable parts"
-                    if ratio_acceptance_active
-                    else f"{input_path.stem} split printable parts"
+                    f"ASSEMBLY REVIEW - {input_path.stem} split parts"
+                    if manual_adjustment_required
+                    else (f"RATIO ACCEPTED - {input_path.stem} split printable parts"
+                          if ratio_acceptance_active else f"{input_path.stem} split printable parts")
                 )
             ),
             source_application=project_settings.get("_source_application"),
@@ -1469,7 +2039,8 @@ class SplitPipeline:
             "validation_level": (
                 "diagnostic_invalid"
                 if blocking_part_records
-                else ("ratio_accepted" if ratio_acceptance_active else "strict_validated")
+                else ('manual_adjustment_required' if manual_adjustment_required
+                      else ("ratio_accepted" if ratio_acceptance_active else "strict_validated"))
             ),
             "validation_profile": args.validation_profile,
             "max_topology_defect_ratio": max_topology_defect_ratio,
@@ -1479,3 +2050,6 @@ class SplitPipeline:
             "debug_recursive_3mf_part_count": len(debug_stage_records),
         }
         progress("导出", "已写入彩色多部件 3MF", output=str(output_path), validation_level=final_summary["validation_level"])
+        if args.recovery_dir:
+            (Path(args.recovery_dir) / 'final_summary.json').write_text(
+                json.dumps(final_summary, ensure_ascii=False, indent=2), encoding='utf-8')

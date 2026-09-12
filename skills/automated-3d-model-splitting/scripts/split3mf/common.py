@@ -19,6 +19,7 @@ import math
 import posixpath
 import re
 import shutil
+import shlex
 import sys
 import zipfile
 from dataclasses import dataclass
@@ -37,14 +38,22 @@ PRODUCTION_URI = "http://schemas.microsoft.com/3dmanufacturing/production/2015/0
 CORE_NS = "{" + CORE_URI + "}"
 MATERIAL_NS = "{" + MATERIAL_URI + "}"
 PRODUCTION_NS = "{" + PRODUCTION_URI + "}"
-VERSION = "1.3.5"
-DEFAULT_EFFECTIVE_MINIMUM_INWARD_DEPTH_MM = 1.0
-MAXIMUM_SAFE_INWARD_DEPTH_MM = 5.0
+VERSION = "2.1.0"
+DEFAULT_EFFECTIVE_MINIMUM_INWARD_DEPTH_MM = 3.0
+MAXIMUM_SAFE_INWARD_DEPTH_MM = 10.0
+DEFAULT_LEAD_IN_SLOPE_DEGREES = 45.0
 PARENT_THICKNESS_CLEARANCE_MM = 0.05
+# When the measured parent is thinner than the preferred backing depth, a
+# coherent floor may legitimately have less travel at the high side of a
+# curved source rim.  Keep enough depth beyond the 0.60 mm lead-in for a
+# continuous printable skin instead of forcing a folded local-offset cap.
+MINIMUM_COHERENT_PLANAR_FLOOR_DEPTH_MM = 0.08
+MAXIMUM_INWARD_CAP_PLANARITY_ERROR_MM = 0.05
+MINIMUM_INWARD_CAP_NORMAL_COSINE = 0.90
 # Compatibility alias for older call sites and reports. Geometry may go below
 # this value only when the measured parent thickness requires it.
 MINIMUM_INWARD_DEPTH_MM = DEFAULT_EFFECTIVE_MINIMUM_INWARD_DEPTH_MM
-CORE_DEPENDENCIES = ("numpy", "scipy", "trimesh", "networkx")
+CORE_DEPENDENCIES = ("numpy", "scipy", "trimesh", "networkx", "manifold3d", "matplotlib", "PIL")
 UNIT_TO_MM = {
     "micron": 0.001,
     "millimeter": 1.0,
@@ -160,8 +169,12 @@ def progress(stage: str, message: str, **details) -> None:
 
 
 def dependency_install_command() -> str:
-    requirements = Path(__file__).resolve().parents[1] / "requirements.txt"
-    return f'"{sys.executable}" -m pip install --user -r "{requirements}"'
+    """Suggest an interpreter-scoped install, usable in PowerShell or POSIX shells."""
+    requirements = Path(__file__).resolve().parents[2] / "requirements.txt"
+    arguments = [sys.executable, "-m", "pip", "install", "-r", str(requirements)]
+    if sys.platform == "win32":
+        return "& " + " ".join("'" + argument.replace("'", "''") + "'" for argument in arguments)
+    return shlex.join(arguments)
 
 
 def load_core_dependencies() -> None:
@@ -297,12 +310,11 @@ def decode_vendor_paint_tree(token: str) -> VendorPaintNode:
 
 
 
-def preflight(input_path: Path | None) -> dict:
+def preflight(input_path: Path) -> dict:
     checks = {
         "python": sys.executable,
-        "input_provided": input_path is not None,
-        "input_exists": input_path.exists() if input_path is not None else None,
-        "input_suffix": input_path.suffix.lower() if input_path is not None else None,
+        "input_exists": input_path.exists(),
+        "input_suffix": input_path.suffix.lower(),
         "dependencies": {},
         "script_line_endings": "unknown",
     }
@@ -323,11 +335,10 @@ def preflight(input_path: Path | None) -> dict:
 
 def preflight_failures(checks: dict) -> list[str]:
     failures = []
-    if checks.get("input_provided", True):
-        if not checks["input_exists"]:
-            failures.append("input file does not exist")
-        if checks["input_suffix"] != ".3mf":
-            failures.append("input file is not a .3mf")
+    if not checks["input_exists"]:
+        failures.append("input file does not exist")
+    if checks["input_suffix"] != ".3mf":
+        failures.append("input file is not a .3mf")
     missing = [name for name, ok in checks["dependencies"].items() if not ok]
     if missing:
         failures.append("missing Python dependencies: " + ", ".join(missing))

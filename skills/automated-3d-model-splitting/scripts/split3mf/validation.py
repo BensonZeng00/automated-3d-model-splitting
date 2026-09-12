@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from .common import *
 from .mesh import *
 from .package_io import *
@@ -102,6 +104,7 @@ def validate_mesh_in_memory(mesh: trimesh.Trimesh) -> dict:
             "bbox_min": points.min(axis=0).round(6).tolist(),
             "bbox_max": points.max(axis=0).round(6).tolist(),
         }
+    component_orientation = watertight_component_orientation_audit(check)
     return {
         "watertight": bool(
             len(faces)
@@ -123,30 +126,45 @@ def validate_mesh_in_memory(mesh: trimesh.Trimesh) -> dict:
         "inconsistent_edge_metrics": edge_metrics(inconsistent_edge_ids),
         "faces": int(len(check.faces)),
         "vertices": int(len(check.vertices)),
+        "closed_component_orientation": component_orientation,
+        "connected_component_count": component_orientation.get("component_count"),
+        "inward_closed_components": component_orientation.get(
+            "inward_closed_component_count"
+        ),
+        "all_closed_components_outward": component_orientation.get(
+            "all_closed_components_outward"
+        ),
     }
 
 
 def finalize_mesh(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
+    finalize_face_counts = {"input": int(len(mesh.faces))}
     mesh.merge_vertices(digits_vertex=6)
+    finalize_face_counts["after_vertex_merge"] = int(len(mesh.faces))
     faces = np.asarray(mesh.faces, dtype=np.int64)
     if len(faces):
         _unique_faces, keep_indices = np.unique(np.sort(faces, axis=1), axis=0, return_index=True)
         if len(keep_indices) != len(faces):
             mesh.update_faces(np.sort(keep_indices))
+    finalize_face_counts["after_duplicate_removal"] = int(len(mesh.faces))
     if hasattr(mesh, "remove_degenerate_faces"):
         mesh.remove_degenerate_faces()
     else:
         mesh.update_faces(mesh.nondegenerate_faces())
+    finalize_face_counts["after_degenerate_removal"] = int(len(mesh.faces))
     mesh.remove_unreferenced_vertices()
     trimesh.repair.fix_winding(mesh)
     trimesh.repair.fix_normals(mesh)
     trimesh.repair.fill_holes(mesh)
+    finalize_face_counts["after_fill_holes"] = int(len(mesh.faces))
     if open_edge_count(mesh) > 0:
         mesh = close_residual_boundaries(mesh)
+    finalize_face_counts["after_residual_closure"] = int(len(mesh.faces))
     trimesh.repair.fix_winding(mesh)
     trimesh.repair.fix_normals(mesh)
     orientation_record = orient_mesh_faces_consistently(mesh)
     mesh.metadata["orientation_repair"] = orientation_record
+    mesh.metadata["finalize_face_counts"] = finalize_face_counts
     return mesh
 
 
@@ -169,6 +187,184 @@ def finalize_large_partition_mesh(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
     orientation_record = orient_mesh_faces_consistently(mesh)
     mesh.metadata["orientation_repair"] = orientation_record
     return mesh
+
+
+@dataclass(frozen=True)
+class BooleanFinalizationPolicy:
+    """Topology contract for exporting one authoritative Boolean result.
+
+    Dense vendor meshes can contain closed, near-collinear source triangles.
+    They must not be deleted after a Boolean because generic hole repair can
+    replace the resulting opening with long fan triangles.  The caller may
+    therefore pass the *pre-Boolean* collapsed-face count as an inherited
+    budget.  Ratio validation may additionally preserve a bounded number of
+    numerically collapsed faces when they remain below the configured ratio;
+    open, non-manifold, or inconsistently wound geometry is never accepted.
+    """
+
+    inherited_collapsed_face_budget: int = 0
+    inherited_source: str = "none"
+    ratio_accepted_collapsed_face_budget: int = 0
+    maximum_collapsed_face_ratio: float = 0.005
+    micro_accepted_collapsed_face_budget: int = 0
+    maximum_micro_collapsed_face_ratio: float = 0.005
+    maximum_micro_collapsed_face_edge_mm: float = 0.25
+
+
+def boolean_collapsed_face_audit(mesh: trimesh.Trimesh) -> dict[str, float | int]:
+    """Measure near-collinear faces with the Boolean export threshold."""
+    triangles = np.asarray(mesh.vertices, dtype=np.float64)[
+        np.asarray(mesh.faces, dtype=np.int64)
+    ]
+    double_areas = np.linalg.norm(
+        np.cross(
+            triangles[:, 1] - triangles[:, 0],
+            triangles[:, 2] - triangles[:, 0],
+        ),
+        axis=1,
+    )
+    scale = max(float(np.linalg.norm(np.ptp(mesh.vertices, axis=0))), 1.0)
+    minimum_double_area = scale * scale * 1e-14
+    collapsed_mask = double_areas <= minimum_double_area
+    triangle_edges = np.stack(
+        (
+            np.linalg.norm(triangles[:, 1] - triangles[:, 0], axis=1),
+            np.linalg.norm(triangles[:, 2] - triangles[:, 1], axis=1),
+            np.linalg.norm(triangles[:, 0] - triangles[:, 2], axis=1),
+        ),
+        axis=1,
+    )
+    collapsed_maximum_edges = (
+        np.max(triangle_edges[collapsed_mask], axis=1)
+        if np.any(collapsed_mask)
+        else np.zeros(0, dtype=np.float64)
+    )
+    return {
+        "collapsed_face_count": int(
+            np.count_nonzero(collapsed_mask)
+        ),
+        "minimum_double_area_mm2": (
+            float(double_areas.min()) if len(double_areas) else 0.0
+        ),
+        "collapsed_face_threshold_mm2": float(minimum_double_area),
+        "collapsed_maximum_edge_mm": (
+            float(np.max(collapsed_maximum_edges))
+            if len(collapsed_maximum_edges)
+            else 0.0
+        ),
+        "collapsed_p95_maximum_edge_mm": (
+            float(np.percentile(collapsed_maximum_edges, 95.0))
+            if len(collapsed_maximum_edges)
+            else 0.0
+        ),
+    }
+
+
+def finalize_boolean_difference_mesh(
+    mesh: trimesh.Trimesh,
+    *,
+    policy: BooleanFinalizationPolicy | None = None,
+) -> trimesh.Trimesh:
+    """Preserve an already-validated Boolean difference without re-closing it.
+
+    Manifold returns a closed, consistently wound result.  The legacy finalizers
+    intentionally remove tiny/degenerate faces and then close any resulting open
+    boundary.  On a dense vendor mesh that cleanup can delete faces at the socket
+    mouth and ``close_residual_boundaries`` then spans the opening with a triangle
+    fan, visually restoring the very cap which the Boolean just removed.
+
+    Do not run hole filling or residual-boundary closure here.  The Boolean
+    contract is stricter than either finalizer, so any invalid input is an error
+    rather than something to be papered over with a new cap.
+    """
+    result = mesh.copy()
+    result.remove_unreferenced_vertices()
+    orientation_record = orient_mesh_faces_consistently(result)
+    if not result.is_watertight or not result.is_winding_consistent:
+        raise ValueError(
+            "validated socket boolean lost closed topology before export"
+        )
+    effective_policy = policy or BooleanFinalizationPolicy()
+    audit = boolean_collapsed_face_audit(result)
+    collapsed_face_count = int(audit["collapsed_face_count"])
+    inherited_budget = max(
+        int(effective_policy.inherited_collapsed_face_budget),
+        0,
+    )
+    ratio_budget = max(
+        int(effective_policy.ratio_accepted_collapsed_face_budget),
+        0,
+    )
+    micro_budget = max(
+        int(effective_policy.micro_accepted_collapsed_face_budget),
+        0,
+    )
+    maximum_ratio = min(
+        max(float(effective_policy.maximum_collapsed_face_ratio), 0.0),
+        0.005,
+    )
+    ratio_budget_valid = bool(
+        ratio_budget / max(len(result.faces), 1) <= maximum_ratio + 1e-15
+    )
+    micro_ratio_limit = min(
+        max(float(effective_policy.maximum_micro_collapsed_face_ratio), 0.0),
+        0.005,
+    )
+    micro_edge_limit_mm = min(
+        max(float(effective_policy.maximum_micro_collapsed_face_edge_mm), 0.0),
+        0.25,
+    )
+    micro_budget_valid = bool(
+        micro_budget == 0
+        or (
+            micro_budget / max(len(result.faces), 1)
+            <= micro_ratio_limit + 1e-15
+            and float(audit.get("collapsed_maximum_edge_mm", 0.0))
+            <= micro_edge_limit_mm + 1e-12
+        )
+    )
+    if (
+        collapsed_face_count > inherited_budget + ratio_budget + micro_budget
+        or not ratio_budget_valid
+        or not micro_budget_valid
+    ):
+        raise ValueError(
+            "validated socket boolean created collapsed faces beyond the "
+            "inherited source budget plus ratio-accepted budget: "
+            f"collapsed_faces={collapsed_face_count}, "
+            f"inherited_budget={inherited_budget}, "
+            f"ratio_budget={ratio_budget}, maximum_ratio={maximum_ratio}, "
+            f"micro_budget={micro_budget}, "
+            f"micro_ratio_limit={micro_ratio_limit}, "
+            f"micro_edge_limit_mm={micro_edge_limit_mm}"
+        )
+    result.metadata["boolean_finalize_policy"] = (
+        "preserve_inherited_source_slivers_without_hole_filling"
+    )
+    result.metadata["orientation_repair"] = orientation_record
+    result.metadata["boolean_collapsed_face_audit"] = {
+        **audit,
+        "inherited_collapsed_face_budget": int(inherited_budget),
+        "inherited_source": str(effective_policy.inherited_source),
+        "ratio_accepted_collapsed_face_budget": int(ratio_budget),
+        "maximum_collapsed_face_ratio": float(maximum_ratio),
+        "micro_accepted_collapsed_face_budget": int(micro_budget),
+        "maximum_micro_collapsed_face_ratio": float(micro_ratio_limit),
+        "maximum_micro_collapsed_face_edge_mm": float(micro_edge_limit_mm),
+        "ratio_accepted": bool(
+            collapsed_face_count > inherited_budget
+            and collapsed_face_count <= inherited_budget + ratio_budget
+        ),
+        "microfaces_accepted": bool(
+            micro_budget > 0
+            and collapsed_face_count
+            <= inherited_budget + ratio_budget + micro_budget
+        ),
+        "new_collapsed_face_count": int(
+            max(collapsed_face_count - inherited_budget, 0)
+        ),
+    }
+    return result
 
 
 def mesh_runtime_stats(mesh: trimesh.Trimesh) -> dict:
@@ -237,6 +433,8 @@ def validate_multiview_visual_consistency(
     max_intrusion_ratio: float = 0.04,
     max_material_mismatch_ratio: float = 0.03,
     max_local_material_mismatch_ratio: float = 0.10,
+    max_local_material_mismatch_pixels: int = 64,
+    local_material_mismatch_gate: str = "either",
     min_coverage_ratio: float = 0.65,
     minimum_front_facing_dot: float = 0.05,
 ) -> dict:
@@ -249,6 +447,9 @@ def validate_multiview_visual_consistency(
     source_vertices = np.asarray(source_vertices, dtype=np.float64)
     source_faces = np.asarray(source_faces, dtype=np.int64)
     source_labels = np.asarray(source_part_by_face, dtype=np.int32)
+    mismatch_gate = str(local_material_mismatch_gate).strip().lower()
+    if mismatch_gate not in {"either", "both"}:
+        raise ValueError("local material mismatch gate must be 'either' or 'both'")
     if len(source_labels) != len(source_faces):
         raise ValueError("source visual labels do not match source face count")
     assigned = source_labels > 0
@@ -309,6 +510,9 @@ def validate_multiview_visual_consistency(
     generated_normals_array = np.vstack(generated_normals)
     generated_labels_array = np.concatenate(generated_labels)
     generated_synthetic_array = np.concatenate(generated_synthetic)
+    source_ray_mesh = trimesh.Trimesh(source_vertices, source_faces, process=False)
+    assembled_ray_mesh = trimesh.util.concatenate([part['mesh'] for part in generated_parts])
+    from .visual_ray_confirmation import confirm_front_intrusions
 
     def front_map(
         points: np.ndarray,
@@ -321,7 +525,7 @@ def validate_multiview_visual_consistency(
         scale: float,
         synthetic: np.ndarray | None = None,
         normals: np.ndarray | None = None,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         if normals is not None:
             visible = (normals @ direction) > max(
                 float(minimum_front_facing_dot),
@@ -336,6 +540,7 @@ def validate_multiview_visual_consistency(
                 np.full(resolution * resolution, -np.inf, dtype=np.float64),
                 np.zeros(resolution * resolution, dtype=np.int32),
                 np.zeros(resolution * resolution, dtype=np.bool_),
+                np.full((resolution * resolution, 3), np.nan),
             )
         px = np.clip(((points @ u - min_x) * scale).astype(np.int64), 0, resolution - 1)
         py = np.clip(((points @ v - min_y) * scale).astype(np.int64), 0, resolution - 1)
@@ -350,10 +555,12 @@ def validate_multiview_visual_consistency(
         winners = front_indices[winner_pixels]
         front_label = np.zeros(resolution * resolution, dtype=np.int32)
         front_synthetic = np.zeros(resolution * resolution, dtype=np.bool_)
+        front_points = np.full((resolution * resolution, 3), np.nan)
+        front_points[winner_pixels] = points[winners]
         front_label[winner_pixels] = labels[winners]
         if synthetic is not None:
             front_synthetic[winner_pixels] = synthetic[winners]
-        return front_depth, front_label, front_synthetic
+        return front_depth, front_label, front_synthetic, front_points
 
     def neighborhood_front_map(
         depth: np.ndarray,
@@ -406,6 +613,7 @@ def validate_multiview_visual_consistency(
     total_common_pixels = 0
     total_intrusion_pixels = 0
     total_mismatch_pixels = 0
+    ray_details = collections.Counter()
     source_pixels_by_part: collections.Counter[int] = collections.Counter()
     intrusion_pixels_by_generated_part: collections.Counter[int] = collections.Counter()
     mismatch_pair_pixels: collections.Counter[tuple[int, int]] = collections.Counter()
@@ -421,7 +629,7 @@ def validate_multiview_visual_consistency(
             1e-9,
         )
         scale = (resolution - 1) / span
-        source_depth, source_part, _source_synthetic = front_map(
+        source_depth, source_part, _source_synthetic, _source_points = front_map(
             source_centroids,
             source_labels,
             direction,
@@ -435,7 +643,7 @@ def validate_multiview_visual_consistency(
         source_envelope_depth, source_envelope_part = neighborhood_front_map(
             source_depth, source_part
         )
-        generated_depth, generated_part, generated_front_is_synthetic = front_map(
+        generated_depth, generated_part, generated_front_is_synthetic, generated_points = front_map(
             generated_centroids_array,
             generated_labels_array,
             direction,
@@ -453,6 +661,19 @@ def validate_multiview_visual_consistency(
         intrusion_pixels = comparable_pixels & generated_front_is_synthetic & (
             generated_depth > source_envelope_depth + max(float(depth_tolerance_mm), 0.0)
         )
+        # Sparse centroid maps are only a broad-phase screen. A solid can hide
+        # a backing even when none of its centroids occupy that pixel. Confirm
+        # each flagged surface point against complete source/assembly triangles.
+        suspect = np.flatnonzero(intrusion_pixels)
+        if len(suspect):
+            points = generated_points[suspect]
+            confirmed, exact_labels, detail = confirm_front_intrusions(
+                source_ray_mesh, assembled_ray_mesh, points, source_part_by_face,
+                direction, depth_tolerance_mm)
+            ray_details.update(detail)
+            intrusion_pixels[suspect] = confirmed
+            hit_pixels = suspect[exact_labels > 0]
+            source_envelope_part[hit_pixels] = exact_labels[exact_labels > 0]
         # A material disagreement is visually relevant only when the generated
         # material is actually in front of the local source envelope.  Counting
         # equal-depth neighboring paint regions turns normal antialiased boundaries
@@ -530,17 +751,43 @@ def validate_multiview_visual_consistency(
         )
         if source_part_index > 0 and generated_part_index > 0
     ]
+    effective_view_count = int(max(view_count, 6))
+    local_mismatch_pixel_limit_per_view = max(
+        int(max_local_material_mismatch_pixels), 0
+    )
+    local_mismatch_pixel_limit_total = (
+        local_mismatch_pixel_limit_per_view * effective_view_count
+    )
     blocking_local_mismatch_pairs = sorted(
         [
         pair
         for pair in material_mismatch_pairs
-        if pair["ratio_of_source_part"]
-        > float(max_local_material_mismatch_ratio)
+        if (
+            (
+                pair["ratio_of_source_part"] > float(max_local_material_mismatch_ratio)
+                and pair["pixels"] > local_mismatch_pixel_limit_total
+            )
+            if mismatch_gate == "both"
+            else (
+                pair["ratio_of_source_part"] > float(max_local_material_mismatch_ratio)
+                or pair["pixels"] > local_mismatch_pixel_limit_total
+            )
+        )
         ],
         key=lambda pair: -float(pair["ratio_of_source_part"]),
     )
     errors = []
     advisories = []
+    advisory_local_mismatch_pairs = [
+        pair
+        for pair in material_mismatch_pairs
+        if mismatch_gate == "both"
+        and pair not in blocking_local_mismatch_pairs
+        and (
+            pair["ratio_of_source_part"] > float(max_local_material_mismatch_ratio)
+            or pair["pixels"] > local_mismatch_pixel_limit_total
+        )
+    ]
     if coverage_ratio < float(min_coverage_ratio):
         errors.append(
             f"visual coverage ratio {coverage_ratio:.6f} is below {float(min_coverage_ratio):.6f}"
@@ -560,12 +807,26 @@ def validate_multiview_visual_consistency(
     if blocking_local_mismatch_pairs:
         worst_pair = blocking_local_mismatch_pairs[0]
         errors.append(
-            "local material mismatch P{source:02d}<-P{generated:02d} ratio {ratio:.6f} "
-            "exceeds {limit:.6f}".format(
+            "local material mismatch P{source:02d}<-P{generated:02d}: "
+            "ratio={ratio:.6f} (limit={limit:.6f}), pixels={pixels} "
+            "(limit={pixel_limit})".format(
                 source=int(worst_pair["source_part_index"]),
                 generated=int(worst_pair["generated_part_index"]),
                 ratio=float(worst_pair["ratio_of_source_part"]),
                 limit=float(max_local_material_mismatch_ratio),
+                pixels=int(worst_pair["pixels"]),
+                pixel_limit=local_mismatch_pixel_limit_total,
+            )
+        )
+    elif advisory_local_mismatch_pairs:
+        worst_pair = advisory_local_mismatch_pairs[0]
+        advisories.append(
+            "user-reviewed local material mismatch P{source:02d}<-P{generated:02d}: "
+            "ratio={ratio:.6f}, pixels={pixels}; only one advisory threshold exceeded".format(
+                source=int(worst_pair["source_part_index"]),
+                generated=int(worst_pair["generated_part_index"]),
+                ratio=float(worst_pair["ratio_of_source_part"]),
+                pixels=int(worst_pair["pixels"]),
             )
         )
     return {
@@ -573,7 +834,7 @@ def validate_multiview_visual_consistency(
         "errors": errors,
         "advisories": advisories,
         "method": "multi_view_front_facing_neighborhood_surface_consistency",
-        "view_count": int(max(view_count, 6)),
+        "view_count": effective_view_count,
         "depth_map_resolution": int(max(resolution, 64)),
         "depth_tolerance_mm": float(depth_tolerance_mm),
         "source_envelope_radius_pixels": 1,
@@ -583,60 +844,108 @@ def validate_multiview_visual_consistency(
         "coverage_ratio": coverage_ratio,
         "generated_surface_intrusion_ratio": intrusion_ratio,
         "front_material_mismatch_ratio": mismatch_ratio,
+        "exact_ray_confirmation": dict(ray_details),
         "max_intrusion_ratio": float(max_intrusion_ratio),
         "advisory_intrusion_ratio": min(0.02, float(max_intrusion_ratio)),
         "max_material_mismatch_ratio": float(max_material_mismatch_ratio),
         "max_local_material_mismatch_ratio": float(max_local_material_mismatch_ratio),
+        "max_local_material_mismatch_pixels": local_mismatch_pixel_limit_total,
+        "max_local_material_mismatch_pixels_per_view": (
+            local_mismatch_pixel_limit_per_view
+        ),
+        "local_material_mismatch_gate": mismatch_gate,
         "min_coverage_ratio": float(min_coverage_ratio),
         "per_view": per_view,
         "per_part": per_part,
         "material_mismatch_pairs": material_mismatch_pairs,
         "blocking_local_material_mismatch_pairs": blocking_local_mismatch_pairs,
+        "advisory_local_material_mismatch_pairs": advisory_local_mismatch_pairs,
         "requires_computer_use": False,
         "slicer_screenshot_policy": "ask_user_to_open_final_3mf_and_provide_screenshots",
     }
 
 
-def close_residual_boundaries(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
+def close_residual_boundaries(
+    mesh: trimesh.Trimesh,
+    merge_and_clean: bool = True,
+) -> trimesh.Trimesh:
     """Close residual loops without a centroid fan or synthetic hub vertex."""
     loops = boundary_loops(np.asarray(mesh.faces, dtype=np.int64))
     if not loops:
         return mesh
     vertices = [np.array(v, dtype=np.float64) for v in np.asarray(mesh.vertices)]
     faces = np.asarray(mesh.faces, dtype=np.int64).tolist()
+    from .edge_index import FaceEdgeIndex
+    edge_index = FaceEdgeIndex(faces)
+    subdivisions = []
     for loop in loops:
         if len(loop) < 3:
             continue
         loop_points = np.array([vertices[i] for i in loop], dtype=np.float64)
-        if len(loop) == 3:
-            edge_pairs = [(0, 1), (1, 2), (2, 0)]
+        if len(loop) >= 3:
+            edge_pairs = [
+                (index, (index + 1) % len(loop))
+                for index in range(len(loop))
+            ]
             edge_lengths = [
                 float(np.linalg.norm(loop_points[left] - loop_points[right]))
                 for left, right in edge_pairs
             ]
             longest_index = int(np.argmax(edge_lengths))
             endpoint_left, endpoint_right = edge_pairs[longest_index]
-            middle_index = next(index for index in range(3) if index not in (endpoint_left, endpoint_right))
             long_start = int(loop[endpoint_left])
             long_end = int(loop[endpoint_right])
-            middle = int(loop[middle_index])
             long_vector = loop_points[endpoint_right] - loop_points[endpoint_left]
             long_length = float(np.linalg.norm(long_vector))
-            line_distance = (
-                float(np.linalg.norm(np.cross(loop_points[middle_index] - loop_points[endpoint_left], long_vector)))
-                / long_length
-                if long_length > 0.0
-                else float("inf")
-            )
-            # A zero-area three-edge loop is usually a T-junction: one boundary
-            # edge spans two collinear boundary edges. Split the face containing
-            # that long edge at the middle vertex instead of adding a degenerate
-            # cap triangle which cleanup would immediately remove again.
-            if line_distance <= max(1e-9, long_length * 1e-7):
+            other_indices = [
+                index
+                for index in range(len(loop))
+                if index not in (endpoint_left, endpoint_right)
+            ]
+            line_distances = [
+                (
+                    float(
+                        np.linalg.norm(
+                            np.cross(
+                                loop_points[index] - loop_points[endpoint_left],
+                                long_vector,
+                            )
+                        )
+                    )
+                    / long_length
+                    if long_length > 0.0
+                    else float("inf")
+                )
+                for index in other_indices
+            ]
+            projections = [
+                (
+                    float(
+                        np.dot(
+                            loop_points[index] - loop_points[endpoint_left],
+                            long_vector,
+                        )
+                        / max(long_length * long_length, 1e-30)
+                    )
+                )
+                for index in other_indices
+            ]
+            # A zero-area boundary loop is a T-junction seam: one boundary edge
+            # spans two or more collinear boundary sub-edges. Split the face
+            # containing that long edge at every intermediate vertex instead of
+            # adding a degenerate cap which cleanup would remove again.
+            if (
+                other_indices
+                and max(line_distances, default=float("inf"))
+                <= max(1e-9, long_length * 1e-7)
+                and min(projections, default=-1.0) >= -1e-8
+                and max(projections, default=2.0) <= 1.0 + 1e-8
+            ):
                 split_face_index = None
                 split_directed_edge = None
                 split_third = None
-                for face_index, face in enumerate(faces):
+                for face_index in sorted(edge_index.owners.get(tuple(sorted((long_start,long_end))), ())):
+                    face = faces[face_index]
                     for edge_start, edge_end, third in (
                         (face[0], face[1], face[2]),
                         (face[1], face[2], face[0]),
@@ -651,32 +960,64 @@ def close_residual_boundaries(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
                         break
                 if split_face_index is not None and split_directed_edge is not None and split_third is not None:
                     directed_start, directed_end = split_directed_edge
-                    faces[split_face_index] = [directed_start, middle, split_third]
-                    faces.append([middle, directed_end, split_third])
+                    directed_vector = vertices[directed_end] - vertices[directed_start]
+                    directed_length_squared = max(
+                        float(np.dot(directed_vector, directed_vector)),
+                        1e-30,
+                    )
+                    intermediate_vertices = sorted(
+                        (
+                            int(loop[index])
+                            for index in other_indices
+                        ),
+                        key=lambda vertex_index: float(
+                            np.dot(
+                                vertices[vertex_index] - vertices[directed_start],
+                                directed_vector,
+                            )
+                            / directed_length_squared
+                        ),
+                    )
+                    split_chain = [directed_start, *intermediate_vertices, directed_end]
+                    replacement_faces = [
+                        [split_chain[index], split_chain[index + 1], split_third]
+                        for index in range(len(split_chain) - 1)
+                    ]
+                    source_face = list(faces[split_face_index])
+                    edge_index.remove(split_face_index, source_face)
+                    faces[split_face_index] = replacement_faces[0]
+                    edge_index.add(split_face_index, replacement_faces[0])
+                    for extra in replacement_faces[1:]:
+                        edge_index.add(len(faces), extra)
+                        faces.append(extra)
+                    subdivisions.append(dict(source_triangle=np.asarray(vertices)[source_face].tolist(),
+                                             replacement_triangles=np.asarray(vertices)[replacement_faces].tolist()))
                     continue
         fallback = np.zeros(3, dtype=np.float64)
         shifted = np.roll(loop_points, -1, axis=0)
         fallback = np.sum(np.cross(loop_points, shifted), axis=0)
         if float(np.linalg.norm(fallback)) <= 1e-12:
             fallback = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+        before_count = len(faces)
         triangulate_boundary_cap_without_center(
-            vertices,
-            faces,
-            [int(index) for index in loop],
-            fallback,
-            face_edge_set(np.asarray(faces, dtype=np.int64)),
+            vertices, faces, [int(index) for index in loop], fallback,
+            edge_index.within(loop),
         )
+        for face_id in range(before_count,len(faces)):
+            edge_index.add(face_id,faces[face_id])
     repaired = trimesh.Trimesh(
         vertices=np.array(vertices, dtype=np.float64),
         faces=np.array(faces, dtype=np.int64),
         process=False,
         metadata=mesh.metadata.copy(),
     )
-    repaired.merge_vertices(digits_vertex=6)
-    if hasattr(repaired, "remove_degenerate_faces"):
-        repaired.remove_degenerate_faces()
-    else:
-        repaired.update_faces(repaired.nondegenerate_faces())
+    repaired.metadata['boundary_closure_subdivisions'] = subdivisions
+    if merge_and_clean:
+        repaired.merge_vertices(digits_vertex=6)
+        if hasattr(repaired, "remove_degenerate_faces"):
+            repaired.remove_degenerate_faces()
+        else:
+            repaired.update_faces(repaired.nondegenerate_faces())
     repaired.remove_unreferenced_vertices()
     return repaired
 

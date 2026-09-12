@@ -13,6 +13,10 @@ Default `--assembly-ignore-overlap-ratio 0.01` silently ignores a pair's total i
 
 Apply [manual-assembly-fit.md](references/manual-assembly-fit.md) for final assembly issues. The default `--assembly-fit-validation manual` completes export of valid split parts after attempted post-fit difference and bounded seating, retaining measured unresolved interference, occlusion and assembled-view errors for user adjustment. No further approval is needed for this handoff. Label the final package `manual_adjustment_required`, keep raw failed fit/visual checks, and tell the user which parts need adjustment. This overrides the blocking assembly/visual wording below in default manual mode; individual topology, backing thickness, source-surface, color and package gates remain active. Explicit `strict` restores blocking assembly validation.
 
+## License
+
+This skill is licensed under [PolyForm Noncommercial 1.0.0](LICENSE). Uses outside its permissions require a [separate written commercial license](COMMERCIAL_LICENSE.md). Distribute the complete skill folder with `LICENSE`, `NOTICE` and `COMMERCIAL_LICENSE.md`; preserve required notices. Third-party dependencies retain their own licenses.
+
 ## Runtime and platform support
 
 Resolve `SKILL_ROOT` as the directory containing the exact `SKILL.md` loaded for this task. All `scripts/`, `tools/`, `references/` and `requirements.txt` paths in this skill are relative to that directory, not the current project directory or the model's directory. In a source checkout the skill is under `skills/automated-3d-model-splitting/`; an installed skill may live elsewhere. Use the provided skill location rather than searching unrelated projects or assuming a machine-specific installation path.

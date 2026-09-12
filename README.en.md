@@ -75,6 +75,10 @@ The assistant also explains how many parts were created, whether colors were pre
 
 For complex models, you can ask the assistant to keep progress and problem records so work can continue later.
 
+## License
+
+This project uses [PolyForm Noncommercial 1.0.0](LICENSE). Permitted noncommercial and expressly permitted organizational uses are free. Other commercial uses require a [separate written commercial license](COMMERCIAL_LICENSE.md), with fees agreed separately. Preserve the required license terms and notices when distributing.
+
 ---
 
-Current version: `2.1.0` · [Test results and verified scope](TEST_RESULTS.md) · [Contributing](CONTRIBUTING.md) · [Apache License 2.0](LICENSE)
+Current version: `2.1.0` · [Test results and verified scope](TEST_RESULTS.md) · [Contributing](CONTRIBUTING.md) · [PolyForm Noncommercial 1.0.0](LICENSE)

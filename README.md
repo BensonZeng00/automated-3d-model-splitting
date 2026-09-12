@@ -77,6 +77,10 @@ AI 还会说明拆出了多少个零件、配色是否保留、检查是否通�
 
 遇到复杂模型时，可以让 AI 保留处理进度和问题记录，便于后续继续处理。
 
+## 使用许可
+
+本项目采用 [PolyForm Noncommercial 1.0.0](LICENSE)：符合协议的非商业用途免费；其他商业使用需取得[单独书面商业授权](COMMERCIAL_LICENSE.md)，费用另行约定。协议明确允许的机构用途同样适用。分发时须保留许可及规定声明。
+
 ---
 
-当前版本：`2.1.0` · [测试结果与已验证范围](TEST_RESULTS.md) · [参与贡献](CONTRIBUTING.md) · [Apache License 2.0](LICENSE)
+当前版本：`2.1.0` · [测试结果与已验证范围](TEST_RESULTS.md) · [参与贡献](CONTRIBUTING.md) · [PolyForm Noncommercial 1.0.0](LICENSE)

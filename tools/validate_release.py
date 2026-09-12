@@ -34,6 +34,7 @@ def main() -> int:
         "CONTRIBUTING.md",
         "LICENSE",
         "NOTICE",
+        "COMMERCIAL_LICENSE.md",
         "SECURITY.md",
         "TEST_RESULTS.md",
         ".gitignore",
@@ -46,6 +47,13 @@ def main() -> int:
     if not SKILL_ROOT.is_dir():
         errors.append(f"missing Skill directory: {SKILL_ROOT}")
     else:
+        for name in ("LICENSE", "NOTICE", "COMMERCIAL_LICENSE.md"):
+            root_file = REPOSITORY_ROOT / name
+            skill_file = SKILL_ROOT / name
+            if not skill_file.is_file():
+                errors.append(f"standalone Skill is missing licensing file: {name}")
+            elif root_file.is_file() and root_file.read_bytes() != skill_file.read_bytes():
+                errors.append(f"standalone Skill licensing file differs from repository: {name}")
         skill_text = read("SKILL.md")
         if not re.search(rf"(?m)^name:\s*{re.escape(TECHNICAL_ID)}\s*$", skill_text):
             errors.append("SKILL.md frontmatter technical ID does not match")

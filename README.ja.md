@@ -75,6 +75,10 @@ AIはパーツ数、配色の保持、検証の合否、確認が必要な点も
 
 複雑なモデルでは、処理の進捗と問題の記録を残すよう依頼すると、後から作業を続けやすくなります。
 
+## ライセンス
+
+本プロジェクトは [PolyForm Noncommercial 1.0.0](LICENSE) を採用しています。許可された非商用利用および明示された組織による利用は無料です。それ以外の商用利用には[別途書面による商用ライセンス](COMMERCIAL_LICENSE.md)が必要で、料金は個別に合意します。再配布時は規定のライセンスと通知を保持してください。
+
 ---
 
-現在のバージョン：`2.1.0` · [テスト結果と検証範囲](TEST_RESULTS.md) · [貢献ガイド](CONTRIBUTING.md) · [Apache License 2.0](LICENSE)
+現在のバージョン：`2.1.0` · [テスト結果と検証範囲](TEST_RESULTS.md) · [貢献ガイド](CONTRIBUTING.md) · [PolyForm Noncommercial 1.0.0](LICENSE)

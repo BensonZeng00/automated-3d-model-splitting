@@ -75,6 +75,10 @@ AI는 생성된 파트 수, 배색 유지 여부, 검사 통과 여부, 확인�
 
 복잡한 모델은 처리 진행 상황과 문제 기록을 남겨 달라고 요청하면 나중에 작업을 이어 가기 쉽습니다.
 
+## 라이선스
+
+이 프로젝트는 [PolyForm Noncommercial 1.0.0](LICENSE)을 사용합니다. 허용된 비상업적 용도와 명시적으로 허용된 기관의 사용은 무료입니다. 그 밖의 상업적 사용에는 [별도의 서면 상업용 라이선스](COMMERCIAL_LICENSE.md)가 필요하며 요금은 별도로 합의합니다. 배포 시 규정된 라이선스와 고지 사항을 유지해야 합니다.
+
 ---
 
-현재 버전: `2.1.0` · [테스트 결과 및 검증 범위](TEST_RESULTS.md) · [기여 안내](CONTRIBUTING.md) · [Apache License 2.0](LICENSE)
+현재 버전: `2.1.0` · [테스트 결과 및 검증 범위](TEST_RESULTS.md) · [기여 안내](CONTRIBUTING.md) · [PolyForm Noncommercial 1.0.0](LICENSE)

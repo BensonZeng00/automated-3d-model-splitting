@@ -1,6 +1,7 @@
 """Geometry-based regressions: no vendor filename, part ID or color special cases."""
 import sys
 import unittest
+from unittest.mock import patch as mock_patch
 from pathlib import Path
 import numpy as np
 import trimesh
@@ -55,6 +56,21 @@ class BackingRepairTests(unittest.TestCase):
             ensure_backing(self.patch,self.thin,self.parent,['A']*len(self.patch.faces),
                            [0,0,-1],part_id='arbitrary')
         np.testing.assert_array_equal(before,self.thin.vertices)
+
+    def test_print_scale_hidden_thin_patch_is_advisory(self):
+        audit=dict(valid=False,thin_interior_area_mm2=1.95,
+                   thin_exits_on_backing=0,thin_exits_on_source=0)
+        with mock_patch('split3mf.backing_repair.audit_local_backing',return_value=audit), \
+             mock_patch('split3mf.backing_repair.build') as rebuild:
+            result,record,colors=ensure_backing(
+                self.patch,self.thin,self.parent,['A']*len(self.patch.faces),
+                [0,0,-1],part_id='print-scale-advisory')
+        self.assertIs(result,self.thin)
+        self.assertTrue(record['accepted_without_repair'])
+        self.assertEqual(record['acceptance'],'bounded_hidden_thin_backing_patch')
+        self.assertEqual(record['advisory_area_limit_mm2'],2.0)
+        self.assertIsNone(colors)
+        rebuild.assert_not_called()
 
     def test_valid_backing_is_returned_unchanged(self):
         mesh,_=build(self.patch,self.parent,[0,0,-1],direction_mode='local-normal')

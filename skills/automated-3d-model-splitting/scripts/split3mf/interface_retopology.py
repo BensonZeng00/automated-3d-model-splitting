@@ -8,7 +8,7 @@ from typing import Any, Callable
 import numpy as np
 
 from . import common
-from .domain import PlanarArcRetopologyContext
+from .domain import PlanarArcRetopologyContext, SeamSmoothingPolicy
 from .mesh import (
     boundary_loops,
     triangulate_ordered_loop_3d,
@@ -462,6 +462,7 @@ def _repair_flipped_boundary_ears(
     result_points: np.ndarray,
     faces: np.ndarray,
     boundary_ids: np.ndarray,
+    candidate_face_mask: np.ndarray | None = None,
 ) -> tuple[np.ndarray, int]:
     """Flip a local diagonal when one surface-band triangle folds inward."""
 
@@ -530,9 +531,14 @@ def _repair_flipped_boundary_ears(
             valid_neighbors == 0 or opposed / valid_neighbors >= 2.0 / 3.0
         )
 
+    candidate_faces = (
+        np.arange(len(repaired), dtype=np.int64)
+        if candidate_face_mask is None
+        else np.flatnonzero(np.asarray(candidate_face_mask, dtype=bool))
+    )
     suspects = {
         int(face_id)
-        for face_id in range(len(repaired))
+        for face_id in candidate_faces
         if face_is_suspect(int(face_id))
     }
     seen_replacements: set[
@@ -856,6 +862,7 @@ def _surface_band_deformation(
     failure_sink: Callable[[dict[str, Any]], None] | None = None,
     minimum_sparse_inversion_angle_degrees: float = 3.0,
     validation_mode: str = "strict",
+    smoothing_policy: SeamSmoothingPolicy | None = None,
 ) -> tuple[np.ndarray, dict]:
     """Move the real visible seam and diffuse its displacement into its patch.
 
@@ -867,6 +874,7 @@ def _surface_band_deformation(
     is close in Euclidean space.
     """
 
+    policy = smoothing_policy or SeamSmoothingPolicy.named("print-balanced")
     points = np.asarray(source_vertices, dtype=np.float64)
     faces = np.asarray(source_faces, dtype=np.int64)
     original_faces = faces.copy()
@@ -919,15 +927,17 @@ def _surface_band_deformation(
         adjacency.setdefault(right_id, set()).add(left_id)
 
     active_mask = np.zeros(len(points), dtype=bool)
-    stack = [int(value) for value in boundary]
+    stack = [(int(value), 0) for value in boundary]
     active_mask[boundary] = True
     while stack:
-        current = int(stack.pop())
+        current, layer = stack.pop()
+        if layer >= policy.maximum_topology_layers:
+            continue
         for neighbor in adjacency.get(current, ()):
             if active_mask[int(neighbor)]:
                 continue
             active_mask[int(neighbor)] = True
-            stack.append(int(neighbor))
+            stack.append((int(neighbor), layer + 1))
 
     safe_distance = np.maximum(distance, 0.02)
     weights = 1.0 / (safe_distance * safe_distance)
@@ -1008,6 +1018,7 @@ def _surface_band_deformation(
         result,
         faces,
         boundary,
+        candidate_face_mask=np.any(active_mask[faces], axis=1),
     )
     boundary_repair_seconds = float(
         time.perf_counter() - boundary_repair_started_at
@@ -1151,9 +1162,28 @@ def _surface_band_deformation(
             audited_face_count=len(affected_faces),
             result_minimum_angles_degrees=inverted_affected_angles,
             minimum_result_angle_degrees=(
-                minimum_sparse_inversion_angle_degrees
+                policy.minimum_reversed_angle_degrees
             ),
+            maximum_ratio=policy.maximum_introduced_reversed_ratio,
+            maximum_edge_connected_cluster=policy.maximum_reversed_cluster_faces,
         )
+        boundary_set = set(int(value) for value in boundary)
+        inverted_face_ids = np.flatnonzero(locally_inverted)
+        inverted_faces_touching_boundary = int(
+            sum(
+                any(int(vertex_id) in boundary_set for vertex_id in faces[int(face_id)])
+                for face_id in inverted_face_ids
+            )
+        )
+        if (
+            inverted_faces_touching_boundary
+            and not policy.allow_sparse_seam_reversals
+        ):
+            sparse_inversion_audit = {
+                **sparse_inversion_audit,
+                "accepted": False,
+                "rejected_reason": "introduced_inversion_touches_final_seam",
+            }
         user_reviewed_advisory = str(validation_mode) == "advisory"
         normal_change_advisory_accepted = bool(
             user_reviewed_advisory
@@ -1166,7 +1196,6 @@ def _surface_band_deformation(
             or normal_change_advisory_accepted
             else reversed_faces
         )
-        boundary_set = set(int(value) for value in boundary)
         locally_inverted_samples = [
             {
                 "face_index": int(face_id),
@@ -1255,16 +1284,46 @@ def _surface_band_deformation(
             audited_face_count=0,
             result_minimum_angles_degrees=np.empty(0, dtype=np.float64),
             minimum_result_angle_degrees=(
-                minimum_sparse_inversion_angle_degrees
+                policy.minimum_reversed_angle_degrees
             ),
+            maximum_ratio=policy.maximum_introduced_reversed_ratio,
+            maximum_edge_connected_cluster=policy.maximum_reversed_cluster_faces,
         )
+        inverted_faces_touching_boundary = 0
 
     boundary_error = float(
         np.linalg.norm(result[boundary] - targets, axis=1).max(initial=0.0)
     )
-    maximum_allowed_edge_stretch = (
-        128.0 if str(validation_mode) == "advisory" else 8.0
+    source_triangle_double_areas = np.linalg.norm(
+        np.cross(
+            points[faces][:, 1] - points[faces][:, 0],
+            points[faces][:, 2] - points[faces][:, 0],
+        ),
+        axis=1,
     )
+    affected_area_ratio = float(
+        source_triangle_double_areas[affected_face_mask].sum()
+        / max(float(source_triangle_double_areas.sum()), 1e-24)
+    )
+    affected_area_within_budget = bool(
+        len(faces) < 1000
+        or affected_area_ratio <= policy.maximum_affected_area_ratio + 1e-12
+    )
+    # The seam itself is the requested interface replacement.  The collateral
+    # source budget counts only vertices reached beyond that interface.
+    moved_vertex_mask = np.linalg.norm(result - points, axis=1) > 1e-12
+    moved_vertex_mask[boundary] = False
+    affected_vertex_count = int(np.count_nonzero(moved_vertex_mask))
+    maximum_affected_vertices = min(
+        int(policy.maximum_affected_vertices),
+        int(np.floor(len(points) * policy.maximum_affected_vertex_ratio)),
+    )
+    affected_vertices_within_budget = bool(
+        len(points) < 1000 or affected_vertex_count <= maximum_affected_vertices
+    )
+    maximum_allowed_edge_stretch = float(policy.maximum_edge_stretch_ratio)
+    if str(validation_mode) == "advisory":
+        maximum_allowed_edge_stretch = max(maximum_allowed_edge_stretch, 128.0)
     edge_stretch_advisory_accepted = bool(
         str(validation_mode) == "advisory"
         and maximum_edge_stretch > 8.0 + 1e-9
@@ -1276,12 +1335,23 @@ def _surface_band_deformation(
         and blocking_reversed_faces == 0
         and not introduced_over_shared_edges
         and not introduced_inconsistent_edges
+        and affected_area_within_budget
+        and affected_vertices_within_budget
         and maximum_edge_stretch <= maximum_allowed_edge_stretch + 1e-9
     )
     quality = {
         "valid": valid,
         "strategy": "topology_connected_c2_visible_surface_band",
         "surface_band_validation_mode": str(validation_mode),
+        "seam_smoothing_profile": policy.profile,
+        "surface_band_affected_area_ratio": affected_area_ratio,
+        "maximum_affected_area_ratio": policy.maximum_affected_area_ratio,
+        "affected_area_within_budget": affected_area_within_budget,
+        "affected_vertex_count": affected_vertex_count,
+        "maximum_affected_vertices": maximum_affected_vertices,
+        "affected_vertices_within_budget": affected_vertices_within_budget,
+        "maximum_topology_layers": policy.maximum_topology_layers,
+        "introduced_inverted_faces_touching_boundary": inverted_faces_touching_boundary,
         "surface_band_width_mm": band,
         "visible_boundary_vertex_count": int(len(boundary)),
         "surface_band_candidate_vertices": int(np.count_nonzero(candidate_mask)),
@@ -1371,13 +1441,24 @@ class InterfaceRetopologyService:
         source_vertex_ids: np.ndarray,
         context: PlanarArcRetopologyContext,
     ) -> tuple[np.ndarray, dict]:
+        policy = context.config.smoothing_policy
+        loop_points = np.asarray(points, dtype=np.float64)
+        loop_diagonal = float(np.linalg.norm(np.ptp(loop_points, axis=0)))
+        maximum_target_offset = min(
+            float(policy.maximum_displacement_mm),
+            max(
+                min(2.0, float(policy.maximum_displacement_mm)),
+                loop_diagonal * float(policy.maximum_bbox_diagonal_ratio),
+            ),
+        )
         try:
             target = build_planar_arc_boundary(
                 points,
                 source_vertex_ids,
                 target_samples=context.config.target_samples,
                 smooth_passes=context.config.smooth_passes,
-                maximum_target_offset_mm=context.config.maximum_safe_target_offset_mm,
+                maximum_target_offset_mm=maximum_target_offset,
+                maximum_p95_target_offset_mm=policy.p95_displacement_mm,
             )
         except CurveClarityRequired as exc:
             if context.curve_review_sink is not None:
@@ -1391,6 +1472,8 @@ class InterfaceRetopologyService:
                 "target_slope_degrees": float(context.config.target_slope_degrees),
                 "minimum_slope_degrees": float(context.config.minimum_slope_degrees),
                 "maximum_slope_degrees": float(context.config.maximum_slope_degrees),
+                "seam_smoothing_profile": policy.profile,
+                "maximum_profile_target_offset_mm": maximum_target_offset,
             }
         )
         return target.target_points, record
@@ -1526,6 +1609,7 @@ class InterfaceRetopologyService:
                         else 3.0
                     ),
                     validation_mode=context.config.surface_band_validation,
+                    smoothing_policy=context.config.smoothing_policy,
                 )
             if not bool(band_quality["valid"]):
                 raise PlanarArcError(
@@ -1534,6 +1618,9 @@ class InterfaceRetopologyService:
                     f"reversed_faces={band_quality['reversed_face_count']}, "
                     f"boundary_vertices={band_quality.get('visible_boundary_vertex_count')}, "
                     f"edge_flips={band_quality.get('surface_band_boundary_ear_edge_flips')}, "
+                    f"affected_area_ratio={band_quality.get('surface_band_affected_area_ratio')}, "
+                    f"affected_area_limit={band_quality.get('maximum_affected_area_ratio')}, "
+                    f"sparse_audit={band_quality.get('sparse_local_inversion_audit')}, "
                     f"samples={band_quality.get('locally_inverted_face_samples')}, "
                     "maximum_edge_stretch_ratio="
                     f"{band_quality['maximum_edge_stretch_ratio']:.6f}"

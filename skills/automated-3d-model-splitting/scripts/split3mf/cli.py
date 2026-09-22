@@ -306,6 +306,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--boundary-target-samples", type=int, default=384)
     parser.add_argument("--boundary-smooth-passes", type=int, default=28)
     parser.add_argument(
+        "--seam-smoothing-profile",
+        choices=["source-conservative", "print-balanced", "print-smooth"],
+        default="print-balanced",
+        help=(
+            "Printable seam quality budget. print-balanced tolerates sparse, "
+            "isolated source-normal outliers while preserving hard topology gates."
+        ),
+    )
+    parser.add_argument(
         "--boundary-retopology-band-mm",
         type=float,
         default=3.0,

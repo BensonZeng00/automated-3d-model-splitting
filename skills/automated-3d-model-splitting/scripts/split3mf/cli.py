@@ -178,45 +178,42 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Resolve uncertain automatic classifications as legacy inward inserts instead of stopping for confirmation.",
     )
-    parser.add_argument("--min-faces", type=int, default=1000)
     parser.add_argument(
-        "--tiny-component-policy",
-        choices=["semantic", "merge", "ignore"],
-        default="semantic",
-        help=(
-            "How to handle color-connected fragments below --min-faces. "
-            "semantic auto-merges fragments at or below --tiny-component-auto-noise-max-faces, "
-            "then renders the remaining candidates for image review and requires a user-confirmed decision file; "
-            "merge assigns every fragment to an effective part; ignore preserves legacy filtering."
-        ),
-    )
-    parser.add_argument(
-        "--tiny-component-auto-noise-max-faces",
+        "--noise-review-max-faces",
         type=int,
         default=100,
         help=(
-            "Under semantic policy, automatically classify connected regions with at most this many faces "
-            "as noise and merge them without image review (default: 100)."
+            "Classify source regions with at most this many faces as noise candidates "
+            "for mandatory review; never merge or repair them (default: 100)."
         ),
     )
     parser.add_argument(
-        "--tiny-component-review-json",
+        "--small-region-review-max-faces",
+        type=int,
+        default=999,
+        help=(
+            "Require semantic review for source regions through this face count; "
+            "regions remain unchanged and enter normal splitting (default: 999)."
+        ),
+    )
+    parser.add_argument(
+        "--region-review-json",
         default=None,
         help=(
-            "User-confirmed image-review decisions for every rendered candidate above the auto-noise threshold. "
-            "Selected items are preserved and every unselected item is merged."
+            "User-confirmed noise/part/uncertain classifications for every review candidate. "
+            "Classifications never change source geometry."
         ),
     )
     parser.add_argument(
-        "--tiny-component-review-dir",
+        "--region-review-dir",
         default=None,
-        help="Directory for generated small-component review PNGs and manifest; defaults beside the source 3MF.",
+        help="Directory for generated source-region review PNGs and manifest; defaults beside the source 3MF.",
     )
     parser.add_argument(
-        "--tiny-component-review-resolution",
+        "--region-review-resolution",
         type=int,
         default=320,
-        help="Pixel size of each whole-model or zoom tile in a six-view small-component review sheet.",
+        help="Pixel size of each whole-model or zoom tile in a six-view source-region review sheet.",
     )
     parser.add_argument(
         "--max-extension-mm",
@@ -411,8 +408,6 @@ def main(argv: list[str] | None = None) -> None:
         configure_uniform_fit(args)
     except ValueError as exc:
         parser.error(str(exc))
-    if args.min_faces < 1:
-        parser.error("--min-faces must be at least 1")
     if args.boundary_target_samples < 16:
         parser.error("--boundary-target-samples must be at least 16")
     if args.boundary_smooth_passes < 0:
@@ -427,10 +422,12 @@ def main(argv: list[str] | None = None) -> None:
         parser.error("--exterior-view-count must be at least 6")
     if args.exterior_depth_map_resolution < 64:
         parser.error("--exterior-depth-map-resolution must be at least 64")
-    if not 128 <= args.tiny_component_review_resolution <= 1024:
-        parser.error("--tiny-component-review-resolution must be between 128 and 1024")
-    if args.tiny_component_auto_noise_max_faces < 0:
-        parser.error("--tiny-component-auto-noise-max-faces must be non-negative")
+    if not 128 <= args.region_review_resolution <= 1024:
+        parser.error("--region-review-resolution must be between 128 and 1024")
+    if args.noise_review_max_faces < 0:
+        parser.error("--noise-review-max-faces must be non-negative")
+    if args.small_region_review_max_faces < args.noise_review_max_faces:
+        parser.error("--small-region-review-max-faces must be at least --noise-review-max-faces")
     if args.exterior_depth_tolerance_mm < 0:
         parser.error("--exterior-depth-tolerance-mm must be non-negative")
     if args.max_planar_travel_mm < max(float(args.max_extension_mm), 0.4):

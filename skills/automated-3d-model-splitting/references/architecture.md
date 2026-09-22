@@ -9,7 +9,7 @@
 `split3mf.pipeline.SplitPipeline` owns one complete split run. It coordinates services in this order:
 
 1. read and normalize the source project;
-2. recognize connected painted components, apply the <=2 mm adjacent merge, screen long strips regardless of face count, auto-merge remaining noise-sized regions, and review long strips plus remaining sub-threshold regions until source-matched user decisions are supplied;
+2. recognize connected painted source regions, review <=100-face noise candidates, 101–999-face small-region candidates, and long strips, then preserve every confirmed noise/part/uncertain region for normal interface planning;
 3. select the root body from geometry and separator evidence;
 4. infer the recursive-minimal assembly tree and deterministic depth-first execution steps;
 5. plan safe inward directions and adaptive caps;
@@ -79,7 +79,7 @@ Prefer these explicit records when data crosses stage boundaries. Do not introdu
 - `ThreeMFReader` reads vendor packages and resolves build/component transforms.
 - `VendorPaintDecoder` restores composite `paint_color` subdivision streams.
 - `PartRecognizer` groups material-equivalent, edge-connected exterior paint.
-- `small_component_review.py` excludes auto-noise regions at or below the configured face threshold, renders deterministic whole-model and local-zoom PNG sheets for the remaining review candidates, writes the review manifest/template, and validates complete user-confirmed decisions. It does not call an image model itself; the Codex skill inspects the images and asks the user.
+- `source_region_review.py` renders deterministic whole-model and local-zoom PNG sheets for every face-count or long-strip candidate, writes the classification manifest/template, and validates complete user-confirmed noise/part/uncertain decisions without changing source geometry.
 - `explicit_merge.py` applies user-authorized recognition-space body merges,
   preserves the first member as the body identity, recomputes component
   geometry, and records the original-to-effective index mapping. Per-face
@@ -168,7 +168,7 @@ Services should be stateless where practical. Inject or replace collaborators th
 - `interface_retreat.py`: opt-in, user-confirmed source-face ownership retreat
   across an existing child/parent seam, with deterministic geodesic growth,
   material preservation, and connectivity/size safety gates;
-- `small_component_review.py`: sub-threshold review rendering, manifest generation, and confirmed-decision validation;
+- `source_region_review.py`: source-region review rendering, manifest generation, and classification validation;
 - `selection.py`: structural evidence and root-body selection;
 - `assembly.py`: parent inference, cycle repair, recursive layers;
 - `inward.py`: recursive inward orchestration, thickness probing, cap planning,
@@ -293,7 +293,7 @@ loops is a performance regression even when the resulting geometry matches.
 
 ## General tolerance services (2.0.6)
 
-`tolerance_policy.py` owns ratio and physical-span semantics. `micro_regions.py` merges <=2 mm connected regions before tiny-component review. Ownership and material arrays remain separate. `micro_openings.py` appends source-hole caps after component policy and before tree construction, verifies exact rim closure and directed internal edges, then extends paint and component membership. Failed candidates remain unresolved. Existing assembly and mesh validation still decide deliverability.
+`region_review.py` owns face-count and long-strip candidate selection. These measurements request semantic review only. The production pipeline does not invoke `micro_regions.py` or `micro_openings.py`: source regions and openings remain unchanged, while interface validation alone decides whether a split can proceed.
 
 Boundary cycle decomposition uses an explicit stack. Inward conormals accumulate only faces incident to the requested ring, retaining source order. `prepare_debug_directory` returns an atomically reserved new `Path`; callers must use that returned path. A collision never removes earlier artifacts. See [tolerance-and-runtime-policy.md](tolerance-and-runtime-policy.md) for ratios, reporting, and execution recovery.
 

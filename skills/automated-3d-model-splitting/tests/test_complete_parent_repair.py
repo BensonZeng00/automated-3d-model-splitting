@@ -11,19 +11,15 @@ from split3mf.complete_parent_repair import repair_complete_parent
 
 
 class CompleteParentRepairTests(unittest.TestCase):
-    def test_identity_seam_closes_without_source_movement(self):
+    def test_identity_seam_is_not_repaired_implicitly(self):
         source = trimesh.creation.box()
         vertices = np.vstack((source.vertices, source.vertices[source.faces[0,0]]))
-        faces = source.faces.copy()
-        faces[0,0] = len(vertices)-1
+        faces = source.faces.copy(); faces[0,0] = len(vertices)-1
         broken = trimesh.Trimesh(vertices, faces, process=False)
-        self.assertFalse(broken.is_watertight)
-        result, report = repair_complete_parent(broken)
-        self.assertTrue(result.is_watertight)
-        self.assertTrue(report['valid'])
-        self.assertEqual(report['added_or_retriangulated_area_mm2'], 0.)
-        np.testing.assert_array_equal(result.triangles, source.triangles)
+        with self.assertRaises(ValueError):
+            repair_complete_parent(broken)
         np.testing.assert_array_equal(broken.vertices, vertices)
+        np.testing.assert_array_equal(broken.faces, faces)
 
     def test_broad_hole_is_not_converted_to_local_repair(self):
         source = trimesh.creation.box(extents=[10]*3)

@@ -6,10 +6,10 @@ import zlib
 from pathlib import Path
 
 from .common import *
-from .recognition import classify_tiny_groups_semantically
+from .recognition import classify_review_groups_semantically
 
 
-REVIEW_SCHEMA_VERSION = 1
+REVIEW_SCHEMA_VERSION = 2
 REVIEW_VIEW_DIRECTIONS = (
     (1.0, 0.0, 0.0),
     (-1.0, 0.0, 0.0),
@@ -20,8 +20,8 @@ REVIEW_VIEW_DIRECTIONS = (
 )
 
 
-def default_tiny_component_review_dir(input_path: Path) -> Path:
-    return input_path.with_name(f"{input_path.stem}_tiny_component_review")
+def default_region_review_dir(input_path: Path) -> Path:
+    return input_path.with_name(f"{input_path.stem}_region_review")
 
 
 def _view_basis(direction: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -192,7 +192,7 @@ def _render_review_tile(
     return image
 
 
-def render_tiny_component_review_image(
+def render_region_review_image(
     vertices: np.ndarray,
     faces: np.ndarray,
     target_faces: np.ndarray,
@@ -217,7 +217,7 @@ def render_tiny_component_review_image(
     _write_rgb_png(path, sheet)
 
 
-def build_tiny_component_review(
+def build_source_region_review(
     *,
     input_path: Path,
     review_dir: Path,
@@ -226,25 +226,28 @@ def build_tiny_component_review(
     connectivity_colors: list[str],
     display_colors: list[str],
     groups: list[np.ndarray],
-    min_faces: int,
-    auto_noise_max_faces: int,
+    noise_max_faces: int,
+    small_region_max_faces: int,
     visible_faces: np.ndarray | None,
     view_count: int,
     depth_map_resolution: int,
     image_resolution: int,
 ) -> dict:
     normalized_groups = [np.asarray(group, dtype=np.int64) for group in groups]
-    from .region_review import partition_review_groups
-    _, auto_noise_groups, tiny_groups = partition_review_groups(
-        vertices, faces, normalized_groups, min_faces, auto_noise_max_faces, visible_faces)
-    records = classify_tiny_groups_semantically(
+    from .region_review import select_region_review_groups
+    _, review_candidates = select_region_review_groups(
+        vertices, faces, normalized_groups, noise_max_faces,
+        small_region_max_faces, visible_faces)
+    review_groups = [group for group, _ in review_candidates]
+    review_categories = [category for _, category in review_candidates]
+    records = classify_review_groups_semantically(
         vertices=vertices,
         faces=faces,
         connectivity_colors=connectivity_colors,
         display_colors=display_colors,
         all_groups=normalized_groups,
-        tiny_groups=tiny_groups,
-        min_faces=min_faces,
+        review_groups=review_groups,
+        min_faces=small_region_max_faces + 1,
         visible_faces=visible_faces,
         view_count=view_count,
         depth_map_resolution=depth_map_resolution,
@@ -252,10 +255,10 @@ def build_tiny_component_review(
     review_dir.mkdir(parents=True, exist_ok=True)
     manifest_items = []
     decision_items = []
-    for group, record in zip(tiny_groups, records):
+    for group, category, record in zip(review_groups, review_categories, records):
         fragment_id = int(record["fragment_id"])
         image_path = review_dir / f"F{fragment_id:03d}_context_and_zoom.png"
-        render_tiny_component_review_image(
+        render_region_review_image(
             vertices,
             faces,
             group,
@@ -267,7 +270,8 @@ def build_tiny_component_review(
         item["geometry_evidence_threshold"] = item.pop("semantic_keep_threshold", None)
         item.pop("semantic_decision", None)
         item.pop("semantic_decision_confidence", None)
-        item["review_status"] = "awaiting_image_semantics_and_user_selection"
+        item["review_status"] = "awaiting_user_classification"
+        item["review_category"] = category
         item["review_image"] = str(image_path)
         item["review_layout"] = {
             "top_row": "whole-model context with candidate highlighted magenta",
@@ -281,29 +285,20 @@ def build_tiny_component_review(
                 "source_min_face_index": int(record["source_min_face_index"]),
                 "semantic_label": "",
                 "visual_confidence": "UNKNOWN",
-                "preserve": None,
+                "classification": "",
             }
         )
     manifest = {
         "schema_version": REVIEW_SCHEMA_VERSION,
         "source": str(input_path.resolve()),
         "source_face_count": int(len(faces)),
-        "min_faces": int(min_faces),
-        "auto_noise_max_faces": int(auto_noise_max_faces),
-        "auto_noise_count": int(len(auto_noise_groups)),
-        "auto_noise": [
-            {
-                "source_min_face_index": int(np.min(group)),
-                "faces": int(len(group)),
-            }
-            for group in auto_noise_groups
-        ],
+        "noise_max_faces": int(noise_max_faces),
+        "small_region_max_faces": int(small_region_max_faces),
         "review_required": bool(manifest_items),
         "instruction": (
-            "Ordinary regions at or below auto_noise_max_faces are automatically merged; "
-            "long-thin candidates require review regardless of face count. "
-            "Inspect every remaining review image with image semantics, ask the user which candidates to preserve, "
-            "then set preserve=true only for the selected items; every preserve=false item is merged."
+            "Regions through the small-region threshold and long-thin regions require "
+            "semantic classification. Set classification to noise, part, or uncertain. "
+            "Classification never merges, deletes, recolors, or repairs source geometry."
         ),
         "items": manifest_items,
     }
@@ -314,10 +309,9 @@ def build_tiny_component_review(
         "schema_version": REVIEW_SCHEMA_VERSION,
         "source": str(input_path.resolve()),
         "source_face_count": int(len(faces)),
-        "min_faces": int(min_faces),
-        "auto_noise_max_faces": int(auto_noise_max_faces),
+        "noise_max_faces": int(noise_max_faces),
+        "small_region_max_faces": int(small_region_max_faces),
         "user_confirmed": False,
-        "merge_unselected": True,
         "items": decision_items,
     }
     decision_path.write_text(
@@ -329,38 +323,30 @@ def build_tiny_component_review(
     return manifest
 
 
-def load_confirmed_tiny_component_decisions(
+def load_confirmed_region_decisions(
     path: Path,
     *,
     input_path: Path,
     source_face_count: int,
-    min_faces: int,
-    auto_noise_max_faces: int,
+    noise_max_faces: int,
+    small_region_max_faces: int,
     expected_records: list[dict],
 ) -> dict[int, dict]:
     payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
-        raise ValueError("tiny-component review JSON must contain an object")
+        raise ValueError("region review JSON must contain an object")
     if int(payload.get("schema_version", -1)) != REVIEW_SCHEMA_VERSION:
-        raise ValueError("tiny-component review JSON has an unsupported schema_version")
+        raise ValueError("region review JSON has an unsupported schema_version")
     if Path(str(payload.get("source", ""))).resolve() != input_path.resolve():
-        raise ValueError("tiny-component review JSON belongs to a different source file")
+        raise ValueError("region review JSON belongs to a different source file")
     if int(payload.get("source_face_count", -1)) != int(source_face_count):
-        raise ValueError("tiny-component review JSON source_face_count does not match the source")
-    if int(payload.get("min_faces", -1)) != int(min_faces):
-        raise ValueError("tiny-component review JSON min_faces does not match --min-faces")
-    if (
-        "auto_noise_max_faces" in payload
-        and int(payload["auto_noise_max_faces"]) != int(auto_noise_max_faces)
-    ):
-        raise ValueError(
-            "tiny-component review JSON auto_noise_max_faces does not match "
-            "--tiny-component-auto-noise-max-faces"
-        )
+        raise ValueError("region review JSON source_face_count does not match the source")
+    if int(payload.get("noise_max_faces", -1)) != int(noise_max_faces):
+        raise ValueError("region review JSON noise_max_faces does not match --noise-review-max-faces")
+    if int(payload.get("small_region_max_faces", -1)) != int(small_region_max_faces):
+        raise ValueError("region review JSON small_region_max_faces does not match --small-region-review-max-faces")
     if payload.get("user_confirmed") is not True:
-        raise ValueError("tiny-component review JSON requires user_confirmed=true")
-    if payload.get("merge_unselected") is not True:
-        raise ValueError("tiny-component review JSON requires merge_unselected=true")
+        raise ValueError("region review JSON requires user_confirmed=true")
 
     expected = {
         int(record["fragment_id"]): int(record["source_min_face_index"])
@@ -368,21 +354,24 @@ def load_confirmed_tiny_component_decisions(
     }
     items = payload.get("items")
     if not isinstance(items, list):
-        raise ValueError("tiny-component review JSON items must be an array")
+        raise ValueError("region review JSON items must be an array")
     decisions: dict[int, dict] = {}
     for item in items:
         if not isinstance(item, dict):
-            raise ValueError("each tiny-component review item must be an object")
+            raise ValueError("each region review item must be an object")
         fragment_id = int(item.get("fragment_id", -1))
         if fragment_id in decisions:
-            raise ValueError(f"duplicate tiny-component review fragment_id F{fragment_id:03d}")
+            raise ValueError(f"duplicate region review fragment_id F{fragment_id:03d}")
         if fragment_id not in expected:
-            raise ValueError(f"unknown tiny-component review fragment_id F{fragment_id:03d}")
+            raise ValueError(f"unknown region review fragment_id F{fragment_id:03d}")
         source_min_face_index = int(item.get("source_min_face_index", -1))
         if source_min_face_index != expected[fragment_id]:
             raise ValueError(f"F{fragment_id:03d} source_min_face_index does not match current recognition")
-        if not isinstance(item.get("preserve"), bool):
-            raise ValueError(f"F{fragment_id:03d} preserve must be true or false")
+        classification = str(item.get("classification", "")).strip().lower()
+        if classification not in {"noise", "part", "uncertain"}:
+            raise ValueError(
+                f"F{fragment_id:03d} classification must be noise, part, or uncertain"
+            )
         label = str(item.get("semantic_label", "")).strip()
         if not label:
             raise ValueError(f"F{fragment_id:03d} requires a semantic_label from image review")
@@ -391,12 +380,12 @@ def load_confirmed_tiny_component_decisions(
             "source_min_face_index": source_min_face_index,
             "semantic_label": label,
             "visual_confidence": str(item.get("visual_confidence", "UNKNOWN")),
-            "preserve": bool(item["preserve"]),
+            "classification": classification,
         }
     if set(decisions) != set(expected):
         missing = sorted(set(expected) - set(decisions))
         raise ValueError(
-            "tiny-component review JSON must include every candidate; missing "
+            "region review JSON must include every candidate; missing "
             + ", ".join(f"F{fragment_id:03d}" for fragment_id in missing)
         )
     return decisions

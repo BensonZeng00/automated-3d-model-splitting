@@ -27,6 +27,54 @@ from .surface_quality import (
 )
 
 
+def _visual_displacement_advisory(
+    validation_mode: str,
+    displacement: np.ndarray,
+    policy: SeamSmoothingPolicy,
+) -> tuple[bool, float, float]:
+    """Classify broad coverage by physical displacement, never topology."""
+    values = np.asarray(displacement, dtype=np.float64)
+    maximum = float(values.max(initial=0.0))
+    p95 = float(np.percentile(values, 95)) if len(values) else 0.0
+    accepted = bool(
+        str(validation_mode) == "advisory"
+        and maximum <= policy.maximum_displacement_mm + 1e-12
+        and p95 <= policy.p95_displacement_mm + 1e-12
+    )
+    return accepted, maximum, p95
+
+
+def _select_visible_boundary_target(
+    source: np.ndarray,
+    proposed: np.ndarray,
+    visible_band_mm: float,
+) -> tuple[np.ndarray, dict]:
+    """Keep large seam motion in subsequently generated hidden geometry.
+
+    A target farther than the available visible transition band would fold the
+    source annulus.  Preserve its exact boundary instead; the inward builder
+    will generate side walls and a cap from this shared immutable ring.
+    """
+    source_points = np.asarray(source, dtype=np.float64)
+    proposed_points = np.asarray(proposed, dtype=np.float64)
+    displacement = np.linalg.norm(proposed_points - source_points, axis=1)
+    maximum = float(displacement.max(initial=0.0))
+    preserve_source = bool(maximum > float(visible_band_mm) + 1e-12)
+    return (
+        source_points.copy() if preserve_source else proposed_points,
+        {
+            "large_displacement_source_boundary_preserved": preserve_source,
+            "requested_maximum_target_displacement_mm": maximum,
+            "visible_transition_band_mm": float(visible_band_mm),
+            "large_displacement_strategy": (
+                "generated_inward_wall_from_immutable_source_ring"
+                if preserve_source
+                else "visible_source_band_deformation"
+            ),
+        },
+    )
+
+
 def _replace_faces_in_edge_map(
     faces: np.ndarray,
     face_ids: list[int] | tuple[int, ...] | np.ndarray,
@@ -464,7 +512,12 @@ def _repair_flipped_boundary_ears(
     boundary_ids: np.ndarray,
     candidate_face_mask: np.ndarray | None = None,
 ) -> tuple[np.ndarray, int]:
-    """Flip a local diagonal when one surface-band triangle folds inward."""
+    """Repair visible-source triangles folded by moving the shared seam.
+
+    This runs before generated side walls and caps exist: those faces must use
+    the final, audited visible boundary.  It repairs the source-side annulus,
+    not a missing split cap, by changing only a local quad diagonal.
+    """
 
     repaired = np.asarray(faces, dtype=np.int64).copy()
     repair_count = 0
@@ -1013,12 +1066,20 @@ def _surface_band_deformation(
     result = points + applied
     result[boundary] = targets
     boundary_repair_started_at = time.perf_counter()
+    boundary_repair_candidate_mask = np.any(active_mask[faces], axis=1)
+    runtime_log(
+        "几何性能",
+        "surface_band_boundary_repair_start",
+        "开始检查并修复边界耳片",
+        candidate_faces=int(np.count_nonzero(boundary_repair_candidate_mask)),
+        boundary_vertices=int(len(boundary)),
+    )
     faces, boundary_ear_repairs = _repair_flipped_boundary_ears(
         points,
         result,
         faces,
         boundary,
-        candidate_face_mask=np.any(active_mask[faces], axis=1),
+        candidate_face_mask=boundary_repair_candidate_mask,
     )
     boundary_repair_seconds = float(
         time.perf_counter() - boundary_repair_started_at
@@ -1309,9 +1370,23 @@ def _surface_band_deformation(
         len(faces) < 1000
         or affected_area_ratio <= policy.maximum_affected_area_ratio + 1e-12
     )
+    displacement = np.linalg.norm(result - points, axis=1)
+    # Coverage is not visual severity: a smooth sub-nozzle displacement can
+    # touch a broad finely tessellated band without producing a visible ridge.
+    # Only explicit advisory mode may replace coverage budgets with the actual
+    # displacement envelope; topology and printable-face gates remain blocking.
+    (
+        visual_extent_advisory_accepted,
+        maximum_displacement,
+        p95_displacement,
+    ) = _visual_displacement_advisory(
+        validation_mode,
+        displacement,
+        policy,
+    )
     # The seam itself is the requested interface replacement.  The collateral
     # source budget counts only vertices reached beyond that interface.
-    moved_vertex_mask = np.linalg.norm(result - points, axis=1) > 1e-12
+    moved_vertex_mask = displacement > 1e-12
     moved_vertex_mask[boundary] = False
     affected_vertex_count = int(np.count_nonzero(moved_vertex_mask))
     maximum_affected_vertices = min(
@@ -1335,8 +1410,8 @@ def _surface_band_deformation(
         and blocking_reversed_faces == 0
         and not introduced_over_shared_edges
         and not introduced_inconsistent_edges
-        and affected_area_within_budget
-        and affected_vertices_within_budget
+        and (affected_area_within_budget or visual_extent_advisory_accepted)
+        and (affected_vertices_within_budget or visual_extent_advisory_accepted)
         and maximum_edge_stretch <= maximum_allowed_edge_stretch + 1e-9
     )
     quality = {
@@ -1347,6 +1422,8 @@ def _surface_band_deformation(
         "surface_band_affected_area_ratio": affected_area_ratio,
         "maximum_affected_area_ratio": policy.maximum_affected_area_ratio,
         "affected_area_within_budget": affected_area_within_budget,
+        "visual_extent_advisory_accepted": visual_extent_advisory_accepted,
+        "p95_vertex_displacement_mm": p95_displacement,
         "affected_vertex_count": affected_vertex_count,
         "maximum_affected_vertices": maximum_affected_vertices,
         "affected_vertices_within_budget": affected_vertices_within_budget,
@@ -1370,9 +1447,7 @@ def _surface_band_deformation(
         ),
         "maximum_interior_untangle_correction_mm": float(maximum_interior_correction),
         "boundary_match_error_mm": boundary_error,
-        "maximum_vertex_displacement_mm": float(
-            np.linalg.norm(applied, axis=1).max(initial=0.0)
-        ),
+        "maximum_vertex_displacement_mm": maximum_displacement,
         "degenerate_face_count": degenerate_faces,
         "reversed_face_count": reversed_faces,
         "blocking_reversed_face_count": int(blocking_reversed_faces),
@@ -1494,6 +1569,14 @@ class InterfaceRetopologyService:
         source = np.asarray(local_vertices, dtype=np.float64)
         result = source.copy()
         global_ids = np.asarray(global_vertex_ids, dtype=np.int64)
+        runtime_log(
+            "planar-arc-retopology",
+            "visible_surface_conformance_start",
+            "先一致化并审计可见源表面；侧壁和封口面将在边界通过后生成",
+            local_faces=0 if local_faces is None else int(len(local_faces)),
+            boundary_loops=int(len(loops)),
+            generated_split_faces=0,
+        )
         records: list[dict] = []
         local_boundary_ids: list[int] = []
         target_boundary_points: list[np.ndarray] = []
@@ -1506,6 +1589,12 @@ class InterfaceRetopologyService:
                 global_ids[local_indices],
                 context,
             )
+            target, displacement_strategy = _select_visible_boundary_target(
+                source[local_indices],
+                target,
+                context.config.retopology_band_mm,
+            )
+            record.update(displacement_strategy)
             local_boundary_ids.extend(int(value) for value in local_indices)
             target_boundary_points.extend(
                 np.asarray(point, dtype=np.float64) for point in target

@@ -306,6 +306,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--boundary-target-samples", type=int, default=384)
     parser.add_argument("--boundary-smooth-passes", type=int, default=28)
     parser.add_argument(
+        "--maximum-boundary-displacement-mm",
+        type=float,
+        default=10.0,
+        help=(
+            "Maximum and P95 planar-arc target displacement in millimeters "
+            "before the interface is rejected (default: 10)."
+        ),
+    )
+    parser.add_argument(
         "--seam-smoothing-profile",
         choices=["source-conservative", "print-balanced", "print-smooth"],
         default="print-balanced",
@@ -337,6 +346,8 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Whether a user-reviewed surface band may report source-normal "
             "changes and bounded edge stretch up to 128x as visual advisories, "
+            "replace area/vertex coverage limits with the configured maximum and "
+            "P95 displacement envelope when both are satisfied, "
             "allow the target to use up to 60%% of the requested real surface "
             "band, and accept eligible sparse isolated inversions down to a 1 degree "
             "result angle. Degeneracy, topology, and Boolean checks remain "
@@ -423,6 +434,8 @@ def main(argv: list[str] | None = None) -> None:
         parser.error("--boundary-smooth-passes must be non-negative")
     if args.boundary_retopology_band_mm <= 0:
         parser.error("--boundary-retopology-band-mm must be positive")
+    if args.maximum_boundary_displacement_mm <= 0:
+        parser.error("--maximum-boundary-displacement-mm must be positive")
     if args.fit_clearance_mm < 0 or args.lead_in_mm < 0 or args.sibling_clearance_mm < 0:
         parser.error("clearance and lead-in values must be non-negative")
     if args.clearance_feature_ratio <= 0 or args.clearance_min_mm < 0:

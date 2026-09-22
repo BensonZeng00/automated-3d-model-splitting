@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from unittest.mock import patch
+from types import SimpleNamespace
 
 import numpy as np
 import trimesh
@@ -12,6 +13,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from split3mf import common
 common.load_core_dependencies()
 from split3mf.boundary_clarity import BoundaryGraph
+from split3mf.boundary_simplification import (
+    MAX_EXACT_CROSSING_LOOP_VERTICES,
+    _crossing_vertices,
+)
 from split3mf.boundary_review import (
     BoundaryReviewService, BoundaryReviewRequired, BoundaryDecisionError,
     owners_from_components, apply_component_ownership,
@@ -132,6 +137,28 @@ class BoundaryClarityTests(unittest.TestCase):
         args = build_parser().parse_args(['--input', 'pending.3mf'])
         self.assertIsNone(args.boundary_review_json)
         self.assertFalse(args.boundary_check_only)
+
+    def test_large_seam_loop_skips_quadratic_optional_crossing_cleanup(self):
+        count = MAX_EXACT_CROSSING_LOOP_VERTICES + 1
+        graph = SimpleNamespace(
+            adjacency=np.column_stack((np.arange(count), np.arange(count) + count)),
+            edges=np.column_stack((np.arange(count), np.roll(np.arange(count), -1))),
+            vertices=np.column_stack((
+                np.cos(np.linspace(0, 2 * np.pi, count, endpoint=False)),
+                np.sin(np.linspace(0, 2 * np.pi, count, endpoint=False)),
+                np.zeros(count),
+            )),
+        )
+        owners = np.array(['A'] * count + ['B'] * count)
+
+        with patch(
+            'split3mf.boundary_simplification.crossings',
+            side_effect=AssertionError('quadratic crossing scan'),
+        ):
+            bad, crossing_count = _crossing_vertices(graph, owners, 'A')
+
+        self.assertEqual(bad, set())
+        self.assertEqual(crossing_count, 0)
 
     def test_clear_input_pipeline_continues_to_original_recognition(self):
         from split3mf.domain import SplitConfig

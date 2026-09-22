@@ -26,13 +26,55 @@ from split3mf.interface_retopology import (
     _repair_flipped_boundary_ears,
     _locally_inverted_face_mask,
     _surface_band_deformation,
+    _select_visible_boundary_target,
     _triangle_shape_quality,
     _untangle_interior_surface_vertices,
+    _visual_displacement_advisory,
 )
 from split3mf.surface_quality import sparse_local_inversion_audit
 
 
 class InterfaceRetopologyTests(unittest.TestCase):
+    def test_large_boundary_motion_is_deferred_to_generated_geometry(self) -> None:
+        source = np.asarray([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
+
+        visible, visible_record = _select_visible_boundary_target(
+            source, source + [0.0, 2.0, 0.0], 3.0
+        )
+        hidden, hidden_record = _select_visible_boundary_target(
+            source, source + [0.0, 5.975, 0.0], 3.0
+        )
+
+        np.testing.assert_allclose(visible, source + [0.0, 2.0, 0.0])
+        self.assertFalse(visible_record["large_displacement_source_boundary_preserved"])
+        np.testing.assert_allclose(hidden, source)
+        self.assertTrue(hidden_record["large_displacement_source_boundary_preserved"])
+        self.assertEqual(
+            hidden_record["large_displacement_strategy"],
+            "generated_inward_wall_from_immutable_source_ring",
+        )
+
+    def test_visual_advisory_uses_physical_displacement_not_coverage(self) -> None:
+        policy = PlanarArcRetopologyConfig().smoothing_policy
+        broad_submillimeter = np.full(100_000, 0.4, dtype=np.float64)
+
+        strict, _maximum, _p95 = _visual_displacement_advisory(
+            "strict", broad_submillimeter, policy
+        )
+        advisory, maximum, p95 = _visual_displacement_advisory(
+            "advisory", broad_submillimeter, policy
+        )
+        visible_drift, drift_maximum, _drift_p95 = _visual_displacement_advisory(
+            "advisory", np.r_[broad_submillimeter, 10.5], policy
+        )
+
+        self.assertFalse(strict)
+        self.assertTrue(advisory)
+        self.assertAlmostEqual(maximum, 0.4)
+        self.assertAlmostEqual(p95, 0.4)
+        self.assertFalse(visible_drift)
+        self.assertAlmostEqual(drift_maximum, 10.5)
+
     def test_user_reviewed_surface_band_lowers_only_sparse_angle_floor(self) -> None:
         face_count = 36402
         faces = np.arange(face_count * 3, dtype=np.int64).reshape((-1, 3))
@@ -277,13 +319,22 @@ class InterfaceRetopologyTests(unittest.TestCase):
         self.assertEqual(args.boundary_target_samples, 384)
         self.assertEqual(args.boundary_smooth_passes, 28)
         self.assertEqual(args.boundary_retopology_band_mm, 3.0)
+        self.assertEqual(args.maximum_boundary_displacement_mm, 10.0)
         self.assertEqual(args.seam_smoothing_profile, "print-balanced")
         config = PlanarArcRetopologyConfig.from_namespace(args)
         self.assertEqual(config.smoothing_policy.profile, "print-balanced")
-        self.assertEqual(config.smoothing_policy.maximum_displacement_mm, 0.5)
+        self.assertEqual(config.smoothing_policy.maximum_displacement_mm, 10.0)
+        self.assertEqual(config.smoothing_policy.p95_displacement_mm, 10.0)
         self.assertEqual(config.smoothing_policy.maximum_affected_area_ratio, 0.01)
         self.assertEqual(config.smoothing_policy.maximum_topology_layers, 8)
         self.assertEqual(config.smoothing_policy.maximum_introduced_reversed_ratio, 0.001)
+
+        custom = PlanarArcRetopologyConfig.from_namespace(parser.parse_args([
+            "--input", "placeholder.3mf",
+            "--maximum-boundary-displacement-mm", "6.25",
+        ]))
+        self.assertEqual(custom.smoothing_policy.maximum_displacement_mm, 6.25)
+        self.assertEqual(custom.smoothing_policy.p95_displacement_mm, 6.25)
 
     def test_conservative_and_smooth_profiles_have_ordered_budgets(self) -> None:
         parser = build_parser()

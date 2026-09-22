@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -40,15 +40,15 @@ class SeamSmoothingPolicy:
     def named(cls, profile: str) -> "SeamSmoothingPolicy":
         policies = {
             "source-conservative": cls(
-                "source-conservative", 0.5, 0.5, 1.0, 0.01, 0.05, 5000, 8,
+                "source-conservative", 10.0, 10.0, 1.0, 0.01, 0.05, 5000, 8,
                 0.0, 0, 3.0, 8.0, False,
             ),
             "print-balanced": cls(
-                "print-balanced", 0.5, 0.5, 1.0, 0.01, 0.05, 5000, 8,
+                "print-balanced", 10.0, 10.0, 1.0, 0.01, 0.05, 5000, 8,
                 0.001, 32, 0.01, 16.0, True,
             ),
             "print-smooth": cls(
-                "print-smooth", 0.5, 0.5, 1.0, 0.01, 0.05, 5000, 8,
+                "print-smooth", 10.0, 10.0, 1.0, 0.01, 0.05, 5000, 8,
                 0.002, 64, 0.001, 64.0, True,
             ),
         }
@@ -83,6 +83,14 @@ class PlanarArcRetopologyConfig:
         )
         smoothing_policy = SeamSmoothingPolicy.named(
             getattr(namespace, "seam_smoothing_profile", "print-balanced")
+        )
+        maximum_boundary_displacement_mm = float(
+            getattr(namespace, "maximum_boundary_displacement_mm", 10.0)
+        )
+        smoothing_policy = replace(
+            smoothing_policy,
+            maximum_displacement_mm=maximum_boundary_displacement_mm,
+            p95_displacement_mm=maximum_boundary_displacement_mm,
         )
         if getattr(namespace, 'boundary_shape', 'smooth') != 'smooth':
             raise ValueError('Only smooth boundary mode is supported')

@@ -48,12 +48,14 @@ def _select_visible_boundary_target(
     source: np.ndarray,
     proposed: np.ndarray,
     visible_band_mm: float,
+    maximum_visible_offset_mm: float,
 ) -> tuple[np.ndarray, dict]:
     """Choose the visible rim without discarding the manufacturing target.
 
-    Motion larger than the visible transition band must not be applied to the
-    source surface.  The fitted target is nevertheless retained in the record
-    so generated inward walls and caps can use it as their planning boundary.
+    Motion larger than the safe visible fraction of the transition band must
+    not be applied to the source surface.  The fitted target is nevertheless
+    retained in the record so generated inward walls and caps can use it as
+    their planning boundary.
     """
     source_points = np.asarray(source, dtype=np.float64)
     proposed_points = np.asarray(proposed, dtype=np.float64)
@@ -61,13 +63,17 @@ def _select_visible_boundary_target(
         raise PlanarArcError("fitted boundary target does not match source rim")
     displacement = np.linalg.norm(proposed_points - source_points, axis=1)
     maximum = float(displacement.max(initial=0.0))
-    preserve_source = bool(maximum > float(visible_band_mm) + 1e-12)
+    safe_offset = float(maximum_visible_offset_mm)
+    if safe_offset <= 0.0 or safe_offset > float(visible_band_mm) + 1e-12:
+        raise ValueError("maximum visible offset must be inside the transition band")
+    preserve_source = bool(maximum > safe_offset + 1e-12)
     return (
         source_points.copy() if preserve_source else proposed_points.copy(),
         {
             "large_displacement_source_boundary_preserved": preserve_source,
             "requested_maximum_target_displacement_mm": maximum,
             "visible_transition_band_mm": float(visible_band_mm),
+            "maximum_visible_boundary_offset_mm": safe_offset,
             "large_displacement_strategy": (
                 "generated_inward_wall_from_immutable_source_ring"
                 if preserve_source
@@ -1620,6 +1626,7 @@ class InterfaceRetopologyService:
                 source[local_indices],
                 target,
                 context.config.retopology_band_mm,
+                context.config.maximum_safe_target_offset_mm,
             )
             record.update(displacement_strategy)
             local_boundary_ids.extend(int(value) for value in local_indices)

@@ -7520,6 +7520,11 @@ def make_part_mesh(
     visible_source_vertices = np.asarray(
         retopology_vertices, dtype=np.float64
     ).copy()
+    hidden_geometry_vertices = generated_geometry_boundary_vertices(
+        visible_source_vertices,
+        loops,
+        interface_retopology_records,
+    )
     boundary_match_vertices = visible_source_vertices.copy()
 
     component_center = visible_source_vertices[local_faces.reshape(-1)].mean(axis=0)
@@ -7603,9 +7608,9 @@ def make_part_mesh(
     for loop_index, loop in enumerate(loops):
         loop_array = np.array(loop, dtype=np.int64)
         source_boundary_points = visible_source_vertices[loop_array]
-        internal_boundary_points = retopology_vertices[loop_array]
+        internal_boundary_points = hidden_geometry_vertices[loop_array]
         loop_interior_conormals = boundary_loop_interior_conormals(
-            retopology_vertices, local_faces, loop, reference_axis=inward
+            hidden_geometry_vertices, local_faces, loop, reference_axis=inward
         )
         internal_boundary_points, sibling_record = sibling_cleared_points(loop, internal_boundary_points)
         loop_global_vertices = set(int(global_vertex_ids[i]) for i in loop)
@@ -8128,6 +8133,11 @@ def make_body_cut_mesh(
         mutable_loop_indices,
     ):
         retopology_record["loop_index"] = int(loop_index)
+    hidden_geometry_vertices = generated_geometry_boundary_vertices(
+        visible_source_vertices,
+        mutable_loops,
+        interface_retopology_records,
+    )
     if immutable_source_loop_records:
         runtime_log(
             "递归几何",
@@ -8219,9 +8229,9 @@ def make_body_cut_mesh(
         u, v = orthonormal_basis(inward)
         loop_array = np.array(loop, dtype=np.int64)
         source_boundary_points = visible_source_vertices[loop_array]
-        internal_socket_points = retopology_vertices[loop_array]
+        internal_socket_points = hidden_geometry_vertices[loop_array]
         loop_interior_conormals = boundary_loop_interior_conormals(
-            retopology_vertices, local_faces, loop, reference_axis=inward
+            hidden_geometry_vertices, local_faces, loop, reference_axis=inward
         )
         effective_socket_overcut_mm = max(
             float(ref.get("socket_overcut_mm", socket_overcut_mm)) if ref else socket_overcut_mm,
@@ -8704,6 +8714,11 @@ def make_layer_child_subassembly_mesh(
     ).copy()
     for retopology_record, selected_record in zip(interface_retopology_records, selected_loop_records):
         retopology_record["loop_index"] = int(selected_record["loop_index"])
+    hidden_geometry_vertices = generated_geometry_boundary_vertices(
+        visible_source_vertices,
+        selected_loops,
+        interface_retopology_records,
+    )
 
     u, v = orthonormal_basis(inward)
 
@@ -8743,9 +8758,9 @@ def make_layer_child_subassembly_mesh(
         loop_array = np.array(loop, dtype=np.int64)
         source_boundary_points = visible_source_vertices[loop_array]
         cap_decision = cap_decisions_by_loop.get(int(record["loop_index"]))
-        internal_boundary_points = retopology_vertices[loop_array]
+        internal_boundary_points = hidden_geometry_vertices[loop_array]
         loop_interior_conormals = boundary_loop_interior_conormals(
-            retopology_vertices,
+            hidden_geometry_vertices,
             local_faces,
             loop,
             reference_axis=inward,

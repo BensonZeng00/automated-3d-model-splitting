@@ -43,7 +43,9 @@ class InterfaceRetopologyTests(unittest.TestCase):
         )
         fitted = source + np.asarray([0.0, 0.0, 2.0])
 
-        visible, record = _select_visible_boundary_target(source, fitted, 0.5)
+        visible, record = _select_visible_boundary_target(
+            source, fitted, 0.5, 0.225
+        )
         planned = generated_geometry_boundary_vertices(
             visible, [[0, 1, 2]], [record]
         )
@@ -51,10 +53,44 @@ class InterfaceRetopologyTests(unittest.TestCase):
         np.testing.assert_allclose(visible, source)
         np.testing.assert_allclose(planned, fitted)
         self.assertTrue(record["large_displacement_source_boundary_preserved"])
+        self.assertEqual(record["maximum_visible_boundary_offset_mm"], 0.225)
         self.assertEqual(
             record["large_displacement_strategy"],
             "generated_inward_wall_from_immutable_source_ring",
         )
+
+    def test_cathead_scale_target_uses_hidden_ring_without_widening_band(self) -> None:
+        source = np.zeros((4, 3), dtype=np.float64)
+        fitted = source.copy()
+        fitted[:, 0] = 5.975
+
+        visible, record = _select_visible_boundary_target(
+            source,
+            fitted,
+            visible_band_mm=3.0,
+            maximum_visible_offset_mm=1.35,
+        )
+
+        np.testing.assert_array_equal(visible, source)
+        self.assertTrue(record["large_displacement_source_boundary_preserved"])
+        self.assertAlmostEqual(
+            record["requested_maximum_target_displacement_mm"], 5.975
+        )
+
+    def test_visible_target_is_used_within_safe_band_fraction(self) -> None:
+        source = np.zeros((3, 3), dtype=np.float64)
+        fitted = source.copy()
+        fitted[:, 1] = 1.35
+
+        visible, record = _select_visible_boundary_target(
+            source,
+            fitted,
+            visible_band_mm=3.0,
+            maximum_visible_offset_mm=1.35,
+        )
+
+        np.testing.assert_allclose(visible, fitted)
+        self.assertFalse(record["large_displacement_source_boundary_preserved"])
 
     def test_visual_advisory_uses_physical_displacement_not_coverage(self) -> None:
         policy = PlanarArcRetopologyConfig().smoothing_policy

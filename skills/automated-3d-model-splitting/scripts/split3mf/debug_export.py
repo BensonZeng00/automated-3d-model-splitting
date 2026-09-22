@@ -1687,24 +1687,17 @@ def execute_strict_recursive_split(
             raise ValueError("the first strict recursive step must consume the root model")
 
         if boundary_review is not None:
-            from .boundary_review import owners_from_components, apply_component_ownership
+            from .boundary_review import owners_from_components
             stage_owners = owners_from_components(len(step_faces), step_components)
             checked_owners, boundary_record = boundary_review.prepare(
                 step_vertices, step_faces, stage_owners,
                 context=f"step_{step_order:02d}_P{local_body_index:02d}",
             )
             if not np.array_equal(stage_owners, checked_owners):
-                step_components = apply_component_ownership(
-                    step_vertices, step_faces, step_components, checked_owners)
-                step_boundary_neighbor_lookup = component_boundary_neighbor_lookup(
-                    step_faces, step_components)
-                step_component_centers = {
-                    index: step_components[index - 1].center for index in step_component_centers
-                }
-                # Root helper closures use the original component list: do not reuse
-                # their already-computed child references after a local approval.
-                if recursive_input_path is None:
-                    raise ValueError("Root ownership changed after planning; rerun with input-level boundary approval")
+                boundary_record["proposed_source_ownership_changes"] = int(
+                    np.count_nonzero(stage_owners != checked_owners)
+                )
+                boundary_record["source_ownership_changes_applied"] = False
 
         layer_dir = artifact_layers_dir / (
             f"layer_{step_order:02d}_INWARD_P{local_body_index:02d}"
@@ -2606,4 +2599,3 @@ def execute_strict_recursive_split(
         partial_debug_run=bool(allow_partial),
     )
     return layers_dir, stage_records, active_parts, snapshot_records
-

@@ -14,14 +14,14 @@ from .validation import *
 from .inward import *
 from .debug_export import *
 from .reporting import *
-from .small_component_review import *
+from .source_region_review import *
 from .domain import PlanarArcRetopologyConfig, PlanarArcRetopologyContext, SplitConfig
 from .recursive_preflight import FullTreePreflightError, FullTreePreflightService
 from .explicit_merge import merge_body_components, parse_part_group
 from .interface_retreat import apply_visual_interface_retreats
 from .uniform_fit import scale_finished_insert
 from .guided_internal_cut import GuidedInternalCutSpec
-from .boundary_review import BoundaryReviewService, owners_from_components, apply_component_ownership
+from .boundary_review import BoundaryReviewService, owners_from_components
 from .stage_cache import (
     RecursiveStageCache,
     fingerprint_payload,
@@ -249,170 +249,72 @@ class SplitPipeline:
             "component_connectivity_start",
             "开始按材料和共享边识别连通部件",
             source_faces=int(len(faces)),
-            minimum_faces=int(args.min_faces),
+            small_region_review_max_faces=int(args.small_region_review_max_faces),
         )
         groups = connected_components_by_color(faces, recognition_colors)
-        from .micro_regions import merge_micro_regions
-        from .micro_openings import seal_micro_openings
-        all_components, _ = summarize_components(
-            vertices, faces, recognition_colors, groups, 1, display_colors=recognition_token_colors)
-        all_components, micro_region_records = merge_micro_regions(vertices, faces, all_components)
-        groups = [component.global_faces for component in all_components]
-        micro_policy_changed = any(item['action'] == 'merged' for item in micro_region_records)
-        if micro_region_records:
-            runtime_log("识别", "micro_region_merge", "已处理最大跨度不超过 2 mm 的微小区域", records=micro_region_records)
-        tiny_component_review = None
-        auto_noise_component_count = 0
-        if args.tiny_component_policy == "semantic":
-            normalized_groups = [np.asarray(group, dtype=np.int64) for group in groups]
-            from .region_review import partition_review_groups
-            _, auto_noise_groups, tiny_groups = partition_review_groups(
-                vertices, faces, normalized_groups, args.min_faces,
-                args.tiny_component_auto_noise_max_faces, visible_faces)
-            auto_noise_component_count = int(len(auto_noise_groups))
-            review_records = classify_tiny_groups_semantically(
-                vertices=vertices,
-                faces=faces,
-                connectivity_colors=recognition_colors,
-                display_colors=recognition_token_colors,
-                all_groups=normalized_groups,
-                tiny_groups=tiny_groups,
-                min_faces=args.min_faces,
-                visible_faces=visible_faces,
-                view_count=args.exterior_view_count,
+        region_review = None
+        normalized_groups = [np.asarray(group, dtype=np.int64) for group in groups]
+        from .region_review import select_region_review_groups
+        _, review_candidates = select_region_review_groups(
+            vertices, faces, normalized_groups, args.noise_review_max_faces,
+            args.small_region_review_max_faces, visible_faces)
+        review_groups = [group for group, _ in review_candidates]
+        review_records = classify_review_groups_semantically(
+            vertices=vertices, faces=faces, connectivity_colors=recognition_colors,
+            display_colors=recognition_token_colors, all_groups=normalized_groups,
+            review_groups=review_groups, min_faces=args.small_region_review_max_faces + 1,
+            visible_faces=visible_faces, view_count=args.exterior_view_count,
+            depth_map_resolution=args.exterior_depth_map_resolution)
+        if review_groups and not args.region_review_json:
+            review_dir = (Path(args.region_review_dir).expanduser()
+                          if args.region_review_dir else default_region_review_dir(input_path))
+            region_review = build_source_region_review(
+                input_path=input_path, review_dir=review_dir, vertices=vertices,
+                faces=faces, connectivity_colors=recognition_colors,
+                display_colors=recognition_token_colors, groups=normalized_groups,
+                noise_max_faces=args.noise_review_max_faces,
+                small_region_max_faces=args.small_region_review_max_faces,
+                visible_faces=visible_faces, view_count=args.exterior_view_count,
                 depth_map_resolution=args.exterior_depth_map_resolution,
-            )
-            if tiny_groups and not args.tiny_component_review_json:
-                review_dir = (
-                    Path(args.tiny_component_review_dir).expanduser()
-                    if args.tiny_component_review_dir
-                    else default_tiny_component_review_dir(input_path)
-                )
-                tiny_component_review = build_tiny_component_review(
-                    input_path=input_path,
-                    review_dir=review_dir,
-                    vertices=vertices,
-                    faces=faces,
-                    connectivity_colors=recognition_colors,
-                    display_colors=recognition_token_colors,
-                    groups=normalized_groups,
-                    min_faces=args.min_faces,
-                    auto_noise_max_faces=args.tiny_component_auto_noise_max_faces,
-                    visible_faces=visible_faces,
-                    view_count=args.exterior_view_count,
-                    depth_map_resolution=args.exterior_depth_map_resolution,
-                    image_resolution=args.tiny_component_review_resolution,
-                )
-                print(
-                    "tiny_component_review_required="
-                    + json.dumps(tiny_component_review, ensure_ascii=False, sort_keys=True),
-                    flush=True,
-                )
-                progress(
-                    "识别",
-                    "检测到小区域或长细条噪声候选；已生成多视图，请询问用户选择保留项",
-                    candidates=len(tiny_groups),
-                    auto_noise=len(auto_noise_groups),
-                    manifest=tiny_component_review["manifest_path"],
-                    decisions=tiny_component_review["decision_path"],
-                )
-                raise SystemExit(4)
-            if tiny_groups:
-                review_json_path = Path(args.tiny_component_review_json).expanduser()
-                try:
-                    review_decisions = load_confirmed_tiny_component_decisions(
-                        review_json_path,
-                        input_path=input_path,
-                        source_face_count=len(faces),
-                        min_faces=args.min_faces,
-                        auto_noise_max_faces=args.tiny_component_auto_noise_max_faces,
-                        expected_records=review_records,
-                    )
-                except (OSError, ValueError) as exc:
-                    parser.error(str(exc))
-                tiny_component_review = {
-                    "status": "user_confirmed",
-                    "source": str(review_json_path),
-                    "candidate_count": int(len(tiny_groups)),
-                    "auto_noise_count": int(len(auto_noise_groups)),
-                    "preserved_count": int(
-                        sum(bool(item["preserve"]) for item in review_decisions.values())
-                    ),
-                    "merged_count": int(
-                        sum(not bool(item["preserve"]) for item in review_decisions.values())
-                    ),
-                }
-            else:
-                review_decisions = {}
-                tiny_component_review = {
-                    "status": "not_required",
-                    "candidate_count": 0,
-                    "auto_noise_count": int(len(auto_noise_groups)),
-                    "preserved_count": 0,
-                    "merged_count": 0,
-                }
-            (
-                components,
-                ignored,
-                merged_tiny_components,
-                semantic_preserved_tiny_components,
-            ) = merge_tiny_groups_with_user_review(
-                vertices,
-                faces,
-                recognition_colors,
-                groups,
-                args.min_faces,
-                review_decisions,
-                auto_noise_max_faces=args.tiny_component_auto_noise_max_faces,
-                display_colors=recognition_token_colors,
-                visible_faces=visible_faces,
-                view_count=args.exterior_view_count,
-                depth_map_resolution=args.exterior_depth_map_resolution,
-            )
-        elif args.tiny_component_policy == "merge":
-            components, ignored, merged_tiny_components = merge_tiny_groups_into_components(
-                vertices,
-                faces,
-                recognition_colors,
-                groups,
-                args.min_faces,
-                display_colors=recognition_token_colors,
-            )
-            semantic_preserved_tiny_components = []
+                image_resolution=args.region_review_resolution)
+            print("region_review_required=" + json.dumps(
+                region_review, ensure_ascii=False, sort_keys=True), flush=True)
+            progress("识别", "检测到噪声、小区域或长细条候选；请完成语义分类",
+                     candidates=len(review_groups), manifest=region_review["manifest_path"],
+                     decisions=region_review["decision_path"])
+            raise SystemExit(4)
+        review_decisions = {}
+        if review_groups:
+            review_json_path = Path(args.region_review_json).expanduser()
+            try:
+                review_decisions = load_confirmed_region_decisions(
+                    review_json_path, input_path=input_path, source_face_count=len(faces),
+                    noise_max_faces=args.noise_review_max_faces,
+                    small_region_max_faces=args.small_region_review_max_faces,
+                    expected_records=review_records)
+            except (OSError, ValueError) as exc:
+                parser.error(str(exc))
+            region_review = {
+                "status": "user_confirmed", "source": str(review_json_path),
+                "candidate_count": len(review_groups),
+                "classifications": {
+                    value: sum(item["classification"] == value for item in review_decisions.values())
+                    for value in ("noise", "part", "uncertain")
+                },
+            }
         else:
-            components, ignored = summarize_components(
-                vertices,
-                faces,
-                recognition_colors,
-                groups,
-                args.min_faces,
-                display_colors=recognition_token_colors,
-            )
-            merged_tiny_components = []
-            semantic_preserved_tiny_components = []
+            region_review = {"status": "not_required", "candidate_count": 0}
+        components, _ = summarize_components(
+            vertices, faces, recognition_colors, groups, 1,
+            display_colors=recognition_token_colors)
+        source_region_classifications = list(review_decisions.values())
         if not components:
-            raise SystemExit(f"No effective components found with --min-faces={args.min_faces}")
-        source_face_count_before_caps = len(faces)
-        faces, colors, components, micro_opening_records = seal_micro_openings(
-            vertices, faces, colors, components)
-        if len(faces) > source_face_count_before_caps:
-            recognition_token_colors = list(recognition_token_colors) + colors[source_face_count_before_caps:]
-            micro_policy_changed = True
-        if micro_opening_records:
-            runtime_log("修复", "micro_opening_merge", "已审计最大跨度不超过 2 mm 的网格小口", records=micro_opening_records)
+            raise SystemExit("No source components found")
         component_owners = owners_from_components(len(faces), components)
-        checked_component_owners, _ = boundary_review.prepare(
-            vertices, faces, component_owners, context="recognized_root")
-        component_ownership_changed = not np.array_equal(component_owners, checked_component_owners)
-        if component_ownership_changed:
-            components = apply_component_ownership(vertices, faces, components, checked_component_owners)
-        recursive_face_colors = component_owned_face_colors(
-            recognition_token_colors,
-            components,
-        )
-        if len(ownership_changed) or component_ownership_changed or micro_policy_changed:
-            # Ownership is a separate field: approval must never repaint source faces.
-            recursive_face_colors = list(colors)
+        # Recognition ownership is source data.  Boundary planning may report
+        # an ambiguous seam later, but it must not reassign source faces.
+        # Ownership and semantic classification must never repaint source.
+        recursive_face_colors = list(colors)
         explicit_body_merge = None
         explicit_body_index = None
         if args.merge_body_parts:
@@ -443,32 +345,17 @@ class SplitPipeline:
         runtime_log(
             "识别",
             "component_connectivity_done",
-            "连通部件识别与微小区域处理完成",
+            "连通 source 区域识别与语义审核完成",
             raw_groups=int(len(groups)),
             effective_components=int(len(components)),
-            merged_tiny_components=int(len(merged_tiny_components)),
-            semantic_preserved_tiny_components=int(len(semantic_preserved_tiny_components)),
-            auto_noise_components=int(auto_noise_component_count),
+            reviewed_source_regions=int(len(source_region_classifications)),
+            source_geometry_changed=False,
         )
-        if args.tiny_component_policy == "semantic":
-            print(
-                "tiny_component_review="
-                + json.dumps(
-                    {
-                        "threshold_faces": int(args.min_faces),
-                        "auto_noise_max_faces": int(args.tiny_component_auto_noise_max_faces),
-                        "review": tiny_component_review,
-                        "auto_noise_count": int(auto_noise_component_count),
-                        "preserved_count": int(len(semantic_preserved_tiny_components)),
-                        "merged_count": int(len(merged_tiny_components)),
-                        "preserved": semantic_preserved_tiny_components,
-                        "merged": merged_tiny_components,
-                    },
-                    ensure_ascii=False,
-                    sort_keys=True,
-                ),
-                flush=True,
-            )
+        print("region_review=" + json.dumps({
+            "policy": "preserve-source",
+            "review": region_review,
+            "classifications": source_region_classifications,
+        }, ensure_ascii=False, sort_keys=True), flush=True)
         model_center = vertices.mean(axis=0)
         runtime_log(
             "主体",
@@ -481,7 +368,7 @@ class SplitPipeline:
             faces=faces,
             components=components,
             model_center=model_center,
-            min_faces=args.min_faces,
+            min_faces=(args.small_region_review_max_faces + 1),
         )
         excluded_auto_body_indices = {
             int(index)
@@ -531,7 +418,7 @@ class SplitPipeline:
                 faces=faces,
                 components=components,
                 model_center=model_center,
-                min_faces=args.min_faces,
+                min_faces=(args.small_region_review_max_faces + 1),
             )
             runtime_log(
                 "切面内收",
@@ -544,7 +431,7 @@ class SplitPipeline:
         recognition = annotate_recognition_with_visual_semantics(recognition, visual_semantics.get("parts", {}))
         confirmed_tiny_labels = {
             int(record["source_min_face_index"]): record
-            for record in semantic_preserved_tiny_components
+            for record in source_region_classifications
         }
         for component_index, component in enumerate(components, start=1):
             source_min_face_index = int(np.min(component.global_faces))
@@ -552,11 +439,12 @@ class SplitPipeline:
             if confirmed_tiny is None:
                 continue
             record = recognition[component_index - 1]
-            record["tiny_component_review_label"] = str(confirmed_tiny["semantic_label"])
-            record["tiny_component_review_confidence"] = str(
+            record["region_review_label"] = str(confirmed_tiny["semantic_label"])
+            record["source_region_classification"] = str(confirmed_tiny["classification"])
+            record["region_review_confidence"] = str(
                 confirmed_tiny.get("visual_confidence", "UNKNOWN")
             )
-            record["tiny_component_review_user_confirmed"] = True
+            record["region_review_user_confirmed"] = True
         invalid_mode_override_indices = sorted(index for index in part_mode_overrides if index < 1 or index > len(components))
         if invalid_mode_override_indices:
             parser.error(
@@ -596,7 +484,7 @@ class SplitPipeline:
             record["recognition_basis"] = args.recognition_surface_profile
             record["occluded_paint_excluded"] = args.recognition_surface_profile == "exterior-visible"
             record.update(processing_classifications[int(record["part_index"])])
-        progress("识别", f"识别到 {len(recognition)} 个有效部件", tiny_policy=args.tiny_component_policy, merged_tiny=len(merged_tiny_components))
+        progress("识别", f"识别到 {len(recognition)} 个有效部件", region_review="preserve-source", reviewed=len(source_region_classifications))
         print_recognition(recognition)
         if args.recognize_only:
             return
@@ -1084,15 +972,12 @@ class SplitPipeline:
             "source_mesh_validation": validate_mesh_in_memory(
                 trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
             ),
-            "min_faces": args.min_faces,
-            "tiny_component_policy": args.tiny_component_policy,
-            "tiny_component_auto_noise_max_faces": args.tiny_component_auto_noise_max_faces,
-            "auto_noise_component_count": auto_noise_component_count,
-            "tiny_component_review": tiny_component_review,
-            "merged_tiny_component_count": len(merged_tiny_components),
-            "merged_tiny_components": merged_tiny_components,
-            "semantic_preserved_tiny_component_count": len(semantic_preserved_tiny_components),
-            "semantic_preserved_tiny_components": semantic_preserved_tiny_components,
+            "region_review_policy": "preserve-source",
+            "noise_review_max_faces": args.noise_review_max_faces,
+            "small_region_review_max_faces": args.small_region_review_max_faces,
+            "region_review": region_review,
+            "reviewed_source_region_count": len(source_region_classifications),
+            "source_region_classifications": source_region_classifications,
             "material_connectivity": material_connectivity,
             "requested_max_extension_mm": requested_max_extension_mm,
             "minimum_flat_bottom_depth_mm": MINIMUM_INWARD_DEPTH_MM,
@@ -1184,9 +1069,6 @@ class SplitPipeline:
             "body_part_id": None,
             "body_part_ids": [],
             "parts": [],
-            "ignored_tiny_components": ignored,
-            "micro_regions": micro_region_records,
-            "micro_openings": micro_opening_records,
         }
         if args.debug_recursive_steps is not None:
             if not args.debug_recursive_3mf:

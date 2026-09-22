@@ -19,6 +19,46 @@ class SplitConfig:
 
 
 @dataclass(frozen=True)
+class SeamSmoothingPolicy:
+    """Physical and topology budgets for printable seam smoothing."""
+
+    profile: str
+    p95_displacement_mm: float
+    maximum_displacement_mm: float
+    maximum_bbox_diagonal_ratio: float
+    maximum_affected_area_ratio: float
+    maximum_affected_vertex_ratio: float
+    maximum_affected_vertices: int
+    maximum_topology_layers: int
+    maximum_introduced_reversed_ratio: float
+    maximum_reversed_cluster_faces: int
+    minimum_reversed_angle_degrees: float
+    maximum_edge_stretch_ratio: float
+    allow_sparse_seam_reversals: bool
+
+    @classmethod
+    def named(cls, profile: str) -> "SeamSmoothingPolicy":
+        policies = {
+            "source-conservative": cls(
+                "source-conservative", 0.5, 0.5, 1.0, 0.01, 0.05, 5000, 8,
+                0.0, 0, 3.0, 8.0, False,
+            ),
+            "print-balanced": cls(
+                "print-balanced", 0.5, 0.5, 1.0, 0.01, 0.05, 5000, 8,
+                0.001, 32, 0.01, 16.0, True,
+            ),
+            "print-smooth": cls(
+                "print-smooth", 0.5, 0.5, 1.0, 0.01, 0.05, 5000, 8,
+                0.002, 64, 0.001, 64.0, True,
+            ),
+        }
+        try:
+            return policies[str(profile)]
+        except KeyError as exc:
+            raise ValueError(f"unsupported seam smoothing profile: {profile}") from exc
+
+
+@dataclass(frozen=True)
 class PlanarArcRetopologyConfig:
     """One production boundary policy; there are intentionally no legacy modes."""
 
@@ -32,11 +72,17 @@ class PlanarArcRetopologyConfig:
     connector_slope_validation: str = "advisory"
     surface_band_validation: str = "strict"
     connector_surface_validation: str = "strict"
+    smoothing_policy: SeamSmoothingPolicy = field(
+        default_factory=lambda: SeamSmoothingPolicy.named("print-balanced")
+    )
 
     @classmethod
     def from_namespace(cls, namespace: argparse.Namespace) -> "PlanarArcRetopologyConfig":
         surface_band_validation = str(
             getattr(namespace, "surface_band_validation", "strict")
+        )
+        smoothing_policy = SeamSmoothingPolicy.named(
+            getattr(namespace, "seam_smoothing_profile", "print-balanced")
         )
         if getattr(namespace, 'boundary_shape', 'smooth') != 'smooth':
             raise ValueError('Only smooth boundary mode is supported')
@@ -57,6 +103,7 @@ class PlanarArcRetopologyConfig:
             connector_surface_validation=str(
                 getattr(namespace, "connector_surface_validation", "strict")
             ),
+            smoothing_policy=smoothing_policy,
         )
 
     @property

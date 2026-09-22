@@ -277,6 +277,29 @@ class InterfaceRetopologyTests(unittest.TestCase):
         self.assertEqual(args.boundary_target_samples, 384)
         self.assertEqual(args.boundary_smooth_passes, 28)
         self.assertEqual(args.boundary_retopology_band_mm, 3.0)
+        self.assertEqual(args.seam_smoothing_profile, "print-balanced")
+        config = PlanarArcRetopologyConfig.from_namespace(args)
+        self.assertEqual(config.smoothing_policy.profile, "print-balanced")
+        self.assertEqual(config.smoothing_policy.maximum_displacement_mm, 0.5)
+        self.assertEqual(config.smoothing_policy.maximum_affected_area_ratio, 0.01)
+        self.assertEqual(config.smoothing_policy.maximum_topology_layers, 8)
+        self.assertEqual(config.smoothing_policy.maximum_introduced_reversed_ratio, 0.001)
+
+    def test_conservative_and_smooth_profiles_have_ordered_budgets(self) -> None:
+        parser = build_parser()
+        conservative = PlanarArcRetopologyConfig.from_namespace(parser.parse_args([
+            "--input", "placeholder.3mf", "--seam-smoothing-profile", "source-conservative"])
+        ).smoothing_policy
+        smooth = PlanarArcRetopologyConfig.from_namespace(parser.parse_args([
+            "--input", "placeholder.3mf", "--seam-smoothing-profile", "print-smooth"])
+        ).smoothing_policy
+        self.assertEqual(conservative.maximum_displacement_mm, smooth.maximum_displacement_mm)
+        self.assertEqual(conservative.maximum_affected_area_ratio, smooth.maximum_affected_area_ratio)
+        self.assertLess(
+            conservative.maximum_introduced_reversed_ratio,
+            smooth.maximum_introduced_reversed_ratio,
+        )
+        self.assertLess(conservative.maximum_edge_stretch_ratio, smooth.maximum_edge_stretch_ratio)
 
     def test_user_reviewed_surface_band_can_use_sixty_percent_of_real_band(self) -> None:
         parser = build_parser()

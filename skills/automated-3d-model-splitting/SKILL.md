@@ -70,12 +70,6 @@ python scripts/split_painted_3mf.py \
 
 边界统一使用 `--boundary-shape smooth`。阅读 [boundary-smoothing.md](references/boundary-smoothing.md)、[assembly-algorithm.md](references/assembly-algorithm.md) 和 [architecture.md](references/architecture.md) 后再修改接口算法。
 
-默认 `--seam-smoothing-profile print-balanced` 面向带坑洼、锯齿和少量源瑕疵的实际打印模型。它按位移分布而非单一极值判断边界：最大边界位移与 P95 均不超过 0.5 mm；扩散区域不超过相邻 source 面积的 1%，额外受影响顶点不超过 `min(5000, 零件顶点数的 5%)`，拓扑扩散不超过 8 层。只统计平滑新增的异常，允许比例不超过 0.10%、最大连通簇不超过 32 面且结果最小角不低于 0.01° 的稀疏法线反转，包括由坑洼边界平滑产生的孤立交接线邻面反转。新增开边、过共享边、超过预算的反转或连续折叠仍阻断。
-
-生成的隐藏背衬若仅有不超过 2 mm² 的局部薄区，则记录为打印尺度提示并继续，不阻断、不重建源几何；超过该面积的背衬失败仍需显式启用修复流程。
-
-`source-conservative` 用于严格保形诊断，`print-smooth` 用于明确优先改善粗糙边界的打印任务。配置档改变交接线平滑预算，不授权修复、合并或重写无关 source 几何。
-
 ## CLI 与执行
 
 安装 `requirements.txt` 后先运行：

@@ -27,6 +27,23 @@ from .surface_quality import (
 )
 
 
+def _visual_displacement_advisory(
+    validation_mode: str,
+    displacement: np.ndarray,
+    policy: SeamSmoothingPolicy,
+) -> tuple[bool, float, float]:
+    """Classify broad coverage by physical displacement, never topology."""
+    values = np.asarray(displacement, dtype=np.float64)
+    maximum = float(values.max(initial=0.0))
+    p95 = float(np.percentile(values, 95)) if len(values) else 0.0
+    accepted = bool(
+        str(validation_mode) == "advisory"
+        and maximum <= policy.maximum_displacement_mm + 1e-12
+        and p95 <= policy.p95_displacement_mm + 1e-12
+    )
+    return accepted, maximum, p95
+
+
 def _replace_faces_in_edge_map(
     faces: np.ndarray,
     face_ids: list[int] | tuple[int, ...] | np.ndarray,
@@ -1309,9 +1326,23 @@ def _surface_band_deformation(
         len(faces) < 1000
         or affected_area_ratio <= policy.maximum_affected_area_ratio + 1e-12
     )
+    displacement = np.linalg.norm(result - points, axis=1)
+    # Coverage is not visual severity: a smooth sub-nozzle displacement can
+    # touch a broad finely tessellated band without producing a visible ridge.
+    # Only explicit advisory mode may replace coverage budgets with the actual
+    # displacement envelope; topology and printable-face gates remain blocking.
+    (
+        visual_extent_advisory_accepted,
+        maximum_displacement,
+        p95_displacement,
+    ) = _visual_displacement_advisory(
+        validation_mode,
+        displacement,
+        policy,
+    )
     # The seam itself is the requested interface replacement.  The collateral
     # source budget counts only vertices reached beyond that interface.
-    moved_vertex_mask = np.linalg.norm(result - points, axis=1) > 1e-12
+    moved_vertex_mask = displacement > 1e-12
     moved_vertex_mask[boundary] = False
     affected_vertex_count = int(np.count_nonzero(moved_vertex_mask))
     maximum_affected_vertices = min(
@@ -1335,8 +1366,8 @@ def _surface_band_deformation(
         and blocking_reversed_faces == 0
         and not introduced_over_shared_edges
         and not introduced_inconsistent_edges
-        and affected_area_within_budget
-        and affected_vertices_within_budget
+        and (affected_area_within_budget or visual_extent_advisory_accepted)
+        and (affected_vertices_within_budget or visual_extent_advisory_accepted)
         and maximum_edge_stretch <= maximum_allowed_edge_stretch + 1e-9
     )
     quality = {
@@ -1347,6 +1378,8 @@ def _surface_band_deformation(
         "surface_band_affected_area_ratio": affected_area_ratio,
         "maximum_affected_area_ratio": policy.maximum_affected_area_ratio,
         "affected_area_within_budget": affected_area_within_budget,
+        "visual_extent_advisory_accepted": visual_extent_advisory_accepted,
+        "p95_vertex_displacement_mm": p95_displacement,
         "affected_vertex_count": affected_vertex_count,
         "maximum_affected_vertices": maximum_affected_vertices,
         "affected_vertices_within_budget": affected_vertices_within_budget,
@@ -1370,9 +1403,7 @@ def _surface_band_deformation(
         ),
         "maximum_interior_untangle_correction_mm": float(maximum_interior_correction),
         "boundary_match_error_mm": boundary_error,
-        "maximum_vertex_displacement_mm": float(
-            np.linalg.norm(applied, axis=1).max(initial=0.0)
-        ),
+        "maximum_vertex_displacement_mm": maximum_displacement,
         "degenerate_face_count": degenerate_faces,
         "reversed_face_count": reversed_faces,
         "blocking_reversed_face_count": int(blocking_reversed_faces),

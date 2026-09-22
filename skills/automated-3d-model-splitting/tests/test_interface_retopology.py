@@ -28,11 +28,33 @@ from split3mf.interface_retopology import (
     _surface_band_deformation,
     _triangle_shape_quality,
     _untangle_interior_surface_vertices,
+    _visual_displacement_advisory,
 )
 from split3mf.surface_quality import sparse_local_inversion_audit
 
 
 class InterfaceRetopologyTests(unittest.TestCase):
+    def test_visual_advisory_uses_physical_displacement_not_coverage(self) -> None:
+        policy = PlanarArcRetopologyConfig().smoothing_policy
+        broad_submillimeter = np.full(100_000, 0.4, dtype=np.float64)
+
+        strict, _maximum, _p95 = _visual_displacement_advisory(
+            "strict", broad_submillimeter, policy
+        )
+        advisory, maximum, p95 = _visual_displacement_advisory(
+            "advisory", broad_submillimeter, policy
+        )
+        visible_drift, drift_maximum, _drift_p95 = _visual_displacement_advisory(
+            "advisory", np.r_[broad_submillimeter, 5.975], policy
+        )
+
+        self.assertFalse(strict)
+        self.assertTrue(advisory)
+        self.assertAlmostEqual(maximum, 0.4)
+        self.assertAlmostEqual(p95, 0.4)
+        self.assertFalse(visible_drift)
+        self.assertAlmostEqual(drift_maximum, 5.975)
+
     def test_user_reviewed_surface_band_lowers_only_sparse_angle_floor(self) -> None:
         face_count = 36402
         faces = np.arange(face_count * 3, dtype=np.int64).reshape((-1, 3))

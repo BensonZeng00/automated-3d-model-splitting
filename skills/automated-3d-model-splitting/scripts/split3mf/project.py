@@ -1,26 +1,9 @@
 from __future__ import annotations
 
-from .common import *
+import time
 
-def point_on_segment_parameter(
-    point: np.ndarray,
-    start: np.ndarray,
-    end: np.ndarray,
-    tolerance: float = 1e-8,
-) -> float | None:
-    direction = end - start
-    length_squared = float(np.dot(direction, direction))
-    if length_squared <= 1e-24:
-        return None
-    parameter = float(np.dot(point - start, direction) / length_squared)
-    if parameter < -tolerance or parameter > 1.0 + tolerance:
-        return None
-    projected = start + np.clip(parameter, 0.0, 1.0) * direction
-    distance = float(np.linalg.norm(point - projected))
-    scale = max(1.0, float(np.sqrt(length_squared)))
-    if distance > tolerance * scale:
-        return None
-    return float(np.clip(parameter, 0.0, 1.0))
+from .common import *
+from .reporting import runtime_log
 
 
 def expand_vendor_paint_mesh(
@@ -28,25 +11,83 @@ def expand_vendor_paint_mesh(
     source_faces: np.ndarray,
     paint_tokens: list[str],
 ) -> tuple[np.ndarray, np.ndarray, list[str], dict]:
-    """Restore painted subtriangles and conform T-joints on their boundaries."""
+    """Restore painted subtriangles and conform their source-edge topology.
+
+    Source-edge identities and dyadic parameters are propagated while the
+    selector tree is expanded.  Conformance consequently never has to recover
+    topology by projecting every generated vertex back onto source geometry.
+    """
+    started_at = time.perf_counter()
+    if len(source_faces) != len(paint_tokens):
+        raise ValueError("Source face and vendor paint token counts do not match")
+
     mutable_vertices = [np.asarray(vertex, dtype=np.float64) for vertex in vertices]
     midpoint_cache: dict[tuple[int, int], int] = {}
     provisional_faces: list[tuple[int, int, int]] = []
     provisional_colors: list[str] = []
     provisional_sources: list[int] = []
-    source_vertices: list[set[int]] = []
     state_counts: collections.Counter[int] = collections.Counter()
     split_source_faces = 0
     maximum_leaf_count = 1
 
+    # A vertex may be on two source edges at a source corner.  Parameters are
+    # always expressed from the smaller vertex id (0) to the larger one (1).
+    vertex_edge_parameters: dict[int, dict[tuple[int, int], float]] = collections.defaultdict(dict)
+    original_edge_points: dict[tuple[int, int], set[int]] = collections.defaultdict(set)
+    original_edge_sources: dict[tuple[int, int], set[int]] = collections.defaultdict(set)
+
+    def source_edge(a: int, b: int) -> tuple[int, int]:
+        return (a, b) if a < b else (b, a)
+
+    def register_edge_parameter(vertex_id: int, edge: tuple[int, int], parameter: float) -> None:
+        existing = vertex_edge_parameters[vertex_id].get(edge)
+        if existing is not None and abs(existing - parameter) > 1e-12:
+            raise ValueError(
+                f"Vertex {vertex_id} has conflicting parameters on original edge {edge}"
+            )
+        vertex_edge_parameters[vertex_id][edge] = parameter
+        original_edge_points[edge].add(vertex_id)
+
+    for source_id, source_face in enumerate(source_faces):
+        a, b, c = (int(vertex_id) for vertex_id in source_face)
+        for start_id, end_id in ((a, b), (b, c), (c, a)):
+            # A collapsed source edge has no usable one-dimensional parameter
+            # domain.  It remains part of the emitted source face, but cannot
+            # participate in cross-face T-junction conformance.
+            if start_id == end_id:
+                continue
+            edge = source_edge(start_id, end_id)
+            original_edge_sources[edge].add(source_id)
+            register_edge_parameter(edge[0], edge, 0.0)
+            register_edge_parameter(edge[1], edge, 1.0)
+
+    decode_started_at = time.perf_counter()
+    decoded_tokens = {
+        token: decode_vendor_paint_tree(token)
+        for token in set(paint_tokens)
+    }
+    decode_duration = time.perf_counter() - decode_started_at
+
     def midpoint(a: int, b: int) -> int:
-        key = (a, b) if a < b else (b, a)
+        if a == b:
+            return a
+        key = source_edge(a, b)
         existing = midpoint_cache.get(key)
-        if existing is not None:
-            return existing
-        vertex_id = len(mutable_vertices)
-        mutable_vertices.append((mutable_vertices[a] + mutable_vertices[b]) * 0.5)
-        midpoint_cache[key] = vertex_id
+        if existing is None:
+            vertex_id = len(mutable_vertices)
+            mutable_vertices.append((mutable_vertices[a] + mutable_vertices[b]) * 0.5)
+            midpoint_cache[key] = vertex_id
+        else:
+            vertex_id = existing
+
+        shared_source_edges = (
+            vertex_edge_parameters[a].keys() & vertex_edge_parameters[b].keys()
+        )
+        for edge in shared_source_edges:
+            parameter = (
+                vertex_edge_parameters[a][edge] + vertex_edge_parameters[b][edge]
+            ) * 0.5
+            register_edge_parameter(vertex_id, edge, parameter)
         return vertex_id
 
     def split_triangle(face: tuple[int, int, int], split_sides: int, special_side: int) -> list[tuple[int, int, int]]:
@@ -80,9 +121,7 @@ def expand_vendor_paint_mesh(
         node: VendorPaintNode,
         face: tuple[int, int, int],
         source_id: int,
-        local_vertices: set[int],
     ) -> int:
-        local_vertices.update(face)
         if node.split_sides == 0:
             provisional_faces.append(face)
             provisional_colors.append(vendor_paint_state_token(node.state))
@@ -94,81 +133,38 @@ def expand_vendor_paint_mesh(
             raise ValueError("Vendor paint split tree does not match generated children")
         leaf_count = 0
         for child_node, child_face in zip(node.children, children):
-            leaf_count += emit_leaves(child_node, child_face, source_id, local_vertices)
+            leaf_count += emit_leaves(child_node, child_face, source_id)
         return leaf_count
 
     for source_id, (source_face, token) in enumerate(zip(source_faces, paint_tokens)):
-        root = decode_vendor_paint_tree(token)
-        local_vertices: set[int] = set(int(vertex_id) for vertex_id in source_face)
+        root = decoded_tokens[token]
         leaf_count = emit_leaves(
             root,
             tuple(int(vertex_id) for vertex_id in source_face),
             source_id,
-            local_vertices,
         )
-        source_vertices.append(local_vertices)
         if root.split_sides:
             split_source_faces += 1
         maximum_leaf_count = max(maximum_leaf_count, leaf_count)
 
-    # Register every dyadic point that lies on an original mesh edge.  Points
-    # created by only one of two neighboring source triangles must still split
-    # the opposite side, otherwise the restored surface contains T-joints.
-    original_edge_points: dict[tuple[int, int], set[int]] = collections.defaultdict(set)
-    for source_id, source_face in enumerate(source_faces):
-        local_candidates = source_vertices[source_id]
-        for start_id, end_id in (
-            (int(source_face[0]), int(source_face[1])),
-            (int(source_face[1]), int(source_face[2])),
-            (int(source_face[2]), int(source_face[0])),
-        ):
-            edge_key = (start_id, end_id) if start_id < end_id else (end_id, start_id)
-            if len(local_candidates) == 3:
-                original_edge_points[edge_key].update((start_id, end_id))
-                continue
-            start = mutable_vertices[start_id]
-            end = mutable_vertices[end_id]
-            for candidate_id in local_candidates:
-                if point_on_segment_parameter(mutable_vertices[candidate_id], start, end) is not None:
-                    original_edge_points[edge_key].add(candidate_id)
-
     sources_requiring_conformance = np.zeros(len(source_faces), dtype=bool)
-    for source_id, source_face in enumerate(source_faces):
-        if len(source_vertices[source_id]) > 3:
+    subdivided_edges = {
+        edge for edge, point_ids in original_edge_points.items() if len(point_ids) > 2
+    }
+    for edge in subdivided_edges:
+        for source_id in original_edge_sources[edge]:
             sources_requiring_conformance[source_id] = True
-            continue
-        for start_id, end_id in (
-            (int(source_face[0]), int(source_face[1])),
-            (int(source_face[1]), int(source_face[2])),
-            (int(source_face[2]), int(source_face[0])),
-        ):
-            edge_key = (start_id, end_id) if start_id < end_id else (end_id, start_id)
-            if len(original_edge_points[edge_key]) > 2:
-                sources_requiring_conformance[source_id] = True
-                break
 
     conformed_faces: list[tuple[int, int, int]] = []
     conformed_colors: list[str] = []
+    conformed_sources: list[int] = []
     t_joint_faces = 0
     for face, color, source_id in zip(provisional_faces, provisional_colors, provisional_sources):
         if not sources_requiring_conformance[source_id]:
             conformed_faces.append(face)
             conformed_colors.append(color)
+            conformed_sources.append(source_id)
             continue
-        source_face = source_faces[source_id]
-        candidate_ids = set(source_vertices[source_id])
-        source_edges = []
-        for source_start, source_end in (
-            (int(source_face[0]), int(source_face[1])),
-            (int(source_face[1]), int(source_face[2])),
-            (int(source_face[2]), int(source_face[0])),
-        ):
-            source_key = (
-                (source_start, source_end)
-                if source_start < source_end
-                else (source_end, source_start)
-            )
-            source_edges.append((source_start, source_end, source_key))
 
         boundary: list[int] = []
         for edge_start_id, edge_end_id in (
@@ -176,25 +172,29 @@ def expand_vendor_paint_mesh(
             (face[1], face[2]),
             (face[2], face[0]),
         ):
-            edge_start = mutable_vertices[edge_start_id]
-            edge_end = mutable_vertices[edge_end_id]
-            edge_candidates = set(candidate_ids)
-            for source_start, source_end, source_key in source_edges:
-                if (
-                    point_on_segment_parameter(edge_start, mutable_vertices[source_start], mutable_vertices[source_end])
-                    is not None
-                    and point_on_segment_parameter(edge_end, mutable_vertices[source_start], mutable_vertices[source_end])
-                    is not None
-                ):
-                    edge_candidates.update(original_edge_points[source_key])
-            ordered = []
-            for candidate_id in edge_candidates:
-                parameter = point_on_segment_parameter(
-                    mutable_vertices[candidate_id], edge_start, edge_end
-                )
-                if parameter is not None and parameter < 1.0 - 1e-10:
-                    ordered.append((parameter, candidate_id))
-            ordered.sort(key=lambda item: (item[0], item[1]))
+            shared_source_edges = (
+                vertex_edge_parameters[edge_start_id].keys()
+                & vertex_edge_parameters[edge_end_id].keys()
+            )
+            if len(shared_source_edges) > 1:
+                raise ValueError("Painted leaf edge maps to multiple original source edges")
+            if not shared_source_edges:
+                ordered = [(0.0, edge_start_id)]
+            else:
+                edge = next(iter(shared_source_edges))
+                start_parameter = vertex_edge_parameters[edge_start_id][edge]
+                end_parameter = vertex_edge_parameters[edge_end_id][edge]
+                span = end_parameter - start_parameter
+                if abs(span) <= 1e-15:
+                    raise ValueError("Painted leaf edge has zero original-edge parameter span")
+                ordered = []
+                for candidate_id in original_edge_points[edge]:
+                    local_parameter = (
+                        vertex_edge_parameters[candidate_id][edge] - start_parameter
+                    ) / span
+                    if -1e-12 <= local_parameter < 1.0 - 1e-12:
+                        ordered.append((local_parameter, candidate_id))
+                ordered.sort(key=lambda item: (item[0], item[1]))
             for _parameter, candidate_id in ordered:
                 if not boundary or boundary[-1] != candidate_id:
                     boundary.append(candidate_id)
@@ -202,6 +202,7 @@ def expand_vendor_paint_mesh(
         if len(boundary) <= 3:
             conformed_faces.append(face)
             conformed_colors.append(color)
+            conformed_sources.append(source_id)
             continue
 
         # A centroid fan preserves all collinear boundary subdivisions without
@@ -217,6 +218,35 @@ def expand_vendor_paint_mesh(
                 continue
             conformed_faces.append((center_id, boundary_start, boundary_end))
             conformed_colors.append(color)
+            conformed_sources.append(source_id)
+
+    if len(conformed_sources) != len(conformed_faces) or any(
+        source_id < 0 or source_id >= len(source_faces)
+        for source_id in conformed_sources
+    ):
+        raise ValueError("Conformed face source ownership audit failed")
+
+    emitted_edge_counts: collections.Counter[tuple[int, int]] = collections.Counter()
+    for a, b, c in conformed_faces:
+        for start_id, end_id in ((a, b), (b, c), (c, a)):
+            emitted_edge_counts[source_edge(start_id, end_id)] += 1
+
+    audited_segments = 0
+    for edge in subdivided_edges:
+        ordered_points = sorted(
+            original_edge_points[edge],
+            key=lambda vertex_id: (vertex_edge_parameters[vertex_id][edge], vertex_id),
+        )
+        expected_uses = len(original_edge_sources[edge])
+        for start_id, end_id in zip(ordered_points, ordered_points[1:]):
+            audited_segments += 1
+            actual_uses = emitted_edge_counts[source_edge(start_id, end_id)]
+            if actual_uses != expected_uses:
+                raise ValueError(
+                    "Subdivided original edge segment audit failed: "
+                    f"edge={edge}, segment=({start_id}, {end_id}), "
+                    f"expected={expected_uses}, actual={actual_uses}"
+                )
 
     diagnostics = {
         "profile": "bambu_triangle_selector",
@@ -227,6 +257,14 @@ def expand_vendor_paint_mesh(
         "t_joint_faces_retriangulated": int(t_joint_faces),
         "source_faces_checked_for_t_joints": int(np.count_nonzero(sources_requiring_conformance)),
         "maximum_leaf_faces_per_source_triangle": int(maximum_leaf_count),
+        "unique_paint_tokens": int(len(decoded_tokens)),
+        "paint_token_decode_success_ratio": 1.0,
+        "paint_token_decode_duration_seconds": round(float(decode_duration), 6),
+        "audited_subdivided_edges": int(len(subdivided_edges)),
+        "audited_subdivided_segments": int(audited_segments),
+        "shared_edge_segment_consistency_ratio": 1.0,
+        "source_face_ownership_ratio": 1.0,
+        "duration_seconds": round(float(time.perf_counter() - started_at), 6),
         "leaf_state_counts": {
             vendor_paint_state_token(state): int(count)
             for state, count in sorted(state_counts.items())
@@ -709,6 +747,12 @@ def parse_3mf_model(
         raw_colors,
     )
     project_settings["_vendor_paint_decode"] = paint_diagnostics
+    runtime_log(
+        "paint-expansion",
+        "vendor_paint_mesh_conformed",
+        "Paint selector expansion and source-edge conformance completed",
+        **paint_diagnostics,
+    )
     return expanded_vertices, expanded_faces, colors, project_settings
 
 

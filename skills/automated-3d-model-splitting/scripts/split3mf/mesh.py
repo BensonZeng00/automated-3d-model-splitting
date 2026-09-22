@@ -492,8 +492,8 @@ def face_edges_among_vertices(
     return result
 
 
-def boundary_loops(faces: np.ndarray) -> list[list[int]]:
-    """Return edge-complete simple boundary cycles.
+def boundary_cycles_from_edges(edges: np.ndarray) -> list[list[int]]:
+    """Return edge-complete simple cycles from canonical undirected edges.
 
     Painted regions can have several boundary cycles touching at one vertex, so
     the boundary graph may have degree 4 or higher. A greedy previous/next walk
@@ -501,22 +501,13 @@ def boundary_loops(faces: np.ndarray) -> list[list[int]]:
     Decompose every even boundary graph into Euler circuits first, then split
     circuits at repeated vertices into genuine simple cycles.
     """
-    edge_count: collections.Counter[tuple[int, int]] = collections.Counter()
-    for face in faces:
-        for a, b in ((face[0], face[1]), (face[1], face[2]), (face[2], face[0])):
-            a = int(a)
-            b = int(b)
-            if a > b:
-                a, b = b, a
-            edge_count[(a, b)] += 1
-
     adjacency: dict[int, set[int]] = collections.defaultdict(set)
     unused_edges: set[tuple[int, int]] = set()
-    for (a, b), count in edge_count.items():
-        if count == 1:
-            adjacency[a].add(b)
-            adjacency[b].add(a)
-            unused_edges.add((a, b))
+    for raw_a, raw_b in np.asarray(edges, dtype=np.int64):
+        a, b = sorted((int(raw_a), int(raw_b)))
+        adjacency[a].add(b)
+        adjacency[b].add(a)
+        unused_edges.add((a, b))
 
     loops: list[list[int]] = []
 
@@ -562,6 +553,19 @@ def boundary_loops(faces: np.ndarray) -> list[list[int]]:
 
     loops.sort(key=lambda loop: (-len(loop), tuple(loop)))
     return loops
+
+
+def boundary_loops(faces: np.ndarray) -> list[list[int]]:
+    """Return simple cycles along edges used by exactly one supplied face."""
+    edge_count: collections.Counter[tuple[int, int]] = collections.Counter()
+    for face in faces:
+        for a, b in ((face[0], face[1]), (face[1], face[2]), (face[2], face[0])):
+            edge_count[tuple(sorted((int(a), int(b))))] += 1
+    boundary_edges = np.asarray(
+        [edge for edge, count in edge_count.items() if count == 1],
+        dtype=np.int64,
+    ).reshape((-1, 2))
+    return boundary_cycles_from_edges(boundary_edges)
 
 
 def average_outward_normal(local_vertices: np.ndarray, local_faces: np.ndarray, component_center: np.ndarray, model_center: np.ndarray) -> np.ndarray:

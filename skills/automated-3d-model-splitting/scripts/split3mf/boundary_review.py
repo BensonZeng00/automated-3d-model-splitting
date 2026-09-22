@@ -49,7 +49,12 @@ class BoundaryReviewService:
 
     def prepare(self, vertices, faces, owners, *, context='input', display_colors=None):
         started = time.perf_counter()
+        runtime_log('分界', 'boundary_graph_start', '开始构建稀疏面邻接图',
+                    context=context, faces=len(faces))
         graph = BoundaryGraph(vertices, faces)
+        runtime_log('分界', 'boundary_graph_done', '稀疏面邻接图构建完成',
+                    context=context, faces=len(faces), adjacency_edges=len(graph.adjacency),
+                    duration_seconds=round(time.perf_counter()-started, 4))
         labels = np.asarray(owners).astype(str)
         from .boundary_budget import BoundaryAreaBudget
         from .boundary_simplification import simplify_crossing_ownership
@@ -60,8 +65,20 @@ class BoundaryReviewService:
         # An explicit review file owns its proposal: do not invalidate it first.
         cleanup = []
         if self.decisions is None:
+            cleanup_started = time.perf_counter()
+            runtime_log('分界', 'boundary_crossing_cleanup_start',
+                        '开始检查材料间共享边的局部交叉', context=context)
             labels, cleanup = simplify_crossing_ownership(graph, labels, budget)
+            runtime_log('分界', 'boundary_crossing_cleanup_done',
+                        '材料间共享边局部交叉检查完成', context=context,
+                        owners_checked=len(np.unique(labels)), proposals=len(cleanup),
+                        duration_seconds=round(time.perf_counter()-cleanup_started, 4))
+        assessment_started = time.perf_counter()
         assessment = graph.assess(labels)
+        runtime_log('分界', 'boundary_assessment_done', '边界拓扑评估完成',
+                    context=context, uncertain_faces=len(assessment.uncertain_faces),
+                    ambiguous_pairs=len(assessment.reasons),
+                    duration_seconds=round(time.perf_counter()-assessment_started, 4))
         report = dict(context=context, check_seconds=round(time.perf_counter()-started, 4),
                       crossing_cleanup=cleanup, **assessment.as_record())
         self.records.append(report)
@@ -77,7 +94,15 @@ class BoundaryReviewService:
                         '已按就近原则处理边界端点；残留按当前接口统计', context=context, **nearest)
             return labels, report
         fingerprint = graph.fingerprint(labels, context)
+        proposal_started = time.perf_counter()
+        runtime_log('分界', 'boundary_candidate_search_start',
+                    '开始局部边界候选搜索', context=context,
+                    uncertain_faces=len(assessment.uncertain_faces))
         candidates = graph.propose(labels, assessment, max_candidates=3)
+        runtime_log('分界', 'boundary_candidate_search_done',
+                    '局部边界候选搜索完成', context=context,
+                    candidates=len(candidates),
+                    duration_seconds=round(time.perf_counter()-proposal_started, 4))
         from .boundary_budget import BoundaryAreaBudget
         # A context identifies one stage; repeated proposals share one frozen budget.
         budget_key = graph.fingerprint(np.full(len(labels), ''), context)
@@ -166,7 +191,13 @@ class BoundaryReviewService:
         directory.mkdir(parents=True, exist_ok=True)
         from .boundary_preview import render_boundary_review
         try:
+            preview_started = time.perf_counter()
+            runtime_log('分界', 'boundary_preview_start', '开始渲染局部边界审核图',
+                        context=context, candidates=len(candidates))
             previews = render_boundary_review(graph, labels, assessment, candidates, directory, display_colors)
+            runtime_log('分界', 'boundary_preview_done', '局部边界审核图渲染完成',
+                        context=context, previews=len(previews),
+                        duration_seconds=round(time.perf_counter()-preview_started, 4))
         except ImportError as exc:
             previews = []
             report['preview_error'] = str(exc)

@@ -43,7 +43,7 @@ For recursive parents, preserve the existing parent-contact shell. Prevalidate e
 
 Apply the same measured deepest-safe policy to nested leaf details. All pre-cut fit, floor, and sibling clearances are zero: subtract the exact full-size child, then uniformly scale final inward parts once (default 0.99). By default, subtract final ancestor solids from scaled inserts before seating and retain all thickness, source-surface, topology and material gates. Record `post_fit_difference` separately from the actual scale and any validated seating transform; see [uniform-fit.md](uniform-fit.md). Use `--no-post-fit-parent-difference` only for an explicit diagnostic opt-out.
 
-Default `--boundary-shape source` preserves the visible source ring. Explicit `smooth` uses the fitted shared seam described in [boundary-smoothing.md](boundary-smoothing.md); record actual displacement and quality checks. Both modes share child/parent source-id correspondence.
+The sole smooth policy uses the fitted shared seam described in [boundary-smoothing.md](boundary-smoothing.md); record actual displacement, ownership cleanup and quality checks. Child and parent retain source-id correspondence.
 
 For curved or multi-loop boundaries, use per-boundary-vertex safe local inward directions. Differing directions alone do not require local-offset: first test a coherent plane with varying travel along the safe direction field, and use local-offset only when no coherent plane satisfies the measured bounds. Record corrected and remaining outward-directed vertex counts; remaining must be zero. Parent sockets must reuse the child's direction map keyed by source vertex id.
 

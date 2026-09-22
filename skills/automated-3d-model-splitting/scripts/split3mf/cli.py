@@ -21,7 +21,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
     parser.add_argument('--micro-defect-area-mm2', type=float, default=1.0)
     parser.add_argument('--print-surface-tolerance-mm', type=float, default=0.05)
-    parser.add_argument('--boundary-shape', choices=['source','smooth'], default='source')
+    parser.add_argument('--boundary-shape', type=str.lower, choices=['smooth'], default='smooth', help='Smooth shared cut boundaries; source mode has been removed.')
     parser.add_argument('--hidden-surface-refinement', choices=['preserve', 'refine'],
                         default='preserve', help='Preserve audited hidden annuli or request strict density refinement.')
     parser.add_argument('--recovery-dir', help='Persistent inputs and candidates for local failure replay')

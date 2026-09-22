@@ -144,7 +144,6 @@ class SplitPipeline:
         boundary_review = BoundaryReviewService(
             output_path.with_name(output_path.stem + "_boundary_review"),
             getattr(args, "boundary_review_json", None),
-            preserve_source_branches=(getattr(args, "boundary_shape", "source") == "source"),
         )
         interface_retopology = replace(interface_retopology,
             curve_review_sink=boundary_review.review_curve)
@@ -158,10 +157,6 @@ class SplitPipeline:
             display_colors=boundary_display_colors,
         )
         ownership_changed = np.flatnonzero(np.asarray(source_owners) != clarified_owners)
-        if clarity_record.get('status') == 'user_confirmed' and clarity_record.get('preserve_visible_boundary'):
-            interface_retopology = replace(interface_retopology,
-                config=replace(interface_retopology.config, preserve_confirmed_seam=True))
-            runtime_log('分界', 'confirmed_seam_locked', '已按用户确认锁定可见分界；仅生成内部配合面')
         if getattr(args, "boundary_check_only", False):
             print("boundary_check=" + json.dumps(clarity_record, ensure_ascii=False), flush=True)
             return

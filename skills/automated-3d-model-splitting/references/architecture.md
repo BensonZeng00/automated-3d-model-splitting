@@ -316,7 +316,9 @@ triangles, and paint are not edited by this service. Original/generated face rol
 are not inferred from color when provenance is absent.
 
 `boundary_preview.py` emits assembly and local X-ray candidate comparisons. CLI
-stops with exit code 4 before cutting when review is needed. Candidate topology
+returns exit code 4 before cutting when no candidate can be accepted automatically.
+The agent then applies completion-first impact assessment and authorized repair;
+this diagnostic return does not itself require a user confirmation. Candidate topology
 passing is not semantic or print acceptance. `--boundary-review-json` accepts an
 explicit user-confirmed decision, bound to both input and regenerated candidate
 fingerprints; a `decisions` list supports independent recursive-stage approvals.
@@ -324,16 +326,18 @@ Never set `user_confirmed` without actual user approval. Unmatched approvals do
 not approve another stage. `--boundary-check-only` stops after the input gate.
 Changes to these modules and approval-file contents invalidate stage caches.
 
-When the user explicitly requests keeping an approved visible boundary unchanged,
-that same fingerprint-bound decision may set `preserve_visible_boundary: true`.
-Only after successful input approval does the pipeline activate the immutable
-`preserve_confirmed_seam` context field. `confirmed_seam.py` keeps source points,
-face membership, and paint unchanged instead of fitting another visible spline.
-It still audits finite coordinates, unique seam ids, shared-loop edges, and source
-indexed winding. It reports inherited source degeneracies without deleting them;
-all generated-geometry, thickness, Boolean, and package gates remain unchanged.
-This is an explicit reviewed geometry constraint, never an automatic fallback
-after a rejected spline and never a global relaxation of validation defaults.
+Boundary mode is always `smooth`; source-mode and immutable visible-seam bypasses
+have been removed. Already generated parent-contact interfaces remain shared and
+immutable to preserve assembly correspondence.
+
+`boundary_budget.py` freezes original per-region surface areas and tracks cumulative
+changed faces. `boundary_simplification.py` repairs small projected crossing lobes
+by local ownership transfer, retaining the mesh and paint. Strictly below 1% is the
+automatic cleanup path. At or above 1%, `boundary_review.py` evaluates admissible
+local branch candidates by impact: retained parts, unchanged surface and paint,
+no added disconnections, and a clear boundary. Such candidates continue as
+`completion_priority_local_merge`; percentage alone never forces a stop.
+Complex remaining failures follow `completion-first.md` before user handoff.
 
 Regression command: `python -m unittest discover -s tests -p test_boundary_clarity.py`.
 

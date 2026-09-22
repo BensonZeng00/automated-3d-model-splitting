@@ -32,15 +32,15 @@ class PlanarArcRetopologyConfig:
     connector_slope_validation: str = "advisory"
     surface_band_validation: str = "strict"
     connector_surface_validation: str = "strict"
-    preserve_confirmed_seam: bool = False
 
     @classmethod
     def from_namespace(cls, namespace: argparse.Namespace) -> "PlanarArcRetopologyConfig":
         surface_band_validation = str(
             getattr(namespace, "surface_band_validation", "strict")
         )
+        if getattr(namespace, 'boundary_shape', 'smooth') != 'smooth':
+            raise ValueError('Only smooth boundary mode is supported')
         return cls(
-            preserve_confirmed_seam=getattr(namespace, 'boundary_shape', 'source') == 'source',
             target_samples=int(namespace.boundary_target_samples),
             smooth_passes=int(namespace.boundary_smooth_passes),
             retopology_band_mm=float(namespace.boundary_retopology_band_mm),
@@ -69,6 +69,10 @@ class PlanarArcRetopologyContext:
     config: PlanarArcRetopologyConfig
     failure_sink: Callable[[dict[str, Any]], None] | None = None
     curve_review_sink: Callable[[Any], None] | None = None
+    layer_seams: dict[int, Any] = field(default_factory=dict, compare=False, repr=False)
+    active_layer_seam: Any | None = field(default=None, compare=False, repr=False)
+    inherited_frozen_vertex_ids: Any | None = field(default=None, compare=False, repr=False)
+    inherited_surface_provenance_known: bool = True
 
 
 @dataclass

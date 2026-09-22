@@ -1,7 +1,5 @@
 # CLI Reference
 
-Resolve every command below relative to the directory containing the loaded `SKILL.md`. From another working directory, invoke the absolute path to that skill's `scripts/split_painted_3mf.py` with the selected Python interpreter. Pass absolute model and output paths to avoid changing their meaning when switching directories.
-
 ## Assembly validation and manual handoff
 
 `--assembly-fit-validation manual|strict` defaults to `manual`. After normal
@@ -143,7 +141,7 @@ radial overcut, or translated clearance cutter is available. See [uniform-fit.md
 
 ## Boundary shape and planar arc retopology
 
-Default `--boundary-shape source` preserves visible source seams. The spline and surface-band behavior below applies to explicitly requested `--boundary-shape smooth`; see [boundary-smoothing.md](boundary-smoothing.md). Connector slope checks apply in both modes.
+`--boundary-shape smooth` is the sole supported value and default. Shared seams use the spline and surface-band behavior below; see [boundary-smoothing.md](boundary-smoothing.md). Local ownership cleanup below 1% is automatic; larger anomalies require completion-first assessment, not rejection by percentage.
 
 - `--boundary-target-samples 384`
 - `--boundary-smooth-passes 28`
@@ -191,7 +189,7 @@ Keep `--max-topology-defect-ratio` at or below `0.001` for publication. Do not i
 
 ## Print tolerance and stage replay
 
-- `--boundary-shape source|smooth`: default source preserves visible seams.
+- `--boundary-shape smooth`: sole supported mode, enabled by default; `source` is rejected.
 - `--micro-defect-area-mm2 1.0`: whole affected surface patch threshold.
 - `--print-surface-tolerance-mm 0.05`: sampled local source-surface distance limit.
 - `--recovery-dir PATH`: persistent finalization input/candidate snapshots and local validated results.

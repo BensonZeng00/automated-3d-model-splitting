@@ -53,7 +53,7 @@ def build(patch, parent, axis, preferred_depth=3., taper_slope=1., *, direction_
         split=_split_face(face,midpoint)
         for f in split:
             if all(i in rim_ids for i in f):
-                center=len(vertices);vertices.append(np.array(vertices)[f].mean(axis=0).tolist())
+                center=len(vertices);vertices.append(np.asarray([vertices[i] for i in f]).mean(axis=0).tolist())
                 back.extend([[f[0],f[1],center],[f[1],f[2],center],[f[2],f[0],center]])
                 back_owners.extend([owner]*3)
             else:
@@ -65,17 +65,19 @@ def build(patch, parent, axis, preferred_depth=3., taper_slope=1., *, direction_
     if direction_mode not in ('axis', 'local-normal'):
         raise ValueError('Unknown source-following backing direction mode')
     if direction_mode == 'local-normal':
-        from .local_ray_probe import LocalRayProbe
+        from .parent_ray_probe import parent_exit_distances
         back_surface=trimesh.Trimesh(points,back,process=False)
         directions=-np.asarray(back_surface.vertex_normals)
+        active=np.array([i for i in range(len(points)) if i not in rim_ids])
+        exits=parent_exit_distances(parent,points[active],directions[active],
+                                   float(np.linalg.norm(parent.extents)+1),
+                                   minimum_reserve_mm=.05)
         distance=segment_distance(points,patch.vertices[rim_edges])
     else:
         directions=np.tile(axis,(len(points),1))
         distance=segment_distance(points@basis,patch.vertices[rim_edges]@basis)
     active=np.array([i for i in range(len(points)) if i not in rim_ids])
     if direction_mode == 'local-normal':
-        exits,_=LocalRayProbe(parent).exits(points[active],directions[active],
-                                           float(np.linalg.norm(parent.extents)+1))
         safety=exits-.05
     else:
         safety=first_exit(parent.triangles,points[active],axis)-.05

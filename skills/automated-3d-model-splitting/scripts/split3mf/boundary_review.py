@@ -27,11 +27,11 @@ class BoundaryReviewService:
     Branched boundaries get at most three reviewed local searches. Geometry
     and per-face paint stay untouched in both paths.
     """
-    def __init__(self, directory: Path, decisions: Path | None = None, *, preserve_source_branches=False):
+    def __init__(self, directory: Path, decisions: Path | None = None):
         self.directory = Path(directory)
         self.decisions = Path(decisions) if decisions else None
         self.records = []
-        self.preserve_source_branches = bool(preserve_source_branches)
+        self.area_budgets = {}
 
     def review_curve(self, failure):
         """Geometry proposals have a separate approval scope from face labels."""
@@ -51,9 +51,19 @@ class BoundaryReviewService:
         started = time.perf_counter()
         graph = BoundaryGraph(vertices, faces)
         labels = np.asarray(owners).astype(str)
+        from .boundary_budget import BoundaryAreaBudget
+        from .boundary_simplification import simplify_crossing_ownership
+        budget_key = graph.fingerprint(np.full(len(labels), ''), context)
+        if budget_key not in self.area_budgets:
+            self.area_budgets[budget_key] = BoundaryAreaBudget(vertices, faces, labels)
+        budget = self.area_budgets[budget_key]
+        # An explicit review file owns its proposal: do not invalidate it first.
+        cleanup = []
+        if self.decisions is None:
+            labels, cleanup = simplify_crossing_ownership(graph, labels, budget)
         assessment = graph.assess(labels)
         report = dict(context=context, check_seconds=round(time.perf_counter()-started, 4),
-                      **assessment.as_record())
+                      crossing_cleanup=cleanup, **assessment.as_record())
         self.records.append(report)
         if assessment.clear:
             runtime_log('分界', 'boundary_clear_direct', '边界清晰，直接进入原拆分流程', context=context)
@@ -66,18 +76,52 @@ class BoundaryReviewService:
             runtime_log('警告' if nearest['warning'] else '分界', 'endpoint_nearest_merge',
                         '已按就近原则处理边界端点；残留按当前接口统计', context=context, **nearest)
             return labels, report
-        if self.preserve_source_branches:
-            from .print_tolerance import triangle_areas
-            affected_area = float(triangle_areas(graph.vertices[graph.faces[assessment.uncertain_faces]]).sum())
-            report.update(status='source_boundary_preserved', affected_area_mm2=affected_area,
-                          requires_semantic_confirmation=False, geometry_change=False,
-                          material_change=False, ownership_change=False)
-            runtime_log('分界', 'source_boundary_preserved',
-                        '按原边界继续；分叉记录为提示，实体生成另行检查',
-                        context=context, affected_area_mm2=affected_area)
-            return labels, report
         fingerprint = graph.fingerprint(labels, context)
         candidates = graph.propose(labels, assessment, max_candidates=3)
+        from .boundary_budget import BoundaryAreaBudget
+        # A context identifies one stage; repeated proposals share one frozen budget.
+        budget_key = graph.fingerprint(np.full(len(labels), ''), context)
+        budget = self.area_budgets.setdefault(budget_key,
+            BoundaryAreaBudget(vertices, faces, labels))
+        for candidate in candidates:
+            candidate['area_policy'] = budget.evaluate(labels, candidate['owners'])
+        automatic = [c for c in candidates if c['admissible'] and c['area_policy']['automatic']]
+        if automatic and self.decisions is None:
+            chosen = min(automatic, key=lambda c: sum(
+                item['affected_area_mm2'] for item in c['area_policy']['regions']))
+            budget.evaluate(labels, chosen['owners'], commit=True)
+            report.update(status='automatic_local_merge', area_policy=chosen['area_policy'],
+                          changed_face_ids=chosen['changed_faces'].tolist(),
+                          requires_semantic_confirmation=False, geometry_change=False,
+                          material_change=False, boundary_shape='smooth')
+            runtime_log('分界', 'boundary_small_anomaly_merged',
+                        '累计异常面积小于各受影响部件的 1%，已局部归并并继续平滑',
+                        context=context, **chosen['area_policy'])
+            return chosen['owners'], report
+        viable = [c for c in candidates if c['admissible']
+                  and c['area_policy']['identities_preserved']]
+        if viable and self.decisions is None:
+            # These proposals only relabel the local uncertain band. Graph.propose
+            # has verified retained parts, connectivity and fixed outside anchors;
+            # vertices, paint and exterior shape are untouched. This is a concrete
+            # completion-first assessment, not a larger numeric tolerance.
+            chosen = min(viable, key=lambda c: sum(
+                item['affected_area_mm2'] for item in c['area_policy']['regions']))
+            budget.evaluate(labels, chosen['owners'], commit=True)
+            report.update(status='completion_priority_local_merge',
+                          area_policy=chosen['area_policy'],
+                          completion_assessment=dict(exterior_unchanged=True,
+                              paint_unchanged=True, all_parts_retained=True,
+                              no_new_disconnected_regions=True,
+                              outside_band_unchanged=True,
+                              assembly_rebuild_and_validation_required=True),
+                          changed_face_ids=chosen['changed_faces'].tolist(),
+                          requires_semantic_confirmation=False,
+                          geometry_change=False, material_change=False, boundary_shape='smooth')
+            runtime_log('分界', 'boundary_completion_priority_merge',
+                        '局部异常达到 1%，外形、颜色、部件身份和连通性保持，按完成优先原则归并后继续',
+                        context=context, **chosen['area_policy'])
+            return chosen['owners'], report
         report.update(fingerprint=fingerprint, search_attempt_limit=3,
             check_and_search_seconds=round(time.perf_counter()-started, 4),
             acceptance_scope='local seam topology only; not semantic correctness or print/assembly validation',
@@ -85,7 +129,8 @@ class BoundaryReviewService:
             method='bounded_local_ownership_votes_with_fixed_outside_anchors',
             material_change=False, geometry_change=False,
             provenance='ownership proposal only; original/generated face origin not inferred from color',
-            candidates=[dict(id=c['id'], admissible=c['admissible'],
+            above_threshold_policy='assess_completion_priority_not_percentage_only',
+            candidates=[dict(id=c['id'], admissible=c['admissible'], area_policy=c['area_policy'],
                 fingerprint=graph.fingerprint(c['owners'], context),
                 changed_face_ids=c['changed_faces'].tolist(),
                 proposed_owners=c['owners'][c['changed_faces']].tolist(),
@@ -112,7 +157,8 @@ class BoundaryReviewService:
                 if decision.get('candidate_fingerprint') != graph.fingerprint(selected['owners'], context):
                     raise BoundaryDecisionError('Boundary candidate fingerprint mismatch')
                 report.update(status='user_confirmed', selected_candidate=selected['id'])
-                report['preserve_visible_boundary'] = decision.get('preserve_visible_boundary') is True
+                budget.evaluate(labels, selected['owners'], commit=True)
+                report['boundary_shape'] = 'smooth'
                 runtime_log('分界', 'boundary_review_applied', '已应用用户确认的局部归属；颜色和顶点不变',
                     context=context, changed_faces=len(selected['changed_faces']))
                 return selected['owners'], report

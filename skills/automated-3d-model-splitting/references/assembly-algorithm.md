@@ -117,7 +117,7 @@ the same retreated visible source patch and preserve the assembly union.
 Use one inward geometry behavior for every non-body part:
 
 - do not inward-extrude the root body;
-- preserve the visible source seam in default `--boundary-shape source`; only explicitly requested `smooth` uses the fitted seam and surface-band checks in [boundary-smoothing.md](boundary-smoothing.md);
+- use the sole smooth policy and shared fitted seam with surface-band checks in [boundary-smoothing.md](boundary-smoothing.md); perform small-anomaly ownership cleanup before fitting;
 - reuse identical source-id coordinates on child and parent sides even when their local loop winding is reversed;
 - extend inserts along the selected safe inward direction;
 - derive an area-weighted local inward normal at every boundary vertex; retain the component direction only where it remains locally safe, otherwise blend toward the local inward normal;

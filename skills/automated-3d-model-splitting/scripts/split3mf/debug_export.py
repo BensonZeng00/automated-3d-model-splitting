@@ -1659,6 +1659,15 @@ def execute_strict_recursive_split(
             step_component_centers = recursive_context["component_centers"]
             step_model_center = recursive_context["model_center"]
             step_interface_retopology = recursive_context["interface_retopology"]
+            from dataclasses import replace
+            source_prefix = target.get('stats', {}).get('source_faces')
+            provenance_known = (isinstance(source_prefix, (int, np.integer))
+                                and 0 <= source_prefix <= len(step_faces))
+            frozen_ids = (np.unique(np.asarray(step_faces)[source_prefix:])
+                          if provenance_known else None)
+            step_interface_retopology = replace(
+                step_interface_retopology, inherited_frozen_vertex_ids=frozen_ids,
+                inherited_surface_provenance_known=provenance_known)
             recursive_geometry_mapping = recursive_context["mapping_records"]
             runtime_log(
                 "递归输入",
@@ -1733,6 +1742,16 @@ def execute_strict_recursive_split(
                     interface_geometry=interface_geometry,
                 )
             )
+        from .layer_seam_planning import activate_layer_seams
+        step_vertices, step_faces, step_interface_retopology = activate_layer_seams(
+            step_interface_retopology, local_body_index, step_vertices, step_faces)
+        if step_interface_retopology.active_layer_seam is not None:
+            step_model_center = np.asarray(step_vertices).mean(axis=0)
+            step_component_centers = {
+                index: np.asarray(step_vertices)[np.unique(
+                    np.asarray(step_faces)[component.global_faces])].mean(axis=0)
+                for index, component in enumerate(step_components, 1)
+            }
         local_component = step_components[local_body_index - 1]
         local_color = part_color(local_body_index)
         local_role = (

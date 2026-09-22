@@ -7,29 +7,40 @@ description: Automated painted-3MF model-part splitting for vendor projects with
 
 Current release: `2.1.0`, positioned as automated painted-3MF model-part splitting.
 
+For bounded ray queries, first-failure backing records, explicit intact-parent cache repair, and bounded-memory 3MF export, read [recovery-performance.md](references/recovery-performance.md). These helpers do not waive shared-interface or final assembly validation.
+
+## 执行前提：输入格式与模型能力
+
+- **拒绝非 `.3mf` 格式输入**：本技能只接受有效的 3MF 文件（扩展名不区分大小写），不接受 STL、OBJ 等其他格式；不能通过改扩展名或自动转换来绕过此限制。输入还须满足本技能已有的涂色数据要求。
+- **拒绝由非多模态大模型执行拆件任务**：负责识别部件、判断边界和验收结果的模型必须具备视觉理解能力，并能在当前会话中实际查看模型渲染图。纯文本模型不得仅凭日志、颜色编号或几何统计替代视觉判断。模型能力或图像访问不可用时，先说明缺少的能力并要求切换到可查看图像的多模态模型，再执行拆件。确定性几何脚本不属于此处限制的“大模型”。
+
+这两条是开始拆件前的硬性前提，优先于“完成优先”原则；不能以异常占比小、赶进度或尽快交付为由绕过。满足前提后，所有拆件异常再按下述原则处理。
+
+## 总原则：优先完成可用拆件
+
+以完成可用拆件为优先。对不影响主要外形、部件身份和基本装配的异常，优先采用局部舍弃、归并、边界简化和有限修复，记录处理结果后继续；不为微小瑕疵反复重试、反复重跑整个模型或频繁请求确认。只有处理会明显损坏主要外形、丢失必须保留的关键部件，或仍无法形成有效实体时，才暂停并说明具体影响。
+
+1% 是自动处理阈值，不是停止拆件的红线。小于 1% 的局部边界异常，默认舍去异常分支并归入相邻父件，保留表面和逐面颜色，再生成平滑分界。累计恰好达到或超过 1% 时，以及任何无法用比例恰当描述的异常，仍按上述完成优先原则判断：评估合理修复、归并或有限形状调整能否继续，不得仅因超阈值就停止或直接要求用户手工修复。
+
+该原则适用于所有异常，不只边界。采用与问题相符的量纲：边界异常使用受影响面积／当前部件原始表面积，装配干涉保留实际切削体积比；不得用整机体积稀释小零件异常，也不得混用面积、体积和面片数量。固定本阶段基准并累计各次处理的受影响区域，避免把多次小修复当作互不相关的预算。详细执行规则见 [completion-first.md](references/completion-first.md)。
+
+边界统一使用 `smooth`，`source` 模式已移除。归并完成后仍须平滑共享分割线，使子件与母件共用同一边界。对已通过且不影响打印的隐藏面不做审美性反复优化；保留必要的有效实体、材料和文件检查，如实记录未解决的装配告警，不能把跳过检查写成“通过”。本原则优先于下文仅因比例超限或细小偏差而要求停工、重复确认的旧规则。
+
 ## Assembly fit handoff
 
 Default `--assembly-ignore-overlap-ratio 0.01` silently ignores a pair's total intersection volume when it is strictly below **1% of the corresponding actual cutting volume**. This is volume / volume, not area. Freeze the original sequential full-size socket-removal volume before scaling or fitting; never substitute the body volume or bounding box. Sum disconnected overlaps per pair. For non-direct pairs use the smaller recorded incoming cutting volume, excluding a root's absent incoming cut; missing references on non-root parts disable ratio acceptance. Retain raw volumes and ratios without a repair, manual-adjustment label or user notification solely for an accepted overlap. Numerical Boolean precision stays unchanged. For residual issues at or above the threshold, finish export and ask the user to observe the model and judge whether printing is affected, adjusting manually only if necessary; do not call a measured fit discrepancy a failed print. This ratio policy and observation wording override stricter assembly guidance below. `0` disables ratio acceptance. The former fixed 1 mm³ CLI policy is retired.
 
 Apply [manual-assembly-fit.md](references/manual-assembly-fit.md) for final assembly issues. The default `--assembly-fit-validation manual` completes export of valid split parts after attempted post-fit difference and bounded seating, retaining measured unresolved interference, occlusion and assembled-view errors for user adjustment. No further approval is needed for this handoff. Label the final package `manual_adjustment_required`, keep raw failed fit/visual checks, and tell the user which parts need adjustment. This overrides the blocking assembly/visual wording below in default manual mode; individual topology, backing thickness, source-surface, color and package gates remain active. Explicit `strict` restores blocking assembly validation.
 
-## License
-
-This skill is licensed under [PolyForm Noncommercial 1.0.0](LICENSE). Uses outside its permissions require a [separate written commercial license](COMMERCIAL_LICENSE.md). Distribute the complete skill folder with `LICENSE`, `NOTICE` and `COMMERCIAL_LICENSE.md`; preserve required notices. Third-party dependencies retain their own licenses.
-
 ## Runtime and platform support
 
-Resolve `SKILL_ROOT` as the directory containing the exact `SKILL.md` loaded for this task. All `scripts/`, `tools/`, `references/` and `requirements.txt` paths in this skill are relative to that directory, not the current project directory or the model's directory. In a source checkout the skill is under `skills/automated-3d-model-splitting/`; an installed skill may live elsewhere. Use the provided skill location rather than searching unrelated projects or assuming a machine-specific installation path.
-
-The entry point is `<SKILL_ROOT>/scripts/split_painted_3mf.py`, with its sibling `split3mf/` package. Invoke the entry point by its resolved absolute path using the selected Python interpreter; it can run from any working directory. Resolve the user's input, output and recovery paths before changing directories. The relative command examples below assume the skill directory as the working directory. If the entry point or package is missing at the resolved skill root, report an incomplete installation and restore the complete skill folder; do not create a substitute script in the user's project.
-
-Use Python 3.10–3.12 and install `<SKILL_ROOT>/requirements.txt` with the selected interpreter's `-m pip`. Reuse a compatible configured environment; do not copy another machine's interpreter path. Run the resolved entry point with `--input <absolute-source.3mf> --preflight-only` before processing a new environment.
+Use Python 3.10–3.12 and install this skill's `requirements.txt` with the selected interpreter's `-m pip`. Reuse a compatible configured environment; do not copy another machine's interpreter path. Run `scripts/split_painted_3mf.py --input <source.3mf> --preflight-only` before processing a new environment.
 
 ## Default print tolerance and recovery
 
-Apply [print-tolerance-and-replay.md](references/print-tolerance-and-replay.md) first. Ordinary production preserves source seams, tolerates harmless affected patches up to **1 mm²**, accepts verified equivalent triangle subdivision, and uses local failure replay. Retain actual part identity, palette, printable thickness, closed solid operations and assembly checks. Do not ask again about already authorized micro-defect tolerance.
+Apply [print-tolerance-and-replay.md](references/print-tolerance-and-replay.md) first. Ordinary production smooths shared cut seams, tolerates harmless affected patches up to **1 mm²**, accepts verified equivalent triangle subdivision, and uses local failure replay. Retain actual part identity, palette, printable thickness, closed solid operations and assembly checks. Do not ask again about already authorized micro-defect tolerance.
 
-Use `--boundary-shape source --micro-defect-area-mm2 1 --print-surface-tolerance-mm 0.05` by default. Use `--recovery-dir` for persistent finalization snapshots and `--resume auto --cache-dir` for validated recursive stages. Prefer local replay after a failure before re-running the full model. Keep [tolerance-and-runtime-policy.md](references/tolerance-and-runtime-policy.md) for endpoint ownership, small-part recognition and slope reporting.
+Use `--boundary-shape smooth --micro-defect-area-mm2 1 --print-surface-tolerance-mm 0.05` by default. Use `--recovery-dir` for persistent finalization snapshots and `--resume auto --cache-dir` for validated recursive stages. Prefer local replay after a failure before re-running the full model. Keep [tolerance-and-runtime-policy.md](references/tolerance-and-runtime-policy.md) for endpoint ownership, small-part recognition and slope reporting.
 
 ## Protect the Source
 
@@ -55,7 +66,7 @@ Use `scripts/split_painted_3mf.py`. Do not use Blender. By default, generate no 
 
 Do not use Computer Use to open or inspect Bambu Studio or another slicer. Complete deterministic offline validation first. When slicer confirmation is needed, ask the user to open the final 3MF and provide screenshots showing the model, the expanded assembly tree, and any visually sensitive region.
 
-The script is a thin public entry point. Implementation lives in the object-oriented `scripts/split3mf/` package and is coordinated by `SplitPipeline`. Read [references/architecture.md](references/architecture.md) before changing module responsibilities, service boundaries, shared state, or pipeline orchestration. Use `--boundary-shape source` by default; `smooth` is available only when the user requests boundary smoothing. Do not restore removed legacy mode aliases.
+The script is a thin public entry point. Implementation lives in the object-oriented `scripts/split3mf/` package and is coordinated by `SplitPipeline`. Read [references/architecture.md](references/architecture.md) before changing module responsibilities, service boundaries, shared state, or pipeline orchestration. Use the sole `smooth` boundary policy; read [boundary-smoothing.md](references/boundary-smoothing.md). Do not restore removed legacy mode aliases.
 
 ## Separate Recognition, Body Selection, and Cutting
 
@@ -146,7 +157,8 @@ Use the complete current recursive source solid before exact subtraction; never 
 - When an otherwise valid interface is blocked by a thin visible-edge tangent, run the deterministic hidden-interface search. Generate locally inward direction fields toward interior parent targets, audit every field against parent thickness and the ordinary cap/reserve gates, and accept only a field that provides at least 0.45 mm load-bearing depth. Keep the selected shared visible rim fixed and reuse the accepted field for the matching parent socket; never turn one model's plane into a global axis rule.
 - Accept high-confidence `force_inward_vector` and `force_parent_direction` visual-semantic overrides as audited escape hatches. Normalize and validate every override, reject zero or non-finite vectors, never apply an override to the root body, and still require geometry and multi-view validation to pass. Never turn one model's axis into a global default.
 - Accept a high-confidence `guided_internal_cut` only as a reusable geometric constraint: its entry direction describes the front internal transition and its target plane describes the deeper shared cut surface. Keep the selected shared visible paint boundary fixed, detect thin parent-wall arcs from measured thickness, and apply the requested entry inset only around those arcs with a smooth circular falloff. Search bounded parent-interior direction variants, require the selected bottom ring to stay on one coherent target-parallel plane within the requested depth and parallel-shift limits, then reuse the exact prevalidated source-id fit ring for the matching socket. Build the wall through a midpoint loft and block degenerate triangles, long circumferential bridges, excessive stretch, or widespread quad-normal conflicts. A guided constraint is never a license to copy one model's plane into the defaults.
-- Preserve visible source seams under default `--boundary-shape source`. For explicitly requested `smooth`, read [boundary-smoothing.md](references/boundary-smoothing.md); its fitted visible seam and surface-band checks apply only in that mode.
+- Always smooth shared cut seams under `--boundary-shape smooth`; apply [boundary-smoothing.md](references/boundary-smoothing.md) after local anomaly cleanup. Do not fall back to the removed source mode.
+- When direct-child rims share source vertices or edges, follow [shared-layer-seams.md](references/shared-layer-seams.md): prepare one validated current-layer surface before cap precomputation, reuse it for parent and children, and preserve inherited contact geometry. Sharing alone is not nonmanifoldness and never grants a tolerance waiver.
 - Default `--connector-slope-validation advisory` records all slope measurements and warns only when strictly more than 1% of finite samples on the current interface lie outside inclusive 30–75 degrees. The median, percentiles, and consecutive outlier runs remain diagnostic; they do not block the default run. Explicit `strict` retains the legacy diagnostic gate. Existing topology, inversion, degeneracy, Boolean, and assembly validation policies remain in force.
 - When the user explicitly requests a `planar-arc-retopology` geometry review, keep the two checks distinct. Plot the original and actual retopologized visible boundary in the stable-plane projection, then plot a representative section from the emitted mesh showing the moved shared rim, regularized backing surface, and 45-degree design line. Report lateral inset, axial depth, and measured minimum/median/maximum backing angles. Never present the 2-D source/target overlay as the 45-degree cut profile. The reusable diagnostics are `tools/plot_planar_arc_actual.py` and `tools/plot_actual_45deg_section.py`; write their images to a task-owned visualization directory, not beside the source model.
 - For `local-connector`, preflight the exact production backing, unequal-count bridge, compact peg or zero-engagement floor, and private Boolean cutters. Simplify the private constant-offset floor contour by at most 0.005 mm (and at most 0.15% of inset depth) so medial-axis micron edges cannot seed radial needle cells. After unequal-ring height-field refinement, regularize safe convex quads and never add a chord within one fixed boundary ring. Never judge a concave connector with the legacy equal-count boundary-extrusion proxy: that proxy can invent folded quads which are absent from the emitted connector. Keep the production builders authoritative and require their face accounting, nondegenerate-triangle, bridge, and watertight-cutter audits to pass before the first large Boolean; slope uses the general >1% warning-only policy by default. When both connector advisories are active, a peg-free minimal closure with at most four rim vertices and at most `0.05 mm` depth may also report rather than block its intrinsic high-aspect side triangles, whether its valid floor came from the constant-offset or axial-fallback branch, but only when every strip audit is present, no bridge leaves the annulus, fanout is at most 64, every reported needle edge is at most `8 mm`, and the generated faces are nondegenerate. Record this narrow exception; it never waives topology, winding, cutter, Boolean, or assembly checks.

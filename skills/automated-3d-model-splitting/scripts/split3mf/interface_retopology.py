@@ -1371,11 +1371,6 @@ class InterfaceRetopologyService:
         source_vertex_ids: np.ndarray,
         context: PlanarArcRetopologyContext,
     ) -> tuple[np.ndarray, dict]:
-        if context.config.preserve_confirmed_seam:
-            from .confirmed_seam import preserve_confirmed_loop
-            target, record = preserve_confirmed_loop(points, source_vertex_ids)
-            record.update(minimal_loop_preserved=True, boundary_policy='source')
-            return target, record
         try:
             target = build_planar_arc_boundary(
                 points,
@@ -1408,6 +1403,11 @@ class InterfaceRetopologyService:
         context: PlanarArcRetopologyContext,
         local_faces: np.ndarray | None = None,
     ) -> tuple[np.ndarray, list[dict]]:
+        if context.active_layer_seam is not None:
+            if context.config != context.active_layer_seam.config:
+                raise PlanarArcError('Layer seam settings changed after planning')
+            return context.active_layer_seam.apply(
+                local_vertices, local_faces, global_vertex_ids, loops)
         source = np.asarray(local_vertices, dtype=np.float64)
         result = source.copy()
         global_ids = np.asarray(global_vertex_ids, dtype=np.int64)
@@ -1428,14 +1428,6 @@ class InterfaceRetopologyService:
                 np.asarray(point, dtype=np.float64) for point in target
             )
             records.append({"loop_index": int(loop_index), **record})
-
-        if context.config.preserve_confirmed_seam:
-            from .confirmed_seam import audit_unchanged_surface
-            quality = audit_unchanged_surface(source, local_faces, loops)
-            for record in records:
-                record['visible_surface_band_quality'] = dict(quality)
-                record['interface_retopology_surface_role'] = 'user-confirmed-immutable-source'
-            return source.copy(), records
 
         if local_boundary_ids:
             boundary_array = np.asarray(local_boundary_ids, dtype=np.int64)

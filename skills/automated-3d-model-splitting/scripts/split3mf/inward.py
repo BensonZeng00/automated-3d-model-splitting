@@ -1365,6 +1365,12 @@ def build_layer_child_cut_references(
     interface_geometry: str = "boundary-extrusion",
 ) -> tuple[list[dict], dict[int, Component], dict[int, list[int]]]:
     context_started_at = time.perf_counter()
+    from .layer_seam_planning import prepare_layer_seams
+    vertices, faces, interface_retopology = prepare_layer_seams(
+        vertices, faces, components, parent_index, direct_child_indices,
+        assembly_children, boundary_neighbor_lookup, interface_retopology)
+    if interface_retopology is not None and interface_retopology.active_layer_seam is not None:
+        model_center = np.asarray(vertices).mean(axis=0)
     fit_clearance_by_part = fit_clearance_by_part or {}
     guided_internal_cuts_by_part = guided_internal_cuts_by_part or {}
     cap_planning_enabled = (
@@ -8136,8 +8142,6 @@ def make_body_cut_mesh(
         cut_refs,
         preserve_unmatched_source_geometry=preserve_unmatched_source_geometry,
     )
-    if interface_retopology.config.preserve_confirmed_seam:
-        preserve_unmatched_source_geometry = True
     mutable_loop_indices = [
         int(loop_index)
         for loop_index, ref in enumerate(loop_cut_refs)

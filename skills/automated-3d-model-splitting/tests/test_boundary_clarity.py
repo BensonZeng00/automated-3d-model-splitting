@@ -51,15 +51,9 @@ class BoundaryClarityTests(unittest.TestCase):
                 return trial
         self.fail('Fixture did not produce a branched seam')
 
-    def test_source_branch_policy_preserves_labels_without_review(self):
-        labels = self.ambiguous_labels()
-        with tempfile.TemporaryDirectory() as directory:
-            service = BoundaryReviewService(Path(directory)/'unused', preserve_source_branches=True)
-            actual, report = service.prepare(self.mesh.vertices, self.mesh.faces, labels)
-            np.testing.assert_array_equal(actual, labels)
-            self.assertEqual(report['status'], 'source_boundary_preserved')
-            self.assertFalse(report['requires_semantic_confirmation'])
-            self.assertFalse(service.directory.exists())
+    def test_removed_source_branch_option_is_rejected(self):
+        with self.assertRaises(TypeError):
+            BoundaryReviewService(Path('unused'), preserve_source_branches=True)
 
     def test_local_proposals_keep_anchors_and_geometry(self):
         labels = self.ambiguous_labels()
@@ -75,18 +69,14 @@ class BoundaryClarityTests(unittest.TestCase):
         np.testing.assert_array_equal(self.mesh.faces, faces)
         np.testing.assert_array_equal(labels, self.ambiguous_labels())
 
-    def test_review_stops_and_requires_exact_explicit_approval(self):
+    def test_explicit_review_decision_requires_matching_approval(self):
         labels = self.ambiguous_labels()
         with tempfile.TemporaryDirectory() as directory:
-            service = BoundaryReviewService(Path(directory))
-            with patch('split3mf.boundary_preview.render_boundary_review', return_value=[]):
-                with self.assertRaises(BoundaryReviewRequired) as caught:
-                    service.prepare(self.mesh.vertices, self.mesh.faces, labels)
-            report = caught.exception.report
-            candidate = next(c for c in report['candidates'] if c['admissible'])
+            candidate = next(c for c in self.graph.propose(labels,self.graph.assess(labels)) if c['admissible'])
             path = Path(directory) / 'approval.json'
-            decision = dict(fingerprint=report['fingerprint'], user_confirmed=True,
-                            selected_candidate=candidate['id'], candidate_fingerprint=candidate['fingerprint'])
+            decision = dict(fingerprint=self.graph.fingerprint(labels,'input'), user_confirmed=True,
+                            selected_candidate=candidate['id'],
+                            candidate_fingerprint=self.graph.fingerprint(candidate['owners'],'input'))
             path.write_text(json.dumps({'decisions': [decision]}), encoding='utf-8')
             approved, result = BoundaryReviewService(Path(directory), path).prepare(
                 self.mesh.vertices, self.mesh.faces, labels)
@@ -100,6 +90,16 @@ class BoundaryClarityTests(unittest.TestCase):
             path.write_text(json.dumps(decision), encoding='utf-8')
             with self.assertRaises(BoundaryDecisionError):
                 BoundaryReviewService(Path(directory), path).prepare(self.mesh.vertices, self.mesh.faces, labels)
+
+    def test_above_one_percent_uses_impact_assessment_and_continues(self):
+        labels = self.ambiguous_labels()
+        with tempfile.TemporaryDirectory() as directory:
+            actual, report = BoundaryReviewService(Path(directory)).prepare(
+                self.mesh.vertices, self.mesh.faces, labels)
+        self.assertEqual(report['status'],'completion_priority_local_merge')
+        self.assertFalse(report['area_policy']['automatic'])
+        self.assertTrue(report['completion_assessment']['exterior_unchanged'])
+        self.assertTrue(self.graph.assess(actual).clear)
 
     def test_no_candidate_still_stops(self):
         with tempfile.TemporaryDirectory() as directory:

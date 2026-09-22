@@ -23,7 +23,7 @@
 
 ## 可选平滑过渡带：默认 3 mm
 
-以下仅适用于用户明确请求的 `--boundary-shape smooth`；默认 `source` 模式不移动可见边界。完整规则见 [boundary-smoothing.md](boundary-smoothing.md)。
+以下适用于默认且唯一的 `--boundary-shape smooth`。先处理局部异常，再平滑共享边界；完整规则见 [boundary-smoothing.md](boundary-smoothing.md) 和 [completion-first.md](completion-first.md)。
 
 `--boundary-retopology-band-mm` 默认为 3.0 mm。它是局部过渡带宽度，不是允许顶点移动 3 mm。既有 strict 表面带模式仍限制目标偏移为带宽的 45%，即 1.35 mm；带外顶点不动。表面带其他放宽选项保留原审批条件。
 

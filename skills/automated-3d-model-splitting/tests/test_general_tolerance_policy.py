@@ -108,7 +108,7 @@ class GeneralToleranceTests(unittest.TestCase):
             self.assertTrue(report['nearest_merge']['warning'])
             self.assertEqual(report['nearest_merge']['pairs'][0]['boundary_vertices'], 2)
 
-    def test_pipeline_merges_micro_region_before_review_and_preserves_paint(self):
+    def test_pipeline_preserves_micro_source_region_and_paint(self):
         from split3mf.domain import SplitConfig
         from split3mf.pipeline import SplitPipeline
         import contextlib
@@ -122,14 +122,15 @@ class GeneralToleranceTests(unittest.TestCase):
             parser = build_parser()
             args = parser.parse_args(['--input', str(Path(directory) / 'source.3mf'),
                 '--recognize-only', '--recognition-surface-profile', 'all-faces',
-                '--body-strategy', 'largest', '--min-faces', '1'])
+                '--body-strategy', 'largest', '--noise-review-max-faces', '0',
+                '--small-region-review-max-faces', '0'])
             pipeline = SplitPipeline(SplitConfig(args, Path(args.input), {}), parser)
             with patch.object(pipeline.reader, 'read', return_value=(mesh.vertices, mesh.faces, paint, {})):
-                with patch('split3mf.pipeline.build_tiny_component_review', side_effect=AssertionError('unnecessary review')):
+                with patch('split3mf.pipeline.build_source_region_review', side_effect=AssertionError('unnecessary review')):
                     with patch('split3mf.pipeline.print_recognition') as inventory:
                         with contextlib.redirect_stdout(io.StringIO()):
                             pipeline.run()
-            self.assertEqual(len(inventory.call_args.args[0]), 1)
+            self.assertEqual(len(inventory.call_args.args[0]), 2)
             self.assertEqual(paint[0], '0C')
             self.assertEqual(len(paint), len(mesh.faces))
 

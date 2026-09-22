@@ -69,7 +69,6 @@ from .connector_topology import (
 from .connector_surface import refine_connector_annulus_heightfield
 from .mesh_finalization import (
     finalize_source_preserving_mesh,
-    weld_coincident_open_boundary_vertices,
 )
 from .reporting import runtime_log
 
@@ -160,73 +159,27 @@ def finalize_recursive_colored_mesh(
     nondegenerate_mask[:protected_count] = True
     if not np.all(nondegenerate_mask):
         mesh.update_faces(nondegenerate_mask)
-    mesh.remove_unreferenced_vertices()
-    mesh, selective_weld_record = weld_coincident_open_boundary_vertices(mesh)
-    if int(validate_mesh_in_memory(mesh)["open_edges"]) > 0:
-        mesh = close_residual_boundaries(mesh, merge_and_clean=False)
-        mesh, post_closure_weld_record = weld_coincident_open_boundary_vertices(mesh)
-    else:
-        post_closure_weld_record = {
-            "attempted": False,
-            "accepted": False,
-            "reason": "no_identity_open_edges_after_selective_weld",
+    generated_orientation = {"applied": False, "changed_generated_faces": 0}
+    if protected_count < len(mesh.faces):
+        source_faces = np.asarray(mesh.faces[:protected_count], dtype=np.int64).copy()
+        generated_before = np.asarray(mesh.faces[protected_count:], dtype=np.int64).copy()
+        orient_mesh_faces_consistently(mesh)
+        mesh.faces[:protected_count] = source_faces
+        generated_after = np.asarray(mesh.faces[protected_count:], dtype=np.int64)
+        generated_orientation = {
+            "applied": True,
+            "changed_generated_faces": int(
+                np.count_nonzero(np.any(generated_before != generated_after, axis=1))
+            ),
+            "source_faces_changed": 0,
         }
-    orientation_record = orient_mesh_faces_consistently(mesh)
-    # Recursive colored children use the same print-scale repair as the root.
-    # Preserve material lookup by geometry; inferred closure colors propagate below.
-    from .print_tolerance import current
-    if current().micro_area_mm2 > 0 and (
-        not mesh.is_watertight or not mesh.is_winding_consistent
-    ):
-        from .mesh_finalization import SourcePreservingMeshFinalizer, SourcePreservingFinalizationPolicy
-        finalized = SourcePreservingMeshFinalizer.finalize(
-            mesh, SourcePreservingFinalizationPolicy(protected_source_face_count=protected_count)
-        )
-        mesh = finalized.mesh
-        orientation_record = finalized.audit['orientation_repair']
-    # A source-preserving close/weld pass can leave a cloud of tiny tetrahedral
-    # repair shells attached to one otherwise valid recursive part.  They are
-    # not recognized sub-parts: the source region entered this function as one
-    # connected component.  Remove only an unambiguous repair-debris pattern,
-    # keeping the dominant closed component and refusing any material split.
-    components = list(mesh.split(only_watertight=False))
-    debris_record = {
-        "applied": False,
-        "component_count": int(len(components)),
-    }
-    if len(components) > 1:
-        components.sort(key=lambda component: len(component.faces), reverse=True)
-        dominant = components[0]
-        residual = components[1:]
-        total_faces = max(int(len(mesh.faces)), 1)
-        residual_faces = int(sum(len(component.faces) for component in residual))
-        maximum_residual_faces = max(
-            (int(len(component.faces)) for component in residual),
-            default=0,
-        )
-        dominant_ratio = float(len(dominant.faces) / total_faces)
-        if (
-            bool(dominant.is_watertight)
-            and dominant_ratio >= 0.95
-            and residual_faces <= int(np.ceil(0.05 * total_faces))
-            and maximum_residual_faces <= 32
-        ):
-            mesh = dominant.copy()
-            debris_record = {
-                "applied": True,
-                "policy": "dominant_closed_component_with_tiny_repair_debris",
-                "component_count_before": int(len(components)),
-                "dominant_faces": int(len(mesh.faces)),
-                "dominant_face_ratio": dominant_ratio,
-                "removed_component_count": int(len(residual)),
-                "removed_faces": residual_faces,
-                "maximum_removed_component_faces": maximum_residual_faces,
-            }
-    mesh.metadata["orientation_repair"] = orientation_record
+    # Do not weld, close, orient, or remove disconnected source shells here.
+    # Source topology is diagnostic; interface builders validate their own new
+    # faces before this assembly step.
+    mesh.metadata["source_topology_diagnostics"] = validate_mesh_in_memory(mesh)
     mesh.metadata["protected_source_face_count"] = protected_count
-    mesh.metadata["selective_open_boundary_weld"] = selective_weld_record
-    mesh.metadata["post_closure_selective_open_boundary_weld"] = post_closure_weld_record
-    mesh.metadata["tiny_repair_component_cleanup"] = debris_record
+    mesh.metadata["source_geometry_mutation"] = "none"
+    mesh.metadata["generated_interface_orientation"] = generated_orientation
     runtime_log(
         "mesh-finalize",
         "recursive_mesh_finalize_face_counts",
@@ -9314,5 +9267,3 @@ class PartMeshBuilder:
     build_part = staticmethod(make_part_mesh)
     build_body_cut = staticmethod(make_body_cut_mesh)
     build_layer_subassembly = staticmethod(make_layer_child_subassembly_mesh)
-
-

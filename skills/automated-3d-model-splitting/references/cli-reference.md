@@ -88,7 +88,7 @@ Whole-tree preflight plans every recursive interface before the first expensive 
 
 `exterior-visible` reassigns occluded paint to the recognition base color before connected-region grouping. It never edits the source mesh.
 
-Before either recognition profile runs, vendor composite `paint_color` streams are decoded into their actual recursively split leaf faces. The parser conforms T-joints along internal and neighboring source-triangle edges, then reports source faces, decoded leaves, conformed faces, leaf states, and parse failures. `--min-faces` applies to restored leaf-face connectivity, never to raw composite token strings.
+Before either recognition profile runs, vendor composite `paint_color` streams are decoded into their actual recursively split leaf faces. The parser conforms T-joints along internal and neighboring source-triangle edges, then reports source faces, decoded leaves, conformed faces, leaf states, and parse failures. Review face thresholds apply to restored leaf-face connectivity, never to raw composite token strings.
 
 ## Processing Mode
 
@@ -102,25 +102,13 @@ Automatic body selection records normal coherence, opposite-normal balance, domi
 
 ## Components and Colors
 
-- `--min-faces N`
-- `--tiny-component-policy semantic|merge|ignore` (default `semantic`)
-- `--tiny-component-auto-noise-max-faces 100`
-- `--tiny-component-review-json PATH`
-- `--tiny-component-review-dir PATH`
-- `--tiny-component-review-resolution 320`
+- `--noise-review-max-faces 100`
+- `--small-region-review-max-faces 999`
+- `--region-review-json PATH`
+- `--region-review-dir PATH`
+- `--region-review-resolution 320`
 
-After the <=2 mm micro-region merge, long-strip candidates require review regardless of face count; see [SKILL.md](../SKILL.md#protect-the-source) for their physical screening criteria. Under the default policy, remaining non-strip connected regions with at most `--tiny-component-auto-noise-max-faces` faces are classified as noise and merged directly, without image rendering or user review. The default is inclusive `<=100`. `--min-faces` is the upper image-review threshold: regions above the auto-noise threshold and below `--min-faces` join the long-strip review candidates. When such candidates exist and no confirmed review JSON is supplied, the script writes one PNG per candidate with six whole-model context views above six local zoom views, plus `manifest.json` and `user_decisions.json`, then exits with code `4`. The Codex skill inspects every PNG, proposes what the region visually represents, and asks the user which candidates to preserve. The confirmed JSON must cover every rendered candidate, use the same source and thresholds, set `user_confirmed=true`, and contain a nonempty label plus Boolean `preserve` value for every item. Only user-selected candidates remain independent; all unselected candidates merge. `merge` unconditionally merges every sub-threshold region without review, while `ignore` retains legacy filtering.
-- `--body-strategy auto-score|largest|none`
-- `--body-color CODE`
-- `--body-index N`
-- `--merge-body-parts P14+P04`: merge recognized parts into one multi-material
-  body before assembly inference. Part ids are evaluated in the pre-merge
-  recognition inventory; the first id is the body/color anchor. Source per-face
-  filament assignments remain intact. This option is mutually exclusive with
-  `--body-index` and `--body-color`.
-- `--color-map-json PATH`
-- `--visual-semantics-json PATH`
-- `--visual-semantic-min-confidence LOW|MED|HIGH|0..1`
+The face thresholds select mandatory semantic-review candidates only. Regions through 100 faces are noise candidates, regions from 101 through 999 faces are small-region candidates, and long strips require review at every face count. Confirm every candidate as `noise`, `part`, or `uncertain`. All classifications remain unchanged source geometry and follow the same normal interface-planning path. No classification merges, deletes, recolors, repairs, or filters a region. The former `--min-faces` and `--tiny-component-*` interface is intentionally unsupported.
 
 High-confidence part semantics may include `force_inward_vector: [x,y,z]`, `force_parent_direction: true`, or a `guided_internal_cut` object. A guided cut supplies `entry_direction`, `target_plane_normal`, `target_plane_point_mm`, optional `minimum_depth_mm`, `maximum_depth_mm`, `entry_inset_mm`, and `maximum_parallel_shift_mm`. The entry vector is the front internal transition; the plane is the deeper shared cut. The planner keeps the visible rim locked, localizes the entry inset to measured thin arcs, searches bounded parent-interior variants, reuses one source-id fit ring on both parts, and blocks poor side-wall triangulation. These are audited geometry constraints, not model-axis defaults.
 

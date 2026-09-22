@@ -27,6 +27,7 @@ from split3mf.interface_retopology import (
     _locally_inverted_face_mask,
     _surface_band_deformation,
     _select_visible_boundary_target,
+    generated_geometry_boundary_vertices,
     _triangle_shape_quality,
     _untangle_interior_surface_vertices,
     _visual_displacement_advisory,
@@ -35,6 +36,26 @@ from split3mf.surface_quality import sparse_local_inversion_audit
 
 
 class InterfaceRetopologyTests(unittest.TestCase):
+    def test_large_target_preserves_visible_rim_and_reaches_hidden_planner(self) -> None:
+        source = np.asarray(
+            [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0]],
+            dtype=np.float64,
+        )
+        fitted = source + np.asarray([0.0, 0.0, 2.0])
+
+        visible, record = _select_visible_boundary_target(source, fitted, 0.5)
+        planned = generated_geometry_boundary_vertices(
+            visible, [[0, 1, 2]], [record]
+        )
+
+        np.testing.assert_allclose(visible, source)
+        np.testing.assert_allclose(planned, fitted)
+        self.assertTrue(record["large_displacement_source_boundary_preserved"])
+        self.assertEqual(
+            record["large_displacement_strategy"],
+            "generated_inward_wall_from_immutable_source_ring",
+        )
+
     def test_visual_advisory_uses_physical_displacement_not_coverage(self) -> None:
         policy = PlanarArcRetopologyConfig().smoothing_policy
         broad_submillimeter = np.full(100_000, 0.4, dtype=np.float64)
@@ -45,8 +66,9 @@ class InterfaceRetopologyTests(unittest.TestCase):
         advisory, maximum, p95 = _visual_displacement_advisory(
             "advisory", broad_submillimeter, policy
         )
+        excessive_displacement = policy.maximum_displacement_mm + 0.025
         visible_drift, drift_maximum, _drift_p95 = _visual_displacement_advisory(
-            "advisory", np.r_[broad_submillimeter, 5.975], policy
+            "advisory", np.r_[broad_submillimeter, excessive_displacement], policy
         )
 
         self.assertFalse(strict)
@@ -54,7 +76,7 @@ class InterfaceRetopologyTests(unittest.TestCase):
         self.assertAlmostEqual(maximum, 0.4)
         self.assertAlmostEqual(p95, 0.4)
         self.assertFalse(visible_drift)
-        self.assertAlmostEqual(drift_maximum, 5.975)
+        self.assertAlmostEqual(drift_maximum, excessive_displacement)
 
     def test_user_reviewed_surface_band_lowers_only_sparse_angle_floor(self) -> None:
         face_count = 36402

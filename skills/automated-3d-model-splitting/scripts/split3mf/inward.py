@@ -31,7 +31,10 @@ def visible_top_edge_clearance(insert_shrink_mm: float) -> float:
     """
     _ = max(float(insert_shrink_mm), 0.0)
     return 0.0
-from .interface_retopology import InterfaceRetopologyService
+from .interface_retopology import (
+    InterfaceRetopologyService,
+    generated_geometry_boundary_vertices,
+)
 from .domain import PlanarArcRetopologyContext, CapDecision
 from .hidden_interface import (
     HIDDEN_INTERFACE_MINIMUM_LOAD_BEARING_DEPTH_MM,
@@ -1479,12 +1482,20 @@ def build_layer_child_cut_references(
         planned_vertices = local_vertices
         if cap_planning_enabled and selected_loop_records:
             retopology_started_at = time.perf_counter()
-            planned_vertices, _retopology_records = InterfaceRetopologyService.retopologize_local_loops(
+            visible_planned_vertices, _retopology_records = InterfaceRetopologyService.retopologize_local_loops(
                 local_vertices,
                 [record["loop"] for record in selected_loop_records],
                 global_vertex_ids,
                 interface_retopology,
                 local_faces=local_faces,
+            )
+            # The source rim may intentionally stay immutable while a farther
+            # fitted ring is realized by generated walls/caps.  Do not lose
+            # that manufacturing target when preparing the hidden geometry.
+            planned_vertices = generated_geometry_boundary_vertices(
+                visible_planned_vertices,
+                [record["loop"] for record in selected_loop_records],
+                _retopology_records,
             )
             runtime_log(
                 "递归预计算",

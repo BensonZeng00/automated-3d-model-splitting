@@ -44,6 +44,64 @@ def _visual_displacement_advisory(
     return accepted, maximum, p95
 
 
+def _select_visible_boundary_target(
+    source: np.ndarray,
+    proposed: np.ndarray,
+    visible_band_mm: float,
+) -> tuple[np.ndarray, dict]:
+    """Choose the visible rim without discarding the manufacturing target.
+
+    Motion larger than the visible transition band must not be applied to the
+    source surface.  The fitted target is nevertheless retained in the record
+    so generated inward walls and caps can use it as their planning boundary.
+    """
+    source_points = np.asarray(source, dtype=np.float64)
+    proposed_points = np.asarray(proposed, dtype=np.float64)
+    if proposed_points.shape != source_points.shape:
+        raise PlanarArcError("fitted boundary target does not match source rim")
+    displacement = np.linalg.norm(proposed_points - source_points, axis=1)
+    maximum = float(displacement.max(initial=0.0))
+    preserve_source = bool(maximum > float(visible_band_mm) + 1e-12)
+    return (
+        source_points.copy() if preserve_source else proposed_points.copy(),
+        {
+            "large_displacement_source_boundary_preserved": preserve_source,
+            "requested_maximum_target_displacement_mm": maximum,
+            "visible_transition_band_mm": float(visible_band_mm),
+            "large_displacement_strategy": (
+                "generated_inward_wall_from_immutable_source_ring"
+                if preserve_source
+                else "visible_source_band_deformation"
+            ),
+            # Keep this JSON-compatible because retopology records are also
+            # emitted as diagnostics.  Consumers convert it back to float64.
+            "generated_inward_boundary_points": proposed_points.tolist(),
+        },
+    )
+
+
+def generated_geometry_boundary_vertices(
+    visible_vertices: np.ndarray,
+    loops: list[list[int]],
+    records: list[dict],
+) -> np.ndarray:
+    """Overlay retained fitted rings for hidden-geometry planning only."""
+    planned = np.asarray(visible_vertices, dtype=np.float64).copy()
+    if len(loops) != len(records):
+        raise PlanarArcError("retopology records do not match boundary loops")
+    for loop, record in zip(loops, records):
+        if not record.get("large_displacement_source_boundary_preserved", False):
+            continue
+        loop_ids = np.asarray(loop, dtype=np.int64)
+        target = np.asarray(
+            record.get("generated_inward_boundary_points"), dtype=np.float64
+        )
+        if target.shape != (len(loop_ids), 3):
+            raise PlanarArcError("generated inward target does not match boundary loop")
+        planned[loop_ids] = target
+    return planned
+
+
 def _replace_faces_in_edge_map(
     faces: np.ndarray,
     face_ids: list[int] | tuple[int, ...] | np.ndarray,

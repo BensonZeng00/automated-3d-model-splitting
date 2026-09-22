@@ -44,6 +44,64 @@ def _visual_displacement_advisory(
     return accepted, maximum, p95
 
 
+def _select_visible_boundary_target(
+    source: np.ndarray,
+    proposed: np.ndarray,
+    visible_band_mm: float,
+) -> tuple[np.ndarray, dict]:
+    """Choose the visible rim without discarding the manufacturing target.
+
+    Motion larger than the visible transition band must not be applied to the
+    source surface.  The fitted target is nevertheless retained in the record
+    so generated inward walls and caps can use it as their planning boundary.
+    """
+    source_points = np.asarray(source, dtype=np.float64)
+    proposed_points = np.asarray(proposed, dtype=np.float64)
+    if proposed_points.shape != source_points.shape:
+        raise PlanarArcError("fitted boundary target does not match source rim")
+    displacement = np.linalg.norm(proposed_points - source_points, axis=1)
+    maximum = float(displacement.max(initial=0.0))
+    preserve_source = bool(maximum > float(visible_band_mm) + 1e-12)
+    return (
+        source_points.copy() if preserve_source else proposed_points.copy(),
+        {
+            "large_displacement_source_boundary_preserved": preserve_source,
+            "requested_maximum_target_displacement_mm": maximum,
+            "visible_transition_band_mm": float(visible_band_mm),
+            "large_displacement_strategy": (
+                "generated_inward_wall_from_immutable_source_ring"
+                if preserve_source
+                else "visible_source_band_deformation"
+            ),
+            # Keep this JSON-compatible because retopology records are also
+            # emitted as diagnostics.  Consumers convert it back to float64.
+            "generated_inward_boundary_points": proposed_points.tolist(),
+        },
+    )
+
+
+def generated_geometry_boundary_vertices(
+    visible_vertices: np.ndarray,
+    loops: list[list[int]],
+    records: list[dict],
+) -> np.ndarray:
+    """Overlay retained fitted rings for hidden-geometry planning only."""
+    planned = np.asarray(visible_vertices, dtype=np.float64).copy()
+    if len(loops) != len(records):
+        raise PlanarArcError("retopology records do not match boundary loops")
+    for loop, record in zip(loops, records):
+        if not record.get("large_displacement_source_boundary_preserved", False):
+            continue
+        loop_ids = np.asarray(loop, dtype=np.int64)
+        target = np.asarray(
+            record.get("generated_inward_boundary_points"), dtype=np.float64
+        )
+        if target.shape != (len(loop_ids), 3):
+            raise PlanarArcError("generated inward target does not match boundary loop")
+        planned[loop_ids] = target
+    return planned
+
+
 def _replace_faces_in_edge_map(
     faces: np.ndarray,
     face_ids: list[int] | tuple[int, ...] | np.ndarray,
@@ -481,7 +539,12 @@ def _repair_flipped_boundary_ears(
     boundary_ids: np.ndarray,
     candidate_face_mask: np.ndarray | None = None,
 ) -> tuple[np.ndarray, int]:
-    """Flip a local diagonal when one surface-band triangle folds inward."""
+    """Repair visible-source triangles folded by moving the shared seam.
+
+    This runs before generated side walls and caps exist: those faces must use
+    the final, audited visible boundary.  It repairs the source-side annulus,
+    not a missing split cap, by changing only a local quad diagonal.
+    """
 
     repaired = np.asarray(faces, dtype=np.int64).copy()
     repair_count = 0
@@ -1030,12 +1093,20 @@ def _surface_band_deformation(
     result = points + applied
     result[boundary] = targets
     boundary_repair_started_at = time.perf_counter()
+    boundary_repair_candidate_mask = np.any(active_mask[faces], axis=1)
+    runtime_log(
+        "几何性能",
+        "surface_band_boundary_repair_start",
+        "开始检查并修复边界耳片",
+        candidate_faces=int(np.count_nonzero(boundary_repair_candidate_mask)),
+        boundary_vertices=int(len(boundary)),
+    )
     faces, boundary_ear_repairs = _repair_flipped_boundary_ears(
         points,
         result,
         faces,
         boundary,
-        candidate_face_mask=np.any(active_mask[faces], axis=1),
+        candidate_face_mask=boundary_repair_candidate_mask,
     )
     boundary_repair_seconds = float(
         time.perf_counter() - boundary_repair_started_at
@@ -1525,6 +1596,14 @@ class InterfaceRetopologyService:
         source = np.asarray(local_vertices, dtype=np.float64)
         result = source.copy()
         global_ids = np.asarray(global_vertex_ids, dtype=np.int64)
+        runtime_log(
+            "planar-arc-retopology",
+            "visible_surface_conformance_start",
+            "先一致化并审计可见源表面；侧壁和封口面将在边界通过后生成",
+            local_faces=0 if local_faces is None else int(len(local_faces)),
+            boundary_loops=int(len(loops)),
+            generated_split_faces=0,
+        )
         records: list[dict] = []
         local_boundary_ids: list[int] = []
         target_boundary_points: list[np.ndarray] = []
@@ -1537,6 +1616,12 @@ class InterfaceRetopologyService:
                 global_ids[local_indices],
                 context,
             )
+            target, displacement_strategy = _select_visible_boundary_target(
+                source[local_indices],
+                target,
+                context.config.retopology_band_mm,
+            )
+            record.update(displacement_strategy)
             local_boundary_ids.extend(int(value) for value in local_indices)
             target_boundary_points.extend(
                 np.asarray(point, dtype=np.float64) for point in target

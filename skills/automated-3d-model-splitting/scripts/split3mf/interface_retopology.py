@@ -44,37 +44,6 @@ def _visual_displacement_advisory(
     return accepted, maximum, p95
 
 
-def _select_visible_boundary_target(
-    source: np.ndarray,
-    proposed: np.ndarray,
-    visible_band_mm: float,
-) -> tuple[np.ndarray, dict]:
-    """Keep large seam motion in subsequently generated hidden geometry.
-
-    A target farther than the available visible transition band would fold the
-    source annulus.  Preserve its exact boundary instead; the inward builder
-    will generate side walls and a cap from this shared immutable ring.
-    """
-    source_points = np.asarray(source, dtype=np.float64)
-    proposed_points = np.asarray(proposed, dtype=np.float64)
-    displacement = np.linalg.norm(proposed_points - source_points, axis=1)
-    maximum = float(displacement.max(initial=0.0))
-    preserve_source = bool(maximum > float(visible_band_mm) + 1e-12)
-    return (
-        source_points.copy() if preserve_source else proposed_points,
-        {
-            "large_displacement_source_boundary_preserved": preserve_source,
-            "requested_maximum_target_displacement_mm": maximum,
-            "visible_transition_band_mm": float(visible_band_mm),
-            "large_displacement_strategy": (
-                "generated_inward_wall_from_immutable_source_ring"
-                if preserve_source
-                else "visible_source_band_deformation"
-            ),
-        },
-    )
-
-
 def _replace_faces_in_edge_map(
     faces: np.ndarray,
     face_ids: list[int] | tuple[int, ...] | np.ndarray,

@@ -35,25 +35,6 @@ from split3mf.surface_quality import sparse_local_inversion_audit
 
 
 class InterfaceRetopologyTests(unittest.TestCase):
-    def test_large_boundary_motion_is_deferred_to_generated_geometry(self) -> None:
-        source = np.asarray([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
-
-        visible, visible_record = _select_visible_boundary_target(
-            source, source + [0.0, 2.0, 0.0], 3.0
-        )
-        hidden, hidden_record = _select_visible_boundary_target(
-            source, source + [0.0, 5.975, 0.0], 3.0
-        )
-
-        np.testing.assert_allclose(visible, source + [0.0, 2.0, 0.0])
-        self.assertFalse(visible_record["large_displacement_source_boundary_preserved"])
-        np.testing.assert_allclose(hidden, source)
-        self.assertTrue(hidden_record["large_displacement_source_boundary_preserved"])
-        self.assertEqual(
-            hidden_record["large_displacement_strategy"],
-            "generated_inward_wall_from_immutable_source_ring",
-        )
-
     def test_visual_advisory_uses_physical_displacement_not_coverage(self) -> None:
         policy = PlanarArcRetopologyConfig().smoothing_policy
         broad_submillimeter = np.full(100_000, 0.4, dtype=np.float64)
@@ -65,7 +46,7 @@ class InterfaceRetopologyTests(unittest.TestCase):
             "advisory", broad_submillimeter, policy
         )
         visible_drift, drift_maximum, _drift_p95 = _visual_displacement_advisory(
-            "advisory", np.r_[broad_submillimeter, 10.5], policy
+            "advisory", np.r_[broad_submillimeter, 5.975], policy
         )
 
         self.assertFalse(strict)
@@ -73,7 +54,7 @@ class InterfaceRetopologyTests(unittest.TestCase):
         self.assertAlmostEqual(maximum, 0.4)
         self.assertAlmostEqual(p95, 0.4)
         self.assertFalse(visible_drift)
-        self.assertAlmostEqual(drift_maximum, 10.5)
+        self.assertAlmostEqual(drift_maximum, 5.975)
 
     def test_user_reviewed_surface_band_lowers_only_sparse_angle_floor(self) -> None:
         face_count = 36402

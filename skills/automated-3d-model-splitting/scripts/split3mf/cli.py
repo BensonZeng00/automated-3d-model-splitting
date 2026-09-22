@@ -337,6 +337,8 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Whether a user-reviewed surface band may report source-normal "
             "changes and bounded edge stretch up to 128x as visual advisories, "
+            "replace area/vertex coverage limits with the 0.5 mm maximum and "
+            "P95 displacement envelope when both are satisfied, "
             "allow the target to use up to 60%% of the requested real surface "
             "band, and accept eligible sparse isolated inversions down to a 1 degree "
             "result angle. Degeneracy, topology, and Boolean checks remain "

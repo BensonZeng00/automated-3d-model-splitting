@@ -89,7 +89,7 @@ Prefer these explicit records when data crosses stage boundaries. Do not introdu
 - `InwardDirectionPlanner` creates locally safe, smoothed inward directions.
 - `HiddenInterfacePlanner` proposes deterministic parent-interior direction fields only when the baseline interface is thinner than the 0.45 mm load-bearing minimum. `inward.py` remains responsible for passing each candidate through the complete cap, reserve, and authoritative thickness gates before adoption.
 - `GuidedInternalCutPlanner` converts a high-confidence image-guided internal-section constraint into a symmetric child/socket `CapDecision`. It localizes entry inset to measured thin arcs, ranks bounded parent-interior direction and plane-shift candidates, locks the already-retopologized visible rim, and emits the source-id fit ring and diagnostics consumed unchanged by both sides.
-- `InterfaceRetopologyService` owns the actual shared visible seam and its topology-connected C2 surface-band deformation. It moves child and parent seam vertices to one canonical planar-arc target, preserves vertices outside the band, and blocks degenerate, topologically inconsistent, mismatched, excessively stretched, or materially clustered fold results. On a large band only, at most 0.05% nondegenerate source-normal outliers may remain advisory when each result angle is at least 3 degrees and edge-connected clusters contain at most two faces.
+- `InterfaceRetopologyService` owns the actual shared visible seam and its topology-connected C2 surface-band deformation. It moves child and parent seam vertices to one canonical planar-arc target, preserves vertices outside the band, and blocks degenerate, topologically inconsistent, mismatched, excessively stretched, or materially clustered fold results. Boundary-ear repair first performs one vectorized source/result-normal broad phase, then runs topology-aware local repair only for reversed candidates; the complete vectorized quality audit remains authoritative. On a large band only, at most 0.05% nondegenerate source-normal outliers may remain advisory when each result angle is at least 3 degrees and edge-connected clusters contain at most two faces.
 - `ConnectorSurfaceService` regularizes the hidden 45-degree annulus. Index-aligned rings use complete intermediate rings; unequal rings use conforming internal refinement followed by bounded convex-quad edge flips that break inherited radial spoke chains without moving either boundary. Both shared rim rings remain immutable after visible retopology.
 - `LocalConnectorPlanningService` owns immutable manufacturing/depth policy,
   rim and footprint safety selection, and the pure priority allocator that
@@ -295,7 +295,32 @@ loops is a performance regression even when the resulting geometry matches.
 
 `region_review.py` owns face-count and long-strip candidate selection. These measurements request semantic review only. The production pipeline does not invoke `micro_regions.py` or `micro_openings.py`: source regions and openings remain unchanged, while interface validation alone decides whether a split can proceed.
 
-Boundary cycle decomposition uses an explicit stack. Inward conormals accumulate only faces incident to the requested ring, retaining source order. `prepare_debug_directory` returns an atomically reserved new `Path`; callers must use that returned path. A collision never removes earlier artifacts. See [tolerance-and-runtime-policy.md](tolerance-and-runtime-policy.md) for ratios, reporting, and execution recovery.
+Boundary cycle decomposition uses a heap-backed Euler walk and an online
+path/position stack, so every adjacency and trail occurrence is consumed a
+bounded number of times even when thousands of simple cycles touch at one
+vertex. Inward conormal evidence is accumulated once per component and reused
+by every requested ring while retaining source order. `prepare_debug_directory`
+returns an atomically reserved new `Path`; callers must use that returned path.
+A collision never removes earlier artifacts. See
+[tolerance-and-runtime-policy.md](tolerance-and-runtime-policy.md) for ratios,
+reporting, and execution recovery.
+
+Boundary inward-direction smoothing keeps its physical-radius Gaussian window
+and all 32 inward-hemisphere projection rounds, but executes the closed-loop
+weighted sums through compiled wraparound convolution rather than allocating
+one `np.roll` array per offset. This is a performance substitution, not a
+higher-resolution geometry mode: print-scale tolerances remain authoritative,
+and no CAD-style sub-resolution refinement is introduced.
+
+Strict recursion still writes every changed node as a standalone 3MF and
+performs a real disk reload, package/material/provenance validation, and
+SHA-256 identity check before descendants consume it. The validated parsed
+object is retained by `VerifiedRecursiveArtifactCache`; later consumption uses
+that exact object after identity verification instead of parsing the same 3MF
+again. Stage-cache hits remain content-addressed and independently validated.
+Do not remove the first disk round trip to gain speed: it is the serialization
+quality gate that prevents a valid in-memory mesh from becoming an invalid
+print artifact.
 
 ## Compatibility invariants
 

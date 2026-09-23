@@ -16,6 +16,11 @@ from split3mf.micro_regions import merge_micro_regions
 from split3mf.micro_openings import seal_micro_openings
 from split3mf.recognition import summarize_components
 from split3mf.mesh import boundary_loops
+from split3mf.inward import (
+    boundary_loop_interior_conormals,
+    mesh_vertex_conormal_evidence,
+    normalized_circular_convolution,
+)
 from split3mf.package_io import prepare_debug_directory
 from split3mf.boundary_review import BoundaryReviewService
 from split3mf.cli import build_parser
@@ -78,11 +83,58 @@ class GeneralToleranceTests(unittest.TestCase):
         self.assertEqual(records, [])
 
     def test_many_touching_cycles_do_not_recurse(self):
-        faces = np.array([[0, 2*i+1, 2*i+2] for i in range(1200)])
+        faces = np.array([[0, 2*i+1, 2*i+2] for i in range(20_000)])
         loops = boundary_loops(faces)
-        self.assertEqual(len(loops), 1200)
+        self.assertEqual(len(loops), 20_000)
         self.assertTrue(all(len(loop) == 3 for loop in loops))
-        self.assertEqual(sum(len(loop) for loop in loops), 3600)
+        self.assertEqual(sum(len(loop) for loop in loops), 60_000)
+        expected_edges = {
+            tuple(sorted((int(face[index]), int(face[(index + 1) % 3]))))
+            for face in faces
+            for index in range(3)
+        }
+        actual_edges = {
+            tuple(sorted((int(loop[index]), int(loop[(index + 1) % len(loop)]))))
+            for loop in loops
+            for index in range(len(loop))
+        }
+        self.assertEqual(actual_edges, expected_edges)
+
+    def test_precomputed_conormal_evidence_matches_direct_loop_evaluation(self):
+        vertices = np.asarray(
+            [[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0], [.5, .5, 1.]],
+            dtype=np.float64,
+        )
+        faces = np.asarray(
+            [[0, 1, 4], [1, 2, 4], [2, 3, 4], [3, 0, 4]],
+            dtype=np.int64,
+        )
+        loop = [0, 1, 2, 3]
+        direct = boundary_loop_interior_conormals(vertices, faces, loop)
+        prepared = boundary_loop_interior_conormals(
+            vertices,
+            faces,
+            loop,
+            vertex_evidence=mesh_vertex_conormal_evidence(vertices, faces),
+        )
+        np.testing.assert_allclose(prepared, direct, atol=1e-12)
+
+    def test_compiled_circular_convolution_matches_roll_definition(self):
+        angles = np.linspace(0.0, 2.0 * np.pi, 257, endpoint=False)
+        values = np.column_stack(
+            (np.cos(angles), np.sin(angles), 0.2 * np.sin(7.0 * angles))
+        )
+        offsets = np.arange(-31, 32, dtype=np.int64)
+        weights = np.exp(-0.5 * (offsets / 12.0) ** 2)
+        weights /= weights.sum()
+        expected = np.zeros_like(values)
+        for offset, weight in zip(offsets, weights):
+            expected += np.roll(values, int(offset), axis=0) * float(weight)
+        expected /= np.linalg.norm(expected, axis=1)[:, None]
+
+        actual = normalized_circular_convolution(values, weights)
+
+        np.testing.assert_allclose(actual, expected, atol=1e-12)
 
     def test_debug_directories_are_atomic_and_never_erase_previous_run(self):
         with tempfile.TemporaryDirectory() as directory:

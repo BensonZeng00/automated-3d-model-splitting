@@ -887,6 +887,9 @@ class VerifiedRecursiveArtifactCache:
             self.metrics["verified_recursive_parse_hits"] = int(
                 self.metrics.get("verified_recursive_parse_hits", 0)
             ) + 1
+            self.metrics["verified_recursive_parse_bytes_avoided"] = int(
+                self.metrics.get("verified_recursive_parse_bytes_avoided", 0)
+            ) + int(path.stat().st_size)
             return validate_loaded_recursive_part(
                 [self._loaded[key]], expected_entry, path
             )

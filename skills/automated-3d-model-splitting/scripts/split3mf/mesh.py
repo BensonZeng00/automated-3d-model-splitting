@@ -508,27 +508,45 @@ def boundary_cycles_from_edges(edges: np.ndarray) -> list[list[int]]:
         adjacency[a].add(b)
         adjacency[b].add(a)
         unused_edges.add((a, b))
+    # A min-heap retains the previous smallest-neighbor traversal without
+    # rescanning a high-degree vertex's complete adjacency set every time the
+    # Euler walk returns to it.  Each directed adjacency entry is discarded at
+    # most once, including the stale copy left after its undirected edge was
+    # consumed from the opposite endpoint.
+    neighbor_heaps = {
+        int(vertex): list(neighbors) for vertex, neighbors in adjacency.items()
+    }
+    for neighbors in neighbor_heaps.values():
+        heapq.heapify(neighbors)
 
     loops: list[list[int]] = []
 
     def split_simple_cycles(closed_trail: list[int]) -> None:
-        pending = [closed_trail]
-        while pending:
-            trail = pending.pop()
-            if len(trail) < 4 or trail[0] != trail[-1]:
+        """Split one Euler trail without repeatedly copying its remainder.
+
+        Removing one repeated-vertex cycle at a time with list slices is
+        quadratic for painted regions containing thousands of boundary loops
+        joined at shared vertices.  Maintain the current simple path and emit
+        a cycle as soon as its closing vertex is observed.  Every trail
+        occurrence is appended and removed at most once.
+        """
+        if len(closed_trail) < 4 or closed_trail[0] != closed_trail[-1]:
+            return
+        path: list[int] = []
+        positions: dict[int, int] = {}
+        for raw_vertex in closed_trail:
+            vertex = int(raw_vertex)
+            start_position = positions.get(vertex)
+            if start_position is None:
+                positions[vertex] = len(path)
+                path.append(vertex)
                 continue
-            seen: dict[int, int] = {}
-            for position, vertex in enumerate(trail[:-1]):
-                if vertex not in seen:
-                    seen[vertex] = position
-                    continue
-                start_position = seen[vertex]
-                # Stack order preserves the previous depth-first traversal.
-                pending.append(trail[:start_position + 1] + trail[position + 1:])
-                pending.append(trail[start_position:position + 1])
-                break
-            else:
-                loops.append(trail[:-1])
+            cycle = path[start_position:]
+            if len(cycle) >= 3:
+                loops.append(cycle)
+            for removed in path[start_position + 1:]:
+                positions.pop(int(removed), None)
+            path = path[:start_position + 1]
 
     while unused_edges:
         start_edge = min(unused_edges)
@@ -537,13 +555,14 @@ def boundary_cycles_from_edges(edges: np.ndarray) -> list[list[int]]:
         circuit: list[int] = []
         while stack:
             current = int(stack[-1])
-            candidates = sorted(
-                neighbor
-                for neighbor in adjacency.get(current, set())
-                if tuple(sorted((current, int(neighbor)))) in unused_edges
-            )
-            if candidates:
+            candidates = neighbor_heaps.get(current, [])
+            while candidates:
                 next_vertex = int(candidates[0])
+                if tuple(sorted((current, next_vertex))) in unused_edges:
+                    break
+                heapq.heappop(candidates)
+            if candidates:
+                next_vertex = int(heapq.heappop(candidates))
                 unused_edges.remove(tuple(sorted((current, next_vertex))))
                 stack.append(next_vertex)
             else:

@@ -126,14 +126,31 @@ Services should be stateless where practical. Inject or replace collaborators th
 
 ## Performance invariants
 
+- Vendor paint-selector expansion is required to recover the actual material
+  boundary: one source triangle may contain multiple painted leaf regions, so
+  skipping conformance would change part ownership.  The expanded mesh is an
+  immutable recognition/source representation, not a license to run unrelated
+  global repair.  Later work must remain interface-local and use acceleration
+  structures rather than repeatedly scanning every expanded face.
+- Physical search convergence uses the active print tolerance and a bounded
+  iteration guard; it must not chase sub-micron numerical differences that
+  cannot change millimetre-scale FDM output.  Accepted geometry still receives
+  the complete topology and safety audit.
+- Small-impact completion applies only to generated/interface-local geometry.
+  Source faces and material regions remain preserved regardless of whether
+  their affected ratio is below one percent; they may be diagnosed or bypassed
+  when irrelevant to an interface, never silently deleted.
+
 - `boundary_correspondence.py` proves a bounded sampled source-loop match
   before the cap remapper increases its geometric projection allowance.
   Exact-ID handling and visible source coordinates remain unchanged.
 - `subdivision_proof.py` verifies complete edge-fan coverage using actual
   replacement geometry; aggregate area alone is not a coverage proof.
 - `cap_backoff.py` computes a proposed translation from one measured depth
-  constraint. `cap_template.py` owns the required fresh thickness query and
-  may publish only a result passing that query.
+  constraint. `cap_template.py` reuses a direction-independent conservative
+  broad-phase candidate superset across retries, but every retry reruns the
+  directional capsule filter, exact ray intersections, and complete thickness
+  safety policy. It may publish only a result passing that fresh measurement.
 
 - `region_review.py` partitions physical long-strip candidates and ordinary
   face-count candidates consistently for recognition, image review, and

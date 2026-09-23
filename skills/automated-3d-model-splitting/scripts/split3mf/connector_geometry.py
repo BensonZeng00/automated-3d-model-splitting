@@ -648,7 +648,16 @@ def printable_backing_rings(
         low = 0.0
         high = float(taper_depth)
         best_lead: np.ndarray | None = None
-        for _ in range(24):
+        # Stop at the active physical surface tolerance.  Chasing binary-search
+        # differences far below FDM and exported-coordinate resolution only
+        # repeats the complete polygon offset without changing printable output.
+        from .print_tolerance import current as current_print_tolerance
+        depth_tolerance = max(
+            0.01,
+            min(0.05, float(current_print_tolerance().surface_distance_mm)),
+        )
+        iteration_count = 0
+        while high - low > depth_tolerance and iteration_count < 16:
             middle = (low + high) * 0.5
             candidate = topology_safe_planar_inset_ring(
                 boundary,
@@ -660,6 +669,9 @@ def printable_backing_rings(
             else:
                 low = middle
                 best_lead = candidate
+            iteration_count += 1
+        plan["backing_inset_search_iterations"] = int(iteration_count)
+        plan["backing_inset_search_tolerance_mm"] = float(depth_tolerance)
         if best_lead is None or low < 0.05:
             if _user_reviewed_shallow_minimal_closure_is_eligible(
                 plan,

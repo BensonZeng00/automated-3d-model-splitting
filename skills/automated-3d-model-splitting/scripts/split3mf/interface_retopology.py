@@ -137,6 +137,35 @@ def _replace_faces_in_edge_map(
             owners.sort()
 
 
+def _reliable_source_normal_reversal_mask(
+    source_normals: np.ndarray,
+    result_normals: np.ndarray,
+    source_lengths: np.ndarray,
+    result_lengths: np.ndarray,
+    source_shape_quality: np.ndarray,
+) -> np.ndarray:
+    """Select stable source faces whose result normal reverses direction."""
+
+    source_magnitudes = np.asarray(source_lengths, dtype=np.float64)
+    result_magnitudes = np.asarray(result_lengths, dtype=np.float64)
+    denominators = source_magnitudes * result_magnitudes
+    # Keep the individual limits used by the local inversion audit.  Testing
+    # only their product would admit one numerically unstable normal when the
+    # other triangle happens to be very large.
+    comparable = (source_magnitudes > 1e-15) & (result_magnitudes > 1e-12)
+    cosines = np.ones(len(denominators), dtype=np.float64)
+    cosines[comparable] = np.einsum(
+        "ij,ij->i",
+        np.asarray(source_normals, dtype=np.float64)[comparable],
+        np.asarray(result_normals, dtype=np.float64)[comparable],
+    ) / denominators[comparable]
+    return (
+        comparable
+        & (np.asarray(source_shape_quality) >= _SOURCE_NORMAL_MIN_SHAPE_QUALITY)
+        & (cosines < -1e-8)
+    )
+
+
 def _locally_inverted_face_mask(
     source_points: np.ndarray,
     result_points: np.ndarray,
@@ -164,14 +193,6 @@ def _locally_inverted_face_mask(
     source_lengths = np.linalg.norm(source_normals, axis=1)
     result_lengths = np.linalg.norm(result_normals, axis=1)
     source_quality = _triangle_shape_quality(source_triangles)
-    comparable = (source_lengths > 1e-15) & (result_lengths > 1e-12)
-    source_result_cosine = np.ones(len(mesh_faces), dtype=np.float64)
-    source_result_cosine[comparable] = np.einsum(
-        "ij,ij->i",
-        source_normals[comparable],
-        result_normals[comparable],
-    ) / (source_lengths[comparable] * result_lengths[comparable])
-
     edge_faces: dict[tuple[int, int], list[int]] = {}
     for face_id, face in enumerate(mesh_faces):
         for left, right in (
@@ -184,9 +205,12 @@ def _locally_inverted_face_mask(
             ).append(int(face_id))
 
     inverted = np.zeros(len(mesh_faces), dtype=bool)
-    reliable_sign_change = (
-        (source_result_cosine < -1e-8)
-        & (source_quality >= _SOURCE_NORMAL_MIN_SHAPE_QUALITY)
+    reliable_sign_change = _reliable_source_normal_reversal_mask(
+        source_normals,
+        result_normals,
+        source_lengths,
+        result_lengths,
+        source_quality,
     )
     for face_id in np.flatnonzero(reliable_sign_change):
         face = mesh_faces[int(face_id)]
@@ -622,9 +646,23 @@ def _repair_flipped_boundary_ears(
         if candidate_face_mask is None
         else np.flatnonzero(np.asarray(candidate_face_mask, dtype=bool))
     )
+    # The source/result normal comparison is the broad phase of
+    # ``face_is_suspect`` and is entirely vectorizable.  Perform it once before
+    # entering the Python topology checks.  A normal surface band commonly has
+    # tens of thousands of candidate faces but no reversed faces; walking the
+    # edge map and allocating a neighbor set for every one of them made this
+    # nominal no-op stage dominate complete real-model runs.
+    broad_suspect_mask = _reliable_source_normal_reversal_mask(
+        source_normals,
+        result_normals,
+        source_lengths,
+        result_lengths,
+        source_shape_quality,
+    )
+    broad_suspect_faces = candidate_faces[broad_suspect_mask[candidate_faces]]
     suspects = {
         int(face_id)
-        for face_id in candidate_faces
+        for face_id in broad_suspect_faces
         if face_is_suspect(int(face_id))
     }
     seen_replacements: set[

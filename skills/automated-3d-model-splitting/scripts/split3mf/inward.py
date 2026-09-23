@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from scipy.ndimage import convolve1d
+
 from .cap_template import (
     fit_affine_cap_inside_parent,
     progressive_boundary_deformation,
@@ -306,26 +308,13 @@ def mesh_vertex_inward_normals(local_vertices: np.ndarray, local_faces: np.ndarr
     return -accumulated
 
 
-def boundary_loop_interior_conormals(
+def mesh_vertex_conormal_evidence(
     local_vertices: np.ndarray,
     local_faces: np.ndarray,
-    loop: list[int],
-    reference_axis: np.ndarray | None = None,
-) -> np.ndarray:
-    """Return surface-tangent directions from a cut boundary into its owner.
-
-    The direction is inferred from the actual incident triangles, so concave
-    loops and hole boundaries do not depend on a loop centroid or projected
-    polygon winding.
-    """
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Accumulate face-normal and interior votes once for every mesh vertex."""
     vertices = np.asarray(local_vertices, dtype=np.float64)
     faces = np.asarray(local_faces, dtype=np.int64)
-    loop_ids = np.asarray(loop, dtype=np.int64)
-    if not len(loop_ids):
-        return np.empty((0, 3), dtype=np.float64)
-    incident = np.zeros(len(vertices), dtype=bool)
-    incident[loop_ids] = True
-    faces = faces[np.any(incident[faces], axis=1)]
     triangles = vertices[faces]
     face_cross = np.cross(
         triangles[:, 1] - triangles[:, 0],
@@ -345,6 +334,36 @@ def boundary_loop_interior_conormals(
             (face_centroids - vertices[vertex_ids]) * face_weights[:, None],
         )
         np.add.at(accumulated_weight, vertex_ids, face_weights)
+    return accumulated_normal, accumulated_interior, accumulated_weight
+
+
+def boundary_loop_interior_conormals(
+    local_vertices: np.ndarray,
+    local_faces: np.ndarray,
+    loop: list[int],
+    reference_axis: np.ndarray | None = None,
+    vertex_evidence: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None,
+) -> np.ndarray:
+    """Return surface-tangent directions from a cut boundary into its owner.
+
+    The direction is inferred from the actual incident triangles, so concave
+    loops and hole boundaries do not depend on a loop centroid or projected
+    polygon winding.
+    """
+    vertices = np.asarray(local_vertices, dtype=np.float64)
+    faces = np.asarray(local_faces, dtype=np.int64)
+    loop_ids = np.asarray(loop, dtype=np.int64)
+    if not len(loop_ids):
+        return np.empty((0, 3), dtype=np.float64)
+    if vertex_evidence is None:
+        vertex_evidence = mesh_vertex_conormal_evidence(vertices, faces)
+    accumulated_normal, accumulated_interior, accumulated_weight = vertex_evidence
+    if (
+        accumulated_normal.shape != vertices.shape
+        or accumulated_interior.shape != vertices.shape
+        or accumulated_weight.shape != (len(vertices),)
+    ):
+        raise ValueError("vertex conormal evidence does not match local mesh")
 
     points = vertices[loop_ids]
     normals = accumulated_normal[loop_ids]
@@ -757,6 +776,27 @@ def smooth_tapered_sweep_profile(
     }
 
 
+def normalized_circular_convolution(
+    values: np.ndarray,
+    weights: np.ndarray,
+) -> np.ndarray:
+    """Apply a normalized wraparound convolution without Python roll loops.
+
+    The operation is the same closed-loop weighted sum used by the connector
+    direction solver.  ``scipy.ndimage`` performs the physical-radius window
+    in compiled code and avoids allocating one full rolled array per offset.
+    """
+    vectors = np.asarray(values, dtype=np.float64)
+    kernel = np.asarray(weights, dtype=np.float64)
+    if vectors.ndim != 2 or vectors.shape[1] != 3:
+        raise ValueError("circular convolution values must be Nx3 vectors")
+    if kernel.ndim != 1 or not len(kernel) or not np.all(np.isfinite(kernel)):
+        raise ValueError("circular convolution weights must be one finite vector")
+    result = convolve1d(vectors, kernel, axis=0, mode="wrap")
+    result /= np.maximum(np.linalg.norm(result, axis=1)[:, None], 1e-12)
+    return result
+
+
 def safe_boundary_inward_directions(
     vertex_inward_normals: np.ndarray,
     loop: list[int],
@@ -815,11 +855,7 @@ def safe_boundary_inward_directions(
             weights /= weights.sum()
 
             def circular_smooth(values: np.ndarray) -> np.ndarray:
-                result = np.zeros_like(values, dtype=np.float64)
-                for offset, weight in zip(offsets, weights):
-                    result += np.roll(values, int(offset), axis=0) * float(weight)
-                result /= np.maximum(np.linalg.norm(result, axis=1)[:, None], 1e-12)
-                return result
+                return normalized_circular_convolution(values, weights)
 
             smooth_local = circular_smooth(local)
         else:
@@ -842,13 +878,12 @@ def safe_boundary_inward_directions(
     # the abrupt per-vertex normal changes which twist the bottom ring into
     # radial folds while retaining a strictly inward first-order direction.
     minimum_safe_dot = 0.02
+    relaxation_kernel = np.asarray([0.25, 0.50, 0.25], dtype=np.float64)
     for _ in range(max(int(smoothing_iterations), 0)):
-        directions = (
-            np.roll(directions, 1, axis=0) * 0.25
-            + directions * 0.50
-            + np.roll(directions, -1, axis=0) * 0.25
+        directions = normalized_circular_convolution(
+            directions,
+            relaxation_kernel,
         )
-        directions /= np.maximum(np.linalg.norm(directions, axis=1)[:, None], 1e-12)
         current_dot = np.einsum("ij,ij->i", smooth_local, directions)
         unsafe = current_dot < minimum_safe_dot
         if np.any(unsafe):
@@ -1197,11 +1232,18 @@ def build_component_cut_references(
             inward = -average_outward_normal(local_vertices, local_faces, component_center, model_center)
         inward = inward / max(float(np.linalg.norm(inward)), 1e-12)
         vertex_inward_normals = mesh_vertex_inward_normals(local_vertices, local_faces)
+        vertex_conormal_evidence = mesh_vertex_conormal_evidence(
+            local_vertices, local_faces
+        )
         color_info = COLOR_INFO.get(component.color_code, {"name": component.color_code})
         for loop_index, loop in enumerate(loops):
             loop_global = [int(global_vertex_ids[i]) for i in loop]
             loop_conormals = boundary_loop_interior_conormals(
-                local_vertices, local_faces, loop, reference_axis=inward
+                local_vertices,
+                local_faces,
+                loop,
+                reference_axis=inward,
+                vertex_evidence=vertex_conormal_evidence,
             )
             loop_directions, direction_record = safe_boundary_inward_directions(
                 vertex_inward_normals,

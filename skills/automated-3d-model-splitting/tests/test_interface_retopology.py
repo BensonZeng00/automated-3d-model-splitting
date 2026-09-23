@@ -26,6 +26,7 @@ from split3mf.interface_retopology import (
     InterfaceRetopologyService,
     _directed_edge_topology_issues,
     _repair_flipped_boundary_ears,
+    _reliable_source_normal_reversal_mask,
     _locally_inverted_face_mask,
     _surface_band_deformation,
     _select_visible_boundary_target,
@@ -34,10 +35,22 @@ from split3mf.interface_retopology import (
     _untangle_interior_surface_vertices,
     _visual_displacement_advisory,
 )
+from split3mf.surface_quality import face_edge_keys as _face_edge_keys
 from split3mf.surface_quality import sparse_local_inversion_audit
 
 
 class InterfaceRetopologyTests(unittest.TestCase):
+    def test_reversal_broad_phase_rejects_unstable_source_normal(self) -> None:
+        mask = _reliable_source_normal_reversal_mask(
+            source_normals=np.asarray([[0.0, 0.0, 1e-16], [0.0, 0.0, 1.0]]),
+            result_normals=np.asarray([[0.0, 0.0, -1e16], [0.0, 0.0, -1.0]]),
+            source_lengths=np.asarray([1e-16, 1.0]),
+            result_lengths=np.asarray([1e16, 1.0]),
+            source_shape_quality=np.asarray([1.0, 1.0]),
+        )
+
+        np.testing.assert_array_equal(mask, np.asarray([False, True]))
+
     def test_advisory_preserves_source_when_planar_fit_crosses(self) -> None:
         points = np.asarray([[0., 0., 0.], [1., 1., .2],
                              [0., 1., 0.], [1., 0., .2]])
@@ -332,6 +345,44 @@ class InterfaceRetopologyTests(unittest.TestCase):
             result_triangles[:, 2] - result_triangles[:, 0],
         )
         self.assertTrue(np.all(np.einsum("ij,ij->i", source_normals, result_normals) > 0.0))
+
+    def test_unchanged_large_band_skips_per_face_topology_narrow_phase(self) -> None:
+        strip_count = 10_000
+        x = np.arange(strip_count + 1, dtype=np.float64)
+        source = np.column_stack(
+            (
+                np.repeat(x, 2),
+                np.tile(np.asarray([0.0, 1.0]), strip_count + 1),
+                np.zeros(2 * (strip_count + 1), dtype=np.float64),
+            )
+        )
+        faces = np.asarray(
+            [
+                face
+                for strip_index in range(strip_count)
+                for face in (
+                    (2 * strip_index, 2 * strip_index + 2, 2 * strip_index + 1),
+                    (2 * strip_index + 1, 2 * strip_index + 2, 2 * strip_index + 3),
+                )
+            ],
+            dtype=np.int64,
+        )
+
+        with patch(
+            "split3mf.interface_retopology._face_edge_keys",
+            wraps=_face_edge_keys,
+        ) as topology_narrow_phase:
+            repaired, repair_count = _repair_flipped_boundary_ears(
+                source,
+                source.copy(),
+                faces,
+                np.arange(len(source), dtype=np.int64),
+                candidate_face_mask=np.ones(len(faces), dtype=bool),
+            )
+
+        self.assertEqual(repair_count, 0)
+        np.testing.assert_array_equal(repaired, faces)
+        topology_narrow_phase.assert_not_called()
 
     def test_dense_independent_boundary_ears_converge_past_legacy_cap(self) -> None:
         source_patches = []

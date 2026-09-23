@@ -1160,6 +1160,7 @@ class SplitPipeline:
             "stage_cache_commits": 0,
             "verified_recursive_parse_hits": 0,
             "verified_recursive_parse_misses": 0,
+            "verified_recursive_parse_bytes_avoided": 0,
         }
         report["optimization"] = optimization_metrics
         report["boundary_clarity"] = boundary_review.records

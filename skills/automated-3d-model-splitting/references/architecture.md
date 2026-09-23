@@ -400,8 +400,12 @@ review and surface remeshing; it is never forced onto the original vertex list.
 actual before/after curves plus numerical NPZ/JSON through `curve_preview.py` and
 raises `BoundaryReviewRequired` (CLI exit 4). Existing ownership approvals do not
 approve a new geometric contour. Explicit immutable-seam mode still preserves
-the user-selected original seam and bypasses spline construction. This release
-does not implement applying a topology-changing contour to a surface mesh.
+the user-selected original seam and bypasses spline construction. A separately
+user-confirmed `apply_clear_curve` decision must match both the source/target
+fingerprint and candidate fingerprint. The approved contour is resampled without
+treating proposal rows as source IDs, then passed through the existing surface-band
+remesher and all authoritative face, topology, connector, Boolean, and output audits.
+Approval therefore permits an attempted remesh; it never approves the final 3MF.
 
 Regression: `python -m unittest discover -s tests -p test_curve_clarity.py`.
 Replay: `python tools/review_curve_clarity.py CAPTURE.npz OUTPUT_DIRECTORY`.

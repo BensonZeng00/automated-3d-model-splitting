@@ -1655,7 +1655,23 @@ class InterfaceRetopologyService:
                 )
                 return loop_points.copy(), proposal_record
             if context.curve_review_sink is not None:
-                context.curve_review_sink(exc)
+                approved = context.curve_review_sink(exc)
+                if approved is not None:
+                    from .curve_clarity import resample_approved_curve
+                    approved_target = resample_approved_curve(approved, exc.target)
+                    record = dict(approved.record)
+                    displacement = np.linalg.norm(approved_target - loop_points, axis=1)
+                    record.update(
+                        status="user_confirmed_clear_curve",
+                        approval_fingerprint_applied=True,
+                        remesh_strategy="existing-ring-surface-band",
+                        source_vertices=int(len(loop_points)),
+                        target_samples=int(len(approved_target)),
+                        maximum_target_offset_mm=float(displacement.max(initial=0.0)),
+                        p95_target_offset_mm=float(np.percentile(displacement, 95)),
+                        rms_target_offset_mm=float(np.sqrt(np.mean(displacement ** 2))),
+                    )
+                    return approved_target, record
             raise
         record = dict(target.record)
         record.update(

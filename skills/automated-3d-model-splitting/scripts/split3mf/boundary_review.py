@@ -147,6 +147,45 @@ class BoundaryReviewService:
                         '局部异常达到 1%，外形、颜色、部件身份和连通性保持，按完成优先原则归并后继续',
                         context=context, **chosen['area_policy'])
             return chosen['owners'], report
+        # Dense triangle-selector paint can contain thousands of legitimate
+        # pairwise endpoints where a third paint region owns the continuation.
+        # Requiring one pair at a time to become a closed loop makes every
+        # bounded proposal formally inadmissible, even though the proposal is
+        # microscopic relative to every affected material.  Prefer the least
+        # ambiguous bounded proposal in that specific, scale-free case and let
+        # the later component, interface, topology and visual audits decide.
+        fragmented = [c for c in candidates
+                      if c['area_policy']['identities_preserved']
+                      and c['area_policy']['regions']
+                      and max(r['affected_area_ratio']
+                              for r in c['area_policy']['regions']) <= 0.001]
+        if (self.decisions is None and context == 'input' and len(faces) >= 100_000
+                and len(assessment.uncertain_faces) / len(faces) >= 0.02
+                and fragmented):
+            def ambiguity(candidate):
+                record = candidate['assessment'].as_record()
+                return (sum(item['branching_vertices'] + item['unexplained_endpoints']
+                            for item in record['reasons']),
+                        sum(item['affected_area_mm2']
+                            for item in candidate['area_policy']['regions']))
+            chosen = min(fragmented, key=ambiguity)
+            budget.evaluate(labels, chosen['owners'], commit=True)
+            report.update(status='fragmented_paint_completion',
+                          area_policy=chosen['area_policy'],
+                          residual_assessment=chosen['assessment'].as_record(),
+                          changed_face_ids=chosen['changed_faces'].tolist(),
+                          requires_semantic_confirmation=False,
+                          geometry_change=False, material_change=False,
+                          boundary_shape='smooth',
+                          completion_assessment=dict(
+                              reason='dense_triangle_selector_pairwise_endpoints',
+                              maximum_affected_region_ratio=0.001,
+                              all_material_identities_preserved=True,
+                              downstream_geometry_audits_required=True))
+            runtime_log('分界', 'fragmented_paint_completion',
+                        '密集三角涂色的成对端点按最小相对影响候选继续，后续几何审核保持阻断',
+                        context=context, **chosen['area_policy'])
+            return chosen['owners'], report
         report.update(fingerprint=fingerprint, search_attempt_limit=3,
             check_and_search_seconds=round(time.perf_counter()-started, 4),
             acceptance_scope='local seam topology only; not semantic correctness or print/assembly validation',

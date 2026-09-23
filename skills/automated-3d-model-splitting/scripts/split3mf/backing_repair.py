@@ -9,7 +9,6 @@ from .print_tolerance import current
 from .reporting import runtime_log
 
 
-RECOVERY_TAPER_SLOPE = float(np.tan(np.deg2rad(60.)))
 PRINTABLE_THIN_BACKING_ADVISORY_AREA_MM2 = 2.0
 
 
@@ -73,7 +72,7 @@ def ensure_backing(patch, mesh, parent, source_codes, inward, *, part_id):
         if not policy.repair_thin_backing:
             raise ValueError('Actual backing is too thin; explicit --repair-thin-backing required')
         candidate, geometry = build(patch, parent, inward, direction_mode='local-normal',
-                                    taper_slope=RECOVERY_TAPER_SLOPE)
+                                    taper_slope=None)
         owners = geometry.pop('back_face_source_indices')
         record['construction'] = geometry
         np.testing.assert_array_equal(candidate.triangles[:len(patch.faces)], patch.triangles)

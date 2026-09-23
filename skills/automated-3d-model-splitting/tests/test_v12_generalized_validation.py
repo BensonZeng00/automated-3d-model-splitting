@@ -666,16 +666,19 @@ class GeneralizedV12Tests(unittest.TestCase):
 
             def first_hit_distances(self, points, directions, search_limit_mm):
                 self.last_hit_had_preceding_entry = np.asarray(
-                    [True, True, False],
+                    [True, True, True, False],
                     dtype=bool,
                 )
                 self.last_selected_entry_distances = np.asarray(
-                    [2.10, 3.70, np.inf],
+                    [2.10, 3.70, 0.02, np.inf],
                     dtype=np.float64,
                 )
-                return np.asarray([0.01, 0.02, 4.0], dtype=np.float64)
+                # Both a hair-thin and a substantial remote shell are limited
+                # by their entry.  A near entry remains ordinary local wall
+                # thickness and a ray without an entry remains unchanged.
+                return np.asarray([0.01, 0.22, 3.0, 4.0], dtype=np.float64)
 
-        points = np.zeros((3, 3), dtype=np.float64)
+        points = np.zeros((4, 3), dtype=np.float64)
         directions = np.tile(
             np.asarray([0.0, 0.0, 1.0]),
             (len(points), 1),

@@ -687,10 +687,12 @@ def _repair_flipped_boundary_ears(
             if face_is_suspect(int(face_id))
         )
 
-    # Every accepted replacement updates only a local topology patch.  The
-    # larger bound lets dense vendor rims converge without restoring the old
-    # all-mesh scan; repeated local topologies are skipped deterministically.
-    repair_budget = min(4096, max(256, 2 * int(len(boundary_ids))))
+    # Every accepted replacement updates only a local topology patch.  Bound
+    # work by the actual suspect count rather than the entire boundary: dense
+    # vendor-painted rims can have thousands of vertices but only a localized
+    # folded patch.  Remaining defects are still rejected by the quality audit
+    # below instead of spending minutes exploring thousands of local remeshes.
+    repair_budget = min(512, max(64, 2 * int(len(suspects))))
     for _ in range(repair_budget):
         if not suspects:
             break
@@ -1107,13 +1109,25 @@ def _surface_band_deformation(
         candidate_faces=int(np.count_nonzero(boundary_repair_candidate_mask)),
         boundary_vertices=int(len(boundary)),
     )
-    faces, boundary_ear_repairs = _repair_flipped_boundary_ears(
-        points,
-        result,
-        faces,
-        boundary,
-        candidate_face_mask=boundary_repair_candidate_mask,
-    )
+    if np.count_nonzero(boundary_repair_candidate_mask) > 50_000:
+        # Local ear search is combinatorial on highly fragmented paint bands.
+        # Do not mutate a huge source band speculatively; the vectorized
+        # inversion/degeneracy audit immediately below remains blocking.
+        boundary_ear_repairs = 0
+        runtime_log(
+            "几何性能", "surface_band_boundary_repair_bounded",
+            "候选表面带过大，跳过组合式耳片搜索并交由向量化质量审核",
+            candidate_faces=int(np.count_nonzero(boundary_repair_candidate_mask)),
+            threshold_faces=50_000,
+        )
+    else:
+        faces, boundary_ear_repairs = _repair_flipped_boundary_ears(
+            points,
+            result,
+            faces,
+            boundary,
+            candidate_face_mask=boundary_repair_candidate_mask,
+        )
     boundary_repair_seconds = float(
         time.perf_counter() - boundary_repair_started_at
     )
@@ -1143,7 +1157,11 @@ def _surface_band_deformation(
         )
     )
     untangle_started_at = time.perf_counter()
-    if locked_boundary_degenerate_face_count:
+    if np.count_nonzero(boundary_repair_candidate_mask) > 50_000:
+        interior_untangle_repairs = 0
+        maximum_interior_correction = 0.0
+        untangle_skipped_reason = "large_band_vectorized_audit"
+    elif locked_boundary_degenerate_face_count:
         interior_untangle_repairs = 0
         maximum_interior_correction = 0.0
         untangle_skipped_reason = "locked_boundary_degenerate_faces"
@@ -1569,6 +1587,35 @@ class InterfaceRetopologyService:
                 maximum_p95_target_offset_mm=policy.p95_displacement_mm,
             )
         except CurveClarityRequired as exc:
+            if context.config.surface_band_validation == "advisory":
+                # A projected crossing does not prove that the original 3-D
+                # source seam self-intersects.  Dense painted models often
+                # contain folded/steep seams whose planar fit creates the
+                # crossing.  In reviewed advisory mode the safest completion
+                # is therefore no geometric edit at all: keep the exact source
+                # ring and let cap, topology, Boolean and visual audits remain
+                # authoritative.
+                proposal_record = dict(exc.proposal.record)
+                proposal_record.update(
+                    status="source_curve_preserved",
+                    source_vertices=int(len(loop_points)),
+                    target_samples=int(len(loop_points)),
+                    maximum_target_offset_mm=0.0,
+                    p95_target_offset_mm=0.0,
+                    rms_target_offset_mm=0.0,
+                    ambiguous_planar_fit_skipped=True,
+                    topology_change=False,
+                    requires_user_confirmation=False,
+                )
+                runtime_log(
+                    "planar-arc-retopology",
+                    "ambiguous_fit_source_curve_preserved",
+                    "投影拟合产生交叉；advisory 模式保留原始三维边界并继续严格几何审核",
+                    source_vertices=len(loop_points),
+                    projected_crossings=proposal_record.get(
+                        "projected_crossings_before", 0),
+                )
+                return loop_points.copy(), proposal_record
             if context.curve_review_sink is not None:
                 context.curve_review_sink(exc)
             raise

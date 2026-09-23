@@ -7,7 +7,12 @@ import numpy as np
 import trimesh
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'scripts'))
-from split3mf.curved_backing import build, first_exit
+from split3mf.curved_backing import (
+    _resolve_parent_directions,
+    adaptive_taper_slope,
+    build,
+    first_exit,
+)
 from split3mf.backing_thickness import audit_local_backing
 from split3mf.backing_repair import ensure_backing, BackingRepairError
 from split3mf.local_ray_probe import LocalRayProbe
@@ -37,6 +42,23 @@ class BackingRepairTests(unittest.TestCase):
         self.assertGreater(record['thin_interior_area_mm2'],1)
         self.assertGreater(record['thin_exits_on_backing'],0)
         self.assertFalse(record['global_minimum_wall_thickness_measured'])
+
+    def test_taper_angle_is_statistical_and_bounded_not_fixed_at_45(self):
+        narrow_slope, narrow_angle, _ = adaptive_taper_slope([.1, .2, .3, .4], 3.)
+        wide_slope, wide_angle, _ = adaptive_taper_slope([3., 4., 5., 6.], 3.)
+        self.assertGreater(narrow_angle, 45.)
+        self.assertLess(wide_angle, 45.)
+        self.assertLessEqual(narrow_angle, 75.)
+        self.assertGreaterEqual(wide_angle, 30.)
+        self.assertGreater(narrow_slope, wide_slope)
+
+    def test_missing_local_normal_exit_falls_back_to_inward_axis(self):
+        points = np.asarray([[0., 0., 5.]])
+        directions, exits, recovered = _resolve_parent_directions(
+            self.parent, points, [[0., 0., 1.]], [0., 0., -1.], 20.)
+        self.assertTrue(recovered[0])
+        self.assertGreater(exits[0], .05)
+        self.assertLess(directions[0, 2], 0.)
 
     def test_repair_preserves_front_and_per_face_material_provenance(self):
         colors=['A' if i%2 else 'B' for i in range(len(self.patch.faces))]

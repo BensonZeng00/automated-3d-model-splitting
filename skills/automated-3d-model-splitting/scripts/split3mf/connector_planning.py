@@ -332,12 +332,28 @@ def local_connector_safe_depth_at_footprint(
     selected = min(float(policy.maximum_total_depth_mm), float(footprint_safe))
     lateral_backing_limit = max(float(plan.get("edge_clearance_mm", 0.0)), 0.0)
     backing_safety_limit = min(selected, lateral_backing_limit)
+    nominal_backing_depth = float(policy.printable_backing_depth_mm)
+    limiting_tolerance = 1e-9
+    if backing_safety_limit >= nominal_backing_depth - limiting_tolerance:
+        backing_limiting_constraint = "nominal_printable_depth"
+    elif selected <= lateral_backing_limit + limiting_tolerance:
+        backing_limiting_constraint = "axial_parent_thickness"
+    else:
+        backing_limiting_constraint = "lateral_interface_clearance"
     return {
         **boundary_safety,
         "local_connector_safety_budget_mm": selected,
         "local_connector_backing_safety_limit_mm": backing_safety_limit,
         "local_connector_axial_safety_limit_mm": selected,
         "local_connector_lateral_backing_limit_mm": lateral_backing_limit,
+        "local_connector_nominal_backing_depth_mm": nominal_backing_depth,
+        "local_connector_backing_limiting_constraint": backing_limiting_constraint,
+        "local_connector_parent_is_axially_thick_enough_for_nominal_backing": bool(
+            selected >= nominal_backing_depth - limiting_tolerance
+        ),
+        "local_connector_interface_is_wide_enough_for_nominal_45_degree_backing": bool(
+            lateral_backing_limit >= nominal_backing_depth - limiting_tolerance
+        ),
         "local_connector_backing_safety_policy": (
             "min(interior_axial_opposing_shell, projected_interior_clearance)"
         ),

@@ -3,6 +3,56 @@ import numpy as np
 import trimesh
 from .rim_chord_repair import _split_face
 
+
+MINIMUM_TAPER_DEGREES = 30.0
+MAXIMUM_TAPER_DEGREES = 75.0
+
+
+def adaptive_taper_slope(distances, preferred_depth, *, percentile=35.0):
+    """Choose a printable taper from the patch's actual clearance distribution.
+
+    A percentile deliberately ignores the zero-distance rim while reacting to a
+    narrow interior.  The result remains inside the documented 30--75 degree
+    printable range; 45 degrees is therefore a neutral reference, not a fixed
+    geometric requirement.
+    """
+    values = np.asarray(distances, dtype=float)
+    values = values[np.isfinite(values) & (values > 1e-8)]
+    if not len(values) or not np.isfinite(preferred_depth) or preferred_depth <= 0:
+        raise ValueError('Adaptive backing slope requires positive finite clearance and depth')
+    clearance = float(np.percentile(values, percentile))
+    angle = float(np.degrees(np.arctan2(float(preferred_depth), clearance)))
+    angle = float(np.clip(angle, MINIMUM_TAPER_DEGREES, MAXIMUM_TAPER_DEGREES))
+    return float(np.tan(np.deg2rad(angle))), angle, clearance
+
+
+def _resolve_parent_directions(parent, points, local_directions, fallback_axis, maximum_mm):
+    """Use local normals where certified, then progressively blend toward inward."""
+    from .parent_ray_probe import parent_exit_distances
+    directions = np.asarray(local_directions, dtype=float).copy()
+    exits = parent_exit_distances(parent, points, directions, maximum_mm)
+    fallback = np.asarray(fallback_axis, dtype=float)
+    fallback /= np.linalg.norm(fallback)
+    recovered = np.zeros(len(points), dtype=bool)
+    for local_weight in (.75, .5, .25, 0.0):
+        missing = ~np.isfinite(exits)
+        if not missing.any():
+            break
+        candidates = local_weight * directions[missing] + (1.0-local_weight) * fallback
+        lengths = np.linalg.norm(candidates, axis=1)
+        valid = lengths > 1e-12
+        candidates[valid] /= lengths[valid, None]
+        candidate_exits = np.full(len(candidates), np.nan)
+        if valid.any():
+            candidate_exits[valid] = parent_exit_distances(
+                parent, points[missing][valid], candidates[valid], maximum_mm)
+        accepted = np.isfinite(candidate_exits) & (candidate_exits > .05)
+        ids = np.flatnonzero(missing)
+        directions[ids[accepted]] = candidates[accepted]
+        exits[ids[accepted]] = candidate_exits[accepted]
+        recovered[ids[accepted]] = True
+    return directions, exits, recovered
+
 def first_exit(triangles, points, axis, epsilon=1e-7):
     a=triangles[:,0]; e=triangles[:,1]-a; g=triangles[:,2]-a
     h=np.cross(axis,g); det=np.einsum('ij,ij->i',e,h)
@@ -26,10 +76,10 @@ def segment_distance(points, segments):
         result.append(np.linalg.norm(p-a-t[:,None]*d,axis=1).min())
     return np.array(result)
 
-def build(patch, parent, axis, preferred_depth=3., taper_slope=1., *, direction_mode='axis'):
+def build(patch, parent, axis, preferred_depth=3., taper_slope=None, *, direction_mode='axis'):
     if not np.isfinite(preferred_depth) or not 0 < preferred_depth <= 10:
         raise ValueError('Backing depth must be finite and within (0, 10] mm')
-    if not np.isfinite(taper_slope) or not .577 <= taper_slope <= 3.732:
+    if taper_slope is not None and (not np.isfinite(taper_slope) or not .577 <= taper_slope <= 3.732):
         raise ValueError('Backing taper slope must stay within the 30-75 degree design range')
     if np.shape(axis)!=(3,) or not np.isfinite(axis).all() or np.linalg.norm(axis)<1e-12:
         raise ValueError('Backing axis must be a finite nonzero vector')
@@ -65,13 +115,13 @@ def build(patch, parent, axis, preferred_depth=3., taper_slope=1., *, direction_
     if direction_mode not in ('axis', 'local-normal'):
         raise ValueError('Unknown source-following backing direction mode')
     if direction_mode == 'local-normal':
-        from .parent_ray_probe import parent_exit_distances
         back_surface=trimesh.Trimesh(points,back,process=False)
         directions=-np.asarray(back_surface.vertex_normals)
         active=np.array([i for i in range(len(points)) if i not in rim_ids])
-        exits=parent_exit_distances(parent,points[active],directions[active],
-                                   float(np.linalg.norm(parent.extents)+1),
-                                   minimum_reserve_mm=.05)
+        resolved, exits, recovered = _resolve_parent_directions(
+            parent, points[active], directions[active], axis,
+            float(np.linalg.norm(parent.extents)+1))
+        directions[active] = resolved
         distance=segment_distance(points,patch.vertices[rim_edges])
     else:
         directions=np.tile(axis,(len(points),1))
@@ -83,6 +133,12 @@ def build(patch, parent, axis, preferred_depth=3., taper_slope=1., *, direction_
         safety=first_exit(parent.triangles,points[active],axis)-.05
     if not np.isfinite(safety).all() or (safety<=0).any():
         raise ValueError(f'Invalid parent safety: {np.nanmin(safety)}; {np.sum(~np.isfinite(safety))} missing')
+    if taper_slope is None:
+        taper_slope, taper_angle, taper_clearance = adaptive_taper_slope(
+            distance[active], preferred_depth)
+    else:
+        taper_angle = float(np.degrees(np.arctan(taper_slope)))
+        taper_clearance = None
     depths=np.minimum(np.minimum(distance[active]*taper_slope,preferred_depth),safety)
     if (depths<=1e-8).any():
         raise ValueError(f'Backing has unresolved zero-width interior: {depths.min()}')
@@ -100,6 +156,9 @@ def build(patch, parent, axis, preferred_depth=3., taper_slope=1., *, direction_
                   'minimum_interior_depth_mm':float(depths.min()),'maximum_depth_mm':float(depths.max()),
                   'minimum_parent_reserve_mm':float(np.min(safety+.05-depths)),
                   'taper_slope':taper_slope,'preferred_depth_mm':preferred_depth,
+                  'taper_angle_degrees':taper_angle,
+                  'taper_clearance_percentile_mm':taper_clearance,
+                  'parent_direction_fallback_samples':int(recovered.sum()) if direction_mode == 'local-normal' else 0,
                   'direction_mode':direction_mode,
                   'back_face_source_indices':back_owners,
                   'coowned_source_chords_split':len(midpoint)}

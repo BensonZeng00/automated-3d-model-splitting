@@ -265,23 +265,37 @@ def enclosed_occluded_same_color_mask(
 
 
 def connected_components_by_color(faces: np.ndarray, colors: list[str]) -> list[np.ndarray]:
-    dsu = DSU(len(faces))
-    first_edge_face: dict[tuple[str, int, int], int] = {}
-    for face_index, (face, color) in enumerate(zip(faces, colors)):
-        for a, b in ((face[0], face[1]), (face[1], face[2]), (face[2], face[0])):
-            if a > b:
-                a, b = b, a
-            key = (color, int(a), int(b))
-            previous = first_edge_face.get(key)
-            if previous is None:
-                first_edge_face[key] = face_index
-            else:
-                dsu.union(face_index, previous)
+    """Return same-material face components using the sparse graph backend.
 
-    groups: dict[int, list[int]] = collections.defaultdict(list)
-    for face_index in range(len(faces)):
-        groups[dsu.find(face_index)].append(face_index)
-    return [np.array(indices, dtype=np.int64) for indices in groups.values()]
+    The former Python dictionary stored three ``(color, vertex, vertex)``
+    tuples per face and performed millions of interpreted DSU operations.
+    Vendor-painted examples exceed 700k conformed faces, where that became a
+    multi-minute stage.  Trimesh already computes the shared-edge adjacency in
+    vectorized code; filtering that array by material and using SciPy preserves
+    exactly the same edge-connected definition with bounded memory.
+    """
+    faces = np.asarray(faces, dtype=np.int64)
+    labels = np.asarray(colors).astype(str)
+    if labels.shape != (len(faces),):
+        raise ValueError('One material label is required per face')
+    started = time.perf_counter()
+    adjacency = trimesh.graph.face_adjacency(faces=faces)
+    runtime_log('识别', 'material_adjacency_ready',
+                '共享边邻接已生成，开始按材料求连通分量',
+                faces=len(faces), adjacency_edges=len(adjacency),
+                duration_seconds=round(time.perf_counter()-started, 4))
+    if len(adjacency):
+        adjacency = adjacency[labels[adjacency[:, 0]] == labels[adjacency[:, 1]]]
+    groups = trimesh.graph.connected_components(
+        adjacency,
+        nodes=np.arange(len(faces), dtype=np.int64),
+        min_len=1,
+        engine='scipy',
+    )
+    runtime_log('识别', 'material_components_ready',
+                '按材料共享边连通分量计算完成', groups=len(groups),
+                duration_seconds=round(time.perf_counter()-started, 4))
+    return [np.asarray(indices, dtype=np.int64) for indices in groups]
 
 
 def material_identity(color_code: str) -> tuple[str, object]:
@@ -764,6 +778,15 @@ def _merge_partitioned_groups_into_components(
                 for slot in edge_to_component_slots.get(edge_key_from_vertices(a, b), set()):
                     shared_counts[int(slot)] += 1
 
+        compatible_slots = {
+            slot for slot, component in enumerate(components)
+            if material_identity(component.color_code)
+            == material_identity(str(display_colors[int(group[0])]))
+        }
+        shared_counts = collections.Counter({
+            slot: count for slot, count in shared_counts.items()
+            if slot in compatible_slots
+        })
         if shared_counts:
             assigned_slot, shared_edges = max(
                 shared_counts.items(),
@@ -774,8 +797,11 @@ def _merge_partitioned_groups_into_components(
         else:
             fragment_min = np.array(record["bbox_min"], dtype=np.float64)
             fragment_max = np.array(record["bbox_max"], dtype=np.float64)
+            if not compatible_slots:
+                ignored.append(record)
+                continue
             assigned_slot, nearest_component = min(
-                enumerate(components),
+                ((slot, components[slot]) for slot in compatible_slots),
                 key=lambda item: (
                     bbox_distance_sq(fragment_min, fragment_max, item[1].bbox_min, item[1].bbox_max),
                     -item[1].face_count,

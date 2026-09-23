@@ -1450,10 +1450,21 @@ def build_layer_child_cut_references(
             if int(contact["parent_edges"]) < 3:
                 continue
             loop_global = [int(global_vertex_ids[i]) for i in loop]
+            # A consolidated paint component can cover surfaces with opposite
+            # orientations.  Resolve the sign independently at every source
+            # rim before local normals, thickness probes, or connector geometry
+            # are planned; the late audit remains a hard safety backstop.
+            from .surface_direction import resolve_inward_axis
+            interface_inward, surface_direction_record = resolve_inward_axis(
+                local_vertices,
+                local_faces,
+                loop,
+                inward,
+            )
             loop_directions, direction_record = safe_boundary_inward_directions(
                 vertex_inward_normals,
                 loop,
-                inward,
+                interface_inward,
                 loop_points=local_vertices[np.asarray(loop, dtype=np.int64)],
             )
             selected_loop_records.append(
@@ -1461,6 +1472,7 @@ def build_layer_child_cut_references(
                     "loop_index": int(loop_index),
                     "loop": [int(value) for value in loop],
                     "global_loop": loop_global,
+                    "interface_inward": interface_inward,
                     "loop_directions": loop_directions,
                     "loop_local_inward_normals": np.asarray(
                         vertex_inward_normals[np.asarray(loop, dtype=np.int64)],
@@ -1471,7 +1483,10 @@ def build_layer_child_cut_references(
                     # rounded feature and collapse the axial chamfer into an
                     # almost straight wall.
                     "lead_in_directions": loop_directions.copy(),
-                    "direction_record": direction_record,
+                    "direction_record": {
+                        **direction_record,
+                        "surface_orientation": surface_direction_record,
+                    },
                     "contact": contact,
                 }
             )
@@ -1480,6 +1495,7 @@ def build_layer_child_cut_references(
         selected_loop_records, _micro_loops = filter_micro_interface_loops(
             local_vertices, selected_loop_records, part_index=child_index)
         planned_vertices = local_vertices
+        _retopology_records = []
         if cap_planning_enabled and selected_loop_records:
             retopology_started_at = time.perf_counter()
             visible_planned_vertices, _retopology_records = InterfaceRetopologyService.retopologize_local_loops(
@@ -1522,6 +1538,13 @@ def build_layer_child_cut_references(
             float(interface_retopology.config.maximum_safe_target_offset_mm)
             if interface_retopology is not None
             else 0.0,
+            # A large absolute fit can still be a small, already validated
+            # relative change on a large loop (P09 is representative).  The
+            # visible source rim remains immutable; this allowance applies
+            # only to correspondence with the generated hidden ring.
+            max((float(record.get("requested_maximum_target_displacement_mm", 0.0))
+                 for record in _retopology_records), default=0.0)
+            if cap_planning_enabled and selected_loop_records else 0.0,
         )
         insert_shrink_mm, socket_overcut_mm = clearance_offsets(
             clearance_mode,
@@ -1533,8 +1556,11 @@ def build_layer_child_cut_references(
             loop_global = selected["global_loop"]
             loop_directions = selected["loop_directions"]
             lead_in_directions = selected["lead_in_directions"]
+            interface_inward = selected["interface_inward"]
+            active_inward = interface_inward.copy()
             loop_conormals = boundary_loop_interior_conormals(
-                planned_vertices, local_faces, loop, reference_axis=inward
+                planned_vertices, local_faces, loop,
+                reference_axis=interface_inward,
             )
             contact = selected["contact"]
             ref = {
@@ -1555,7 +1581,7 @@ def build_layer_child_cut_references(
                     )
                     for position in range(len(loop_global))
                 },
-                "inward": inward,
+                "inward": interface_inward,
                 "inward_by_global": {
                     int(global_id): direction.copy()
                     for global_id, direction in zip(loop_global, loop_directions)
@@ -1652,18 +1678,13 @@ def build_layer_child_cut_references(
                                 planar_extra_limit_mm=cap_planar_extra_limit_mm,
                                 parent_thickness_probe=child_parent_thickness_probe,
                                 source_points=source_points,
-                                # A moved visible seam may start slightly outside
-                                # the parent and first enter it below the nominal
-                                # surface.  Extend the screening ray by the same
-                                # audited reconciliation allowance; otherwise an
-                                # exit just beyond 3 mm is missed and the fast
-                                # pass falsely certifies a 3 mm wall.  The chosen
-                                # candidate is still replanned below with the
-                                # complete authoritative ceiling.
-                                safety_ceiling_mm=(
-                                    preferred_minimum_depth_mm
-                                    + interface_reconciliation_tolerance_mm
-                                ),
+                                # Screening and final selection must use one
+                                # thickness horizon.  A shorter ray can observe
+                                # an entry without its matching exit (or neither)
+                                # and therefore cannot classify whether the
+                                # origin is inside the parent.  Let the shared
+                                # cap planner apply its ordinary authoritative
+                                # ceiling here as it does in the replay below.
                             )
                         except ValueError as exc:
                             if "No positive inward depth remains" not in str(exc):
@@ -1925,7 +1946,7 @@ def build_layer_child_cut_references(
                     cap_decision = build_reserved_cap_decision(
                         planned_vertices[loop_array],
                         loop_conormals,
-                        inward,
+                        active_inward,
                         loop_directions,
                     )
 
@@ -2001,10 +2022,10 @@ def build_layer_child_cut_references(
                             cap_decision.source_points, dtype=np.float64
                         ).copy(),
                     )
-                    inward = guided_internal_cut.entry_direction.copy()
+                    active_inward = guided_internal_cut.entry_direction.copy()
                     loop_directions = guided_plan.directions.copy()
                     lead_in_directions = guided_plan.directions.copy()
-                    ref["inward"] = inward.copy()
+                    ref["inward"] = active_inward.copy()
                     ref["inward_by_global"] = {
                         int(global_id): direction.copy()
                         for global_id, direction in zip(
@@ -2049,7 +2070,7 @@ def build_layer_child_cut_references(
                     hidden_plan = HiddenInterfacePlanner.plan(
                         points=planned_vertices[loop_array],
                         initial_directions=loop_directions,
-                        fallback_axis=inward,
+                        fallback_axis=active_inward,
                         local_inward_normals=selected[
                             "loop_local_inward_normals"
                         ],
@@ -2137,17 +2158,19 @@ def build_layer_child_cut_references(
                                 ),
                             }
                         )
-                        inward = np.asarray(
+                        active_inward = np.asarray(
                             selected_hidden.axis,
                             dtype=np.float64,
                         ).copy()
-                        inward /= max(float(np.linalg.norm(inward)), 1e-12)
+                        active_inward /= max(
+                            float(np.linalg.norm(active_inward)), 1e-12
+                        )
                         loop_directions = np.asarray(
                             selected_hidden.directions,
                             dtype=np.float64,
                         ).copy()
                         lead_in_directions = loop_directions.copy()
-                        ref["inward"] = inward.copy()
+                        ref["inward"] = active_inward.copy()
                         ref["inward_by_global"] = {
                             int(global_id): direction.copy()
                             for global_id, direction in zip(
@@ -2208,7 +2231,7 @@ def build_layer_child_cut_references(
                             flat_triangles, flat_normal, _flat_record = (
                                 triangulate_ordered_loop_3d(
                                     target_bottom,
-                                    np.asarray(inward, dtype=np.float64),
+                                    np.asarray(active_inward, dtype=np.float64),
                                 )
                             )
                             flat_quality = inward_cap_surface_quality(
@@ -2226,7 +2249,7 @@ def build_layer_child_cut_references(
                             direct_triangles, direct_normal, triangulation = (
                                 triangulate_ordered_loop_3d(
                                     target_bottom,
-                                    np.asarray(inward, dtype=np.float64),
+                                    np.asarray(active_inward, dtype=np.float64),
                                 )
                             )
                             (
@@ -2300,7 +2323,7 @@ def build_layer_child_cut_references(
                             direct_triangles, direct_normal, triangulation = (
                                 triangulate_ordered_loop_3d(
                                     target_bottom,
-                                    np.asarray(inward, dtype=np.float64),
+                                    np.asarray(active_inward, dtype=np.float64),
                                 )
                             )
                             direct_surface_quality = inward_cap_surface_quality(
@@ -2640,7 +2663,7 @@ def build_layer_child_cut_references(
                             cap_decision.source_points,
                             dtype=np.float64,
                         ),
-                        inward=inward,
+                        inward=active_inward,
                         fit_clearance_mm=fit_clearance_mm,
                         bottom_clearance_mm=bottom_clearance_mm,
                         lead_in_mm=lead_in_mm,
@@ -2688,7 +2711,7 @@ def build_layer_child_cut_references(
                             cap_decision.source_points,
                             dtype=np.float64,
                         ),
-                        inward=inward,
+                        inward=active_inward,
                         inward_directions=np.asarray(
                             cap_decision.directions,
                             dtype=np.float64,
@@ -2710,7 +2733,7 @@ def build_layer_child_cut_references(
                     large_cap_loop = len(loop) > 512
                     initial_cap_quality = cap_decision_patch_quality_preflight(
                         cap_decision,
-                        inward,
+                        active_inward,
                         source_points,
                         lead_in_directions,
                         lead_in_mm,
@@ -3584,9 +3607,18 @@ class ParentThicknessProbe:
             isinstance(preceding_entry_distances, np.ndarray)
             and preceding_entry_distances.shape == thicknesses.shape
         ):
+            # ``first_hit_distances`` returns the material interval between a
+            # preceding entry and its exit.  That interval is a valid local
+            # wall thickness only when the ray starts on (within numerical
+            # reserve of) that wall.  If the entry is remote, the generated
+            # cap travels through free space first and is limited by the entry
+            # location, regardless of whether the remote shell itself is
+            # hair-thin or substantial.  Restricting this repair to intervals
+            # below the clearance made a bounded screening ray report a safe
+            # target while the longer authoritative ray incorrectly treated a
+            # 0.218 mm remote shell as the available depth.
             paired_remote_shell_repair = (
-                (thicknesses <= PARENT_THICKNESS_CLEARANCE_MM + 1e-9)
-                & np.isfinite(preceding_entry_distances)
+                np.isfinite(preceding_entry_distances)
                 & (
                     preceding_entry_distances
                     > PARENT_THICKNESS_CLEARANCE_MM + 1e-9

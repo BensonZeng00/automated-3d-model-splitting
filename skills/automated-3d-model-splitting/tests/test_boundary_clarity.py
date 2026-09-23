@@ -115,6 +115,29 @@ class BoundaryClarityTests(unittest.TestCase):
                             self.mesh.vertices, self.mesh.faces, self.ambiguous_labels())
             self.assertEqual(search.call_args.kwargs['max_candidates'], 3)
 
+    def test_dense_fragmented_paint_uses_relative_micro_candidate(self):
+        labels = self.ambiguous_labels()
+        assessment = self.graph.assess(labels)
+        assessment.uncertain_faces = np.arange(3000)
+        candidate = self.graph.propose(labels, self.graph.assess(labels))[0]
+        candidate['admissible'] = False
+        dense_faces = np.tile(self.mesh.faces, (1300, 1))
+        dense_labels = np.tile(labels, 1300)
+        # Keep this unit focused on the policy; production candidates still
+        # come from the full dense graph and retain their own assessment.
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(BoundaryGraph, 'assess', return_value=assessment), \
+             patch.object(BoundaryGraph, 'propose', return_value=[candidate]), \
+             patch('split3mf.boundary_budget.BoundaryAreaBudget.evaluate',
+                   return_value=dict(automatic=True, identities_preserved=True,
+                       changed_face_count=1, regions=[dict(owner='A',
+                           affected_area_mm2=.01, source_region_area_mm2=100.,
+                           affected_area_ratio=.0001)])):
+            _owners, report = BoundaryReviewService(Path(directory)).prepare(
+                np.tile(self.mesh.vertices, (1300, 1)), dense_faces, dense_labels)
+        self.assertEqual(report['status'], 'fragmented_paint_completion')
+        self.assertTrue(report['completion_assessment']['downstream_geometry_audits_required'])
+
     def test_component_reassignment_does_not_repaint_or_mutate_components(self):
         areas = triangle_areas(self.mesh.vertices, self.mesh.faces)
         components = [make_component_from_global_faces(self.mesh.vertices, self.mesh.faces,

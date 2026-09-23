@@ -4,6 +4,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 import numpy as np
@@ -20,6 +21,7 @@ from split3mf.cli import build_parser
 from split3mf.domain import PlanarArcRetopologyConfig, PlanarArcRetopologyContext
 from split3mf.debug_export import export_retopology_failure_diagnostics
 from split3mf.planar_arc import PlanarArcError
+from split3mf.planar_arc import CurveClarityRequired
 from split3mf.interface_retopology import (
     InterfaceRetopologyService,
     _directed_edge_topology_issues,
@@ -36,6 +38,25 @@ from split3mf.surface_quality import sparse_local_inversion_audit
 
 
 class InterfaceRetopologyTests(unittest.TestCase):
+    def test_advisory_preserves_source_when_planar_fit_crosses(self) -> None:
+        points = np.asarray([[0., 0., 0.], [1., 1., .2],
+                             [0., 1., 0.], [1., 0., .2]])
+        proposal = type('Proposal', (), {'record': {
+            'projected_crossings_before': 1, 'status': 'proposed'}})()
+        failure = CurveClarityRequired(points, points, proposal,
+                                       (np.zeros(3), np.eye(3)[0],
+                                        np.eye(3)[1], np.eye(3)[2]))
+        context = PlanarArcRetopologyContext(
+            PlanarArcRetopologyConfig(surface_band_validation='advisory'))
+        with patch(
+                'split3mf.interface_retopology.build_planar_arc_boundary',
+                side_effect=failure):
+            target, record = InterfaceRetopologyService.retopologize_loop(
+                points, np.arange(4), context)
+        np.testing.assert_array_equal(target, points)
+        self.assertEqual(record['status'], 'source_curve_preserved')
+        self.assertTrue(record['ambiguous_planar_fit_skipped'])
+
     def test_large_target_preserves_visible_rim_and_reaches_hidden_planner(self) -> None:
         source = np.asarray(
             [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0]],

@@ -6,6 +6,7 @@ from dataclasses import replace
 from .common import *
 from .project import *
 from .recognition import *
+from .recognition import _merge_partitioned_groups_into_components
 from .mesh import *
 from .package_io import *
 from .selection import *
@@ -252,6 +253,35 @@ class SplitPipeline:
             small_region_review_max_faces=int(args.small_region_review_max_faces),
         )
         groups = connected_components_by_color(faces, recognition_colors)
+        if len(groups) > 1000:
+            # Dense triangle-selector paint commonly leaves thousands of
+            # microscopic same-material islands.  Reviewing each island is
+            # quadratic in practice and cannot produce thousands of printable
+            # parts.  Retain every substantial island plus the largest island
+            # of each material, then attach only <= noise-threshold fragments
+            # to a same-material component by shared edge or nearest bbox.
+            largest_by_material = {}
+            for group in groups:
+                identity = material_identity(str(recognition_token_colors[int(group[0])]))
+                if identity not in largest_by_material or len(group) > len(largest_by_material[identity]):
+                    largest_by_material[identity] = group
+            consolidation_limit = int(args.small_region_review_max_faces)
+            anchors = [group for group in groups
+                       if len(group) > consolidation_limit
+                       or any(group is anchor for anchor in largest_by_material.values())]
+            anchor_ids = {id(group) for group in anchors}
+            fragments = [group for group in groups if id(group) not in anchor_ids]
+            merged, ignored_fragments, merged_records = _merge_partitioned_groups_into_components(
+                vertices, faces, recognition_colors, anchors, fragments,
+                display_colors=recognition_token_colors)
+            groups = [component.global_faces for component in merged]
+            runtime_log('识别', 'dense_paint_fragments_consolidated',
+                        '密集涂色微小岛已按同材料邻接或距离合并',
+                        raw_groups=len(anchors) + len(fragments),
+                        effective_groups=len(groups), fragments=len(fragments),
+                        merged_fragments=len(merged_records),
+                        ignored_fragments=len(ignored_fragments),
+                        maximum_fragment_faces=consolidation_limit)
         region_review = None
         normalized_groups = [np.asarray(group, dtype=np.int64) for group in groups]
         from .region_review import select_region_review_groups

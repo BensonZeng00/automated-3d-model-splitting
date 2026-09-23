@@ -3092,6 +3092,57 @@ class ParentThicknessProbe:
     # fallback for genuinely oblique shells.
     minimum_preferred_opposing_face_dot = 0.15
 
+    @dataclass(frozen=True)
+    class BroadPhaseCandidateCache:
+        """Direction-independent conservative candidates for repeated rays.
+
+        Candidate groups contain global triangle ids.  A triangle intersecting
+        any finite ray of ``search_limit_mm`` from an origin has its centroid
+        within that limit plus its bounding radius, irrespective of direction.
+        The normal per-direction capsule filter and exact ray test still run
+        for every measurement.
+        """
+
+        probe_identity: int
+        points: np.ndarray
+        search_limit_mm: float
+        candidate_groups: tuple[tuple[np.ndarray, ...], ...]
+        candidate_count: int
+
+    def prepare_safety_limit_candidates(
+        self,
+        points: np.ndarray,
+        global_ceiling_mm: float,
+    ) -> "ParentThicknessProbe.BroadPhaseCandidateCache":
+        """Build a reusable superset for repeated ``safety_limit`` calls."""
+        origins = np.asarray(points, dtype=np.float64)
+        global_ceiling = min(
+            max(float(global_ceiling_mm), 0.0),
+            MAXIMUM_SAFE_INWARD_DEPTH_MM,
+        )
+        search_limit = global_ceiling + PARENT_THICKNESS_CLEARANCE_MM
+        bucket_groups: list[tuple[np.ndarray, ...]] = []
+        candidate_count = 0
+        for triangle_ids, tree, maximum_radius in self.radius_buckets:
+            local_groups = tree.query_ball_point(
+                origins,
+                search_limit + float(maximum_radius) + 1e-8,
+                workers=-1 if len(origins) >= 64 else 1,
+            )
+            global_groups = tuple(
+                triangle_ids[np.asarray(group, dtype=np.int64)]
+                for group in local_groups
+            )
+            candidate_count += sum(len(group) for group in global_groups)
+            bucket_groups.append(global_groups)
+        return self.BroadPhaseCandidateCache(
+            probe_identity=id(self),
+            points=origins.copy(),
+            search_limit_mm=search_limit,
+            candidate_groups=tuple(bucket_groups),
+            candidate_count=int(candidate_count),
+        )
+
     def __init__(
         self,
         vertices: np.ndarray,
@@ -3275,6 +3326,7 @@ class ParentThicknessProbe:
         points: np.ndarray,
         directions: np.ndarray,
         search_limit_mm: float,
+        broad_phase_cache: "ParentThicknessProbe.BroadPhaseCandidateCache | None" = None,
     ) -> np.ndarray:
         points = np.asarray(points, dtype=np.float64)
         directions = np.asarray(directions, dtype=np.float64)
@@ -3291,6 +3343,17 @@ class ParentThicknessProbe:
         )
         if not self.radius_buckets or search_limit <= 0.0:
             return hits
+        if broad_phase_cache is not None:
+            if broad_phase_cache.probe_identity != id(self):
+                raise ValueError("parent-thickness candidate cache belongs to another probe")
+            if (
+                broad_phase_cache.points.shape != points.shape
+                or not np.array_equal(broad_phase_cache.points, points)
+                or search_limit > broad_phase_cache.search_limit_mm + 1e-9
+            ):
+                raise ValueError("parent-thickness candidate cache does not cover this query")
+            if len(broad_phase_cache.candidate_groups) != len(self.radius_buckets):
+                raise ValueError("parent-thickness candidate cache bucket mismatch")
 
         query_started_at = time.perf_counter()
         runtime_log(
@@ -3318,11 +3381,11 @@ class ParentThicknessProbe:
         selected_entry_distances = np.full(len(points), np.nan, dtype=np.float64)
         selected_exit_triangle_ids = np.full(len(points), -1, dtype=np.int64)
         selected_entry_triangle_ids = np.full(len(points), -1, dtype=np.int64)
-        for (
+        for bucket_index, (
             bucket_triangle_ids,
             bucket_tree,
             bucket_maximum_radius,
-        ) in self.radius_buckets:
+        ) in enumerate(self.radius_buckets):
             bucket_query_started_at = time.perf_counter()
             # A single sphere around the complete segment has radius L/2+r and
             # is extremely loose for dense small triangles.  Cover the ray by
@@ -3343,7 +3406,12 @@ class ParentThicknessProbe:
                 )
             )
             broad_phase_segment_counts[int(segment_count)] += 1
-            if segment_count == 1:
+            if broad_phase_cache is not None:
+                # The cached groups are a direction-independent superset.
+                # Keep them as global ids; the segment-sphere rejection below
+                # restores the tight per-direction capsule before exact tests.
+                candidate_groups = broad_phase_cache.candidate_groups[bucket_index]
+            elif segment_count == 1:
                 candidate_groups = bucket_tree.query_ball_point(
                     midpoints,
                     search_limit * 0.5 + bucket_maximum_radius + 1e-8,
@@ -3393,11 +3461,13 @@ class ParentThicknessProbe:
             for index, (origin, direction, candidates) in enumerate(
                 zip(points, directions, candidate_groups)
             ):
-                if not candidates:
+                if not len(candidates):
                     continue
-                candidate_ids = bucket_triangle_ids[
+                candidate_ids = (
                     np.asarray(candidates, dtype=np.int64)
-                ]
+                    if broad_phase_cache is not None
+                    else bucket_triangle_ids[np.asarray(candidates, dtype=np.int64)]
+                )
                 candidate_ids = candidate_ids[
                     self.active_triangle_mask[candidate_ids]
                 ]
@@ -3634,17 +3704,28 @@ class ParentThicknessProbe:
         points: np.ndarray,
         directions: np.ndarray,
         global_ceiling_mm: float,
+        broad_phase_cache: "ParentThicknessProbe.BroadPhaseCandidateCache | None" = None,
     ) -> tuple[float, dict]:
         global_ceiling = min(
             max(float(global_ceiling_mm), 0.0),
             MAXIMUM_SAFE_INWARD_DEPTH_MM,
         )
         search_limit = global_ceiling + PARENT_THICKNESS_CLEARANCE_MM
-        thicknesses = self.first_hit_distances(
-            points,
-            directions,
-            search_limit,
-        )
+        if broad_phase_cache is None:
+            # Preserve the overridable three-argument hook used by lightweight
+            # policy probes and downstream integrations.
+            thicknesses = self.first_hit_distances(
+                points,
+                directions,
+                search_limit,
+            )
+        else:
+            thicknesses = self.first_hit_distances(
+                points,
+                directions,
+                search_limit,
+                broad_phase_cache=broad_phase_cache,
+            )
         original_thicknesses = thicknesses.copy()
         preceding_entry_distances = getattr(
             self,

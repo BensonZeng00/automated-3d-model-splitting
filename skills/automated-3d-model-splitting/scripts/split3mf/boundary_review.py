@@ -39,13 +39,45 @@ class BoundaryReviewService:
         import hashlib
         fingerprint = hashlib.sha256(failure.source.astype('<f8').tobytes()
             + failure.target.astype('<f8').tobytes()).hexdigest()
+        candidate_fingerprint = failure.proposal.record.get('candidate_sha256')
+        decision = self._matching_decision(fingerprint)
+        if decision:
+            if decision.get('user_confirmed') is not True:
+                raise BoundaryDecisionError('Curve decision is not user-confirmed')
+            if decision.get('action') != 'apply_clear_curve':
+                raise BoundaryDecisionError('Curve decision action must be apply_clear_curve')
+            if not candidate_fingerprint or decision.get('candidate_fingerprint') != candidate_fingerprint:
+                raise BoundaryDecisionError('Clear-curve candidate fingerprint mismatch')
+            if failure.proposal.record.get('status') != 'proposed':
+                raise BoundaryDecisionError('Reviewed curve has no complete applicable proposal')
+            runtime_log('分界', 'curve_review_applied',
+                        '已应用指纹匹配的用户确认清除曲线；继续表面带重网格与严格审核',
+                        fingerprint=fingerprint, candidate_fingerprint=candidate_fingerprint)
+            return failure.proposal
         directory = self.directory / ('curve_' + fingerprint[:12])
         report = export_curve_review(failure.source, failure.target, failure.proposal,
             failure.basis, directory, record=dict(fingerprint=fingerprint,
+                candidate_fingerprint=candidate_fingerprint,
+                action='apply_clear_curve', user_confirmed=False,
                 geometry_change=False, mesh_untouched=True,
                 previous_ownership_approval_reused=False))
         self.records.append(report)
         raise BoundaryReviewRequired(directory, report)
+
+    def _matching_decision(self, fingerprint):
+        if self.decisions is None:
+            return None
+        try:
+            payload = json.loads(self.decisions.read_text(encoding='utf-8'))
+            decisions = payload.get('decisions', [payload])
+            if not isinstance(decisions, list) or not all(isinstance(item, dict) for item in decisions):
+                raise ValueError('Expected a list of boundary decisions')
+        except (OSError, ValueError, AttributeError) as exc:
+            raise BoundaryDecisionError(f'Cannot read boundary approvals: {exc}') from exc
+        matching = [item for item in decisions if item.get('fingerprint') == fingerprint]
+        if len(matching) > 1:
+            raise BoundaryDecisionError('Duplicate boundary approvals for one stage')
+        return matching[0] if matching else None
 
     def prepare(self, vertices, faces, owners, *, context='input', display_colors=None):
         started = time.perf_counter()

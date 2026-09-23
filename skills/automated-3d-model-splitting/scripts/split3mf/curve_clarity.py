@@ -20,9 +20,11 @@ def signed_area(points):
 
 
 def crossings(points):
-    """Proper nonadjacent intersections, vectorized per edge (O(n) memory)."""
+    """Proper nonadjacent intersections with a sweep broad phase for dense rings."""
     p = np.asarray(points, dtype=float)
     edges = np.roll(p, -1, axis=0) - p
+    if len(p) > 2048:
+        return _sweep_crossings(p, edges)
     found = []
     for i in range(len(p) - 2):
         js = np.arange(i + 2, len(p) - (i == 0))
@@ -38,11 +40,77 @@ def crossings(points):
     return found
 
 
+def _sweep_crossings(points, edges):
+    """Conservative segment-AABB sweep followed by the same exact predicate."""
+    low = np.minimum(points, np.roll(points, -1, axis=0))
+    high = np.maximum(points, np.roll(points, -1, axis=0))
+    order = np.lexsort((np.arange(len(points)), low[:, 0]))
+    active, found = [], []
+    count = len(points)
+    for raw_j in order:
+        j = int(raw_j)
+        active = [i for i in active if high[i, 0] >= low[j, 0]]
+        for i in active:
+            if abs(i - j) <= 1 or {i, j} == {0, count - 1}:
+                continue
+            if high[i, 1] < low[j, 1] or high[j, 1] < low[i, 1]:
+                continue
+            a, b = sorted((i, j))
+            delta = points[b] - points[a]
+            denominator = float(cross2(edges[a], edges[b]))
+            if abs(denominator) <= 1e-12:
+                continue
+            t = float(cross2(delta, edges[b]) / denominator)
+            s = float(cross2(delta, edges[a]) / denominator)
+            if 1e-9 < t < 1 - 1e-9 and 1e-9 < s < 1 - 1e-9:
+                found.append((a, b, t, s))
+        active.append(j)
+    return sorted(found, key=lambda item: item[:2])
+
+
 @dataclass(frozen=True)
 class ClearCurveProposal:
     points: np.ndarray
     source_weights: object | None
     record: dict
+
+
+def resample_approved_curve(proposal: ClearCurveProposal, reference: np.ndarray) -> np.ndarray:
+    """Resample an approved contour onto an existing boundary ring.
+
+    Approval permits the contour change, not arbitrary vertex insertion into a
+    source mesh.  Keeping the existing ring cardinality lets the established
+    surface-band remesher move the boundary and audit every affected face.
+    The cyclic phase and direction are selected geometrically rather than by
+    treating proposal rows as source vertex identities.
+    """
+    candidate = np.asarray(proposal.points, dtype=np.float64)
+    old = np.asarray(reference, dtype=np.float64)
+    if proposal.record.get("status") != "proposed":
+        raise ValueError("Only a complete clear-curve proposal can be applied")
+    if len(candidate) < 3 or len(old) < 3:
+        raise ValueError("Approved curve and reference must be closed rings")
+    edges = np.roll(candidate, -1, axis=0) - candidate
+    lengths = np.linalg.norm(edges, axis=1)
+    total = float(lengths.sum())
+    if total <= 1e-12:
+        raise ValueError("Approved curve has zero perimeter")
+    cumulative = np.concatenate(([0.0], np.cumsum(lengths)))
+    distances = np.arange(len(old), dtype=np.float64) * total / len(old)
+    indices = np.searchsorted(cumulative, distances, side="right") - 1
+    indices = np.clip(indices, 0, len(candidate) - 1)
+    blend = np.divide(distances - cumulative[indices], lengths[indices],
+                      out=np.zeros_like(distances), where=lengths[indices] > 1e-12)
+    sampled = candidate[indices] + edges[indices] * blend[:, None]
+    # Only two orientations and the nearest phase can represent the same
+    # closed contour.  This avoids an O(n^2) cyclic correspondence search.
+    choices = []
+    for values in (sampled, sampled[::-1]):
+        start = int(np.argmin(np.linalg.norm(values - old[0], axis=1)))
+        aligned = np.roll(values, -start, axis=0)
+        score = float(np.sum((aligned[:min(32, len(old))] - old[:min(32, len(old))]) ** 2))
+        choices.append((score, aligned))
+    return min(choices, key=lambda item: item[0])[1]
 
 
 def _thin_width(points):
@@ -83,10 +151,6 @@ def propose_clear_curve(points, origin, u, v, normal, *, max_attempts=3,
                 source_vertices=len(original), topology_change=False,
                 status='clear_direct', attempts=[], requires_user_confirmation=False)
     if not initial:
-        return ClearCurveProposal(original.copy(), None, base)
-    if len(original) > 4096:
-        base.update(status='unresolved_review', requires_user_confirmation=True,
-                    reason='Ambiguous curve exceeds local surgery vertex budget; no decimation applied')
         return ClearCurveProposal(original.copy(), None, base)
     from scipy.sparse import vstack
     weights0 = _canonical_weights(original)

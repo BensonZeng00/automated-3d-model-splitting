@@ -230,3 +230,89 @@ artifact hash 和 subtree ids 为键的边界/组件上下文，不能绕过首�
 而不是追求 CAD 级无意义小数精度；但这只允许合并打印分辨率以下的等价计算，不允许放松
 水密、材料归属、最小壁厚、装配干涉、磁盘回读或原子发布门。在完成全部输出验证前仍不得
 宣称 Yoshi 或 Kamesennin 已发布。
+
+
+### 2026-09-23 recursive seam topology cache
+
+`prepare_layer_seams` and the subsequent child cut-reference pass previously rebuilt the same
+subtree-local face remap and walked the same boundary graph twice.  The shared helper now caches
+only connectivity-derived data (local faces, source vertex ids, and boundary cycles), keyed by an
+implementation fingerprint, the ordered subtree ids, selected global face ids, and a SHA-256 of
+the selected face connectivity.  Vertex positions are always read again after seam deformation,
+so the optimization cannot reuse stale geometry.  Any artifact whose connectivity or component
+face membership changes gets a cache miss.
+
+Subassembly component area calculation also now evaluates only the selected subtree triangles.
+The former implementation recalculated areas for every triangle in the complete artifact once per
+child, creating avoidable child-count multiplication without contributing any additional quality
+evidence.  Neither change skips the first standalone 3MF disk reload or any mesh, provenance,
+material, thickness, interference, or atomic-publication validation.
+
+The post-change Yoshi entrance test re-read and conformed all 728,002 faces, accepted the reviewed
+visible saddle trim, recognized 14 components, and rebuilt the recursive-minimal assembly tree.  It
+was manually stopped after 200 seconds while the earlier, global `build_component_cut_references`
+stage was still CPU-bound, before `prepare_layer_seams` was entered; consequently this run is an
+integration smoke test, not a publication claim or an end-to-end timing result.
+
+Follow-up control-flow analysis found that this was dead work for `recursive-minimal`: every later
+consumer selects `layer_child_context`, while the eagerly constructed global references are only
+read by non-recursive and `strongest-path` execution.  Yoshi magnifies the mistake because the dead
+pass builds local meshes and boundary cycles, vertex normal/conormal evidence, smoothed inward
+directions, and Python lookup dictionaries for every loop across all 14 components and 728,002
+faces.  The pipeline now decides the reference strategy once.  `recursive-minimal` logs an explicit
+skip and proceeds directly to its authoritative per-layer references; all modes that consume global
+references retain the original calculation unchanged.
+
+### Reviewed same-material physical partitions
+
+Color connectivity alone cannot distinguish two semantic parts that intentionally use the same
+filament, such as a white head surface and a white body surface joined in the source mesh.  It is
+also unsafe to guess that every narrow or sharp region is a detachable part: knees, fingers,
+clothing folds, and stylized creases produce the same local geometric signals.  The supported
+workflow therefore uses geometry to locate a candidate plane and six-view/image semantics to review
+its meaning, then records the reviewed plane in `--visual-semantics-json`:
+
+```json
+{
+  "physical_partitions": [{
+    "part": "P08",
+    "label": "head/body physical boundary",
+    "confidence": "HIGH",
+    "user_confirmed": true,
+    "source_views": ["front", "left", "right"],
+    "plane": {"origin": [0.0, 0.0, 0.0], "normal": [0.0, 0.0, 1.0]}
+  }]
+}
+```
+
+The coordinates above illustrate the schema and must come from the reviewed model boundary; they
+are not Yoshi-specific defaults.  Application is confidence-gated and rejects out-of-range parts,
+invalid planes, undersized sides, newly fragmented regions, and non-cycle-decomposable boundaries.  Accepted partitions
+retain every source face and the original material on both sides.  They run before body selection
+and assembly planning, so the two semantic regions become normal independent components and reduce
+later recursive boolean complexity without adding a model-name special case.
+
+The reviewed Yoshi configuration is stored in `example/yoshi-visual-semantics.json`.  Its P08 plane
+at Z=21.0 mm follows the visually confirmed head/body boundary.  A real `--recognize-only` run
+accepted the partition with 98 interface edges, preserved all 137,721 source faces and the white
+material, and produced sides of 76,077 and 61,644 faces.  Recognition consequently increased from
+14 to 15 components.  P08 already contained 4,479 disconnected same-material paint islands from
+dense-paint consolidation, so validation permits those pre-existing islands while proving that the
+reviewed cut adds at most one connected region; it does not incorrectly require each side to be a
+single shell.
+
+The first full partitioned run exposed a separate ordering defect on a 139,242-face subtree with
+8,725 boundary loops: expensive inward-axis and smoothing work ran before print-scale secondary
+loops were discarded.  Filtering now runs immediately after parent-contact classification, and only
+retained connector loops receive direction fields.  Loop area/span measurement was also batched in
+one NumPy pass; on the real 8,725-loop topology it measured 0.0526 s versus 1.2090 s for the former
+per-loop NumPy dispatch (22.96x), with maximum area difference `1.98e-11` and span difference
+`4.44e-16`.  The filter thresholds and retained-loop decisions are unchanged.
+
+The partitioned full run then passed the former 8,725-loop direction stall: filtering completed at
+549.550 s and retopology at 550.692 s.  It reached the single retained 5,390-vertex connector's
+parent-thickness backoff, where broad-phase candidate queries took 28-42 s per attempt, and the
+900-second integration limit expired during another safety measurement at 887.521 s.  Therefore the
+white head/body recognition split is confirmed, but the final 3MF is not yet published; the next
+independent performance target is reuse of thickness broad-phase candidates across cap backoff
+attempts, without relaxing the thickness gate.

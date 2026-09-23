@@ -1299,12 +1299,15 @@ def build_subassembly_component(
     global_faces = np.concatenate([components[int(index) - 1].global_faces for index in indices])
     group_faces = faces[global_faces]
     points = vertices[group_faces.reshape(-1)]
-    areas = triangle_areas(vertices, faces)
+    # Computing every source-triangle area for each recursive subtree made
+    # preparation quadratic in the number of children.  Only selected faces
+    # contribute to this synthetic component.
+    selected_areas = triangle_areas(vertices, group_faces)
     return Component(
         color_code=color_code,
         global_faces=global_faces,
         face_count=int(len(global_faces)),
-        area=float(areas[global_faces].sum()),
+        area=float(selected_areas.sum()),
         bbox_min=points.min(axis=0),
         bbox_max=points.max(axis=0),
         center=points.mean(axis=0),
@@ -1363,7 +1366,7 @@ def build_layer_child_cut_references(
     interface_geometry: str = "boundary-extrusion",
 ) -> tuple[list[dict], dict[int, Component], dict[int, list[int]]]:
     context_started_at = time.perf_counter()
-    from .layer_seam_planning import prepare_layer_seams
+    from .layer_seam_planning import prepare_layer_seams, layer_child_boundary_topology
     vertices, faces, interface_retopology = prepare_layer_seams(
         vertices, faces, components, parent_index, direct_child_indices,
         assembly_children, boundary_neighbor_lookup, interface_retopology)
@@ -1460,12 +1463,10 @@ def build_layer_child_cut_references(
         # junction the root patch boundary contains an internal sibling arc;
         # using that arc as part of the parent socket selects different closed
         # loops on the two sides of the interface.
-        local_vertices, local_faces, _global_to_local, global_vertex_ids = build_local_mesh(
-            vertices,
-            faces,
-            union_component,
+        local_faces, global_vertex_ids, loops = layer_child_boundary_topology(
+            faces, components, subtree, interface_retopology
         )
-        loops = boundary_loops(local_faces)
+        local_vertices = np.asarray(vertices)[global_vertex_ids]
         runtime_log(
             "递归预计算",
             "layer_child_boundary_done",
@@ -1491,6 +1492,19 @@ def build_layer_child_cut_references(
             contact = boundary_loop_parent_contact(loop, global_vertex_ids, boundary_neighbor_lookup, parent_index, current_layer_component_set)
             if int(contact["parent_edges"]) < 3:
                 continue
+            selected_loop_records.append(
+                {
+                    "loop_index": int(loop_index),
+                    "loop": [int(value) for value in loop],
+                    "contact": contact,
+                }
+            )
+
+        from .micro_interfaces import filter_micro_interface_loops
+        selected_loop_records, _micro_loops = filter_micro_interface_loops(
+            local_vertices, selected_loop_records, part_index=child_index)
+        for record in selected_loop_records:
+            loop = record["loop"]
             loop_global = [int(global_vertex_ids[i]) for i in loop]
             # A consolidated paint component can cover surfaces with opposite
             # orientations.  Resolve the sign independently at every source
@@ -1509,10 +1523,8 @@ def build_layer_child_cut_references(
                 interface_inward,
                 loop_points=local_vertices[np.asarray(loop, dtype=np.int64)],
             )
-            selected_loop_records.append(
+            record.update(
                 {
-                    "loop_index": int(loop_index),
-                    "loop": [int(value) for value in loop],
                     "global_loop": loop_global,
                     "interface_inward": interface_inward,
                     "loop_directions": loop_directions,
@@ -1529,13 +1541,8 @@ def build_layer_child_cut_references(
                         **direction_record,
                         "surface_orientation": surface_direction_record,
                     },
-                    "contact": contact,
                 }
             )
-
-        from .micro_interfaces import filter_micro_interface_loops
-        selected_loop_records, _micro_loops = filter_micro_interface_loops(
-            local_vertices, selected_loop_records, part_index=child_index)
         planned_vertices = local_vertices
         _retopology_records = []
         if cap_planning_enabled and selected_loop_records:

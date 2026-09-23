@@ -13,7 +13,11 @@ load_core_dependencies()
 from split3mf.domain import PlanarArcRetopologyConfig, PlanarArcRetopologyContext
 from split3mf.interface_retopology import InterfaceRetopologyService
 from split3mf.layer_surface_plan import build_layer_surface_plan
-from split3mf.layer_seam_planning import activate_layer_seams, prepare_layer_seams
+from split3mf.layer_seam_planning import (
+    activate_layer_seams,
+    layer_child_boundary_topology,
+    prepare_layer_seams,
+)
 from split3mf.common import Component
 from split3mf.assembly import component_boundary_neighbor_lookup
 from split3mf.shared_seam_topology import classify_shared_seams
@@ -182,6 +186,26 @@ class SharedLayerSurfaceTests(unittest.TestCase):
                 child_points, [loop], np.arange(len(points)), child_context, child_faces[index*2:index*2+2])
             np.testing.assert_array_equal(actual[loop], parent_points[loop])
             self.assertEqual(records[0]['shared_layer_surface']['shared_edge_count'],1)
+
+    def test_subtree_boundary_topology_is_reused_and_connectivity_invalidates_it(self):
+        points, faces, _ = fixture()
+        local = trimesh.Trimesh(points, faces, process=False)
+        component = Component(
+            '1', np.arange(len(faces)), len(faces), float(local.area),
+            local.bounds[0], local.bounds[1], local.centroid,
+        )
+        context = self.context()
+        with patch('split3mf.mesh.boundary_loops', wraps=boundary_loops) as walk:
+            first = layer_child_boundary_topology(faces, [component], [1], context)
+            second = layer_child_boundary_topology(faces.copy(), [component], [1], context)
+            self.assertIs(first, second)
+            self.assertEqual(walk.call_count, 1)
+
+            changed = faces.copy()
+            changed[0] = changed[0, ::-1]
+            third = layer_child_boundary_topology(changed, [component], [1], context)
+            self.assertIsNot(first, third)
+            self.assertEqual(walk.call_count, 2)
 
 
 if __name__ == '__main__':

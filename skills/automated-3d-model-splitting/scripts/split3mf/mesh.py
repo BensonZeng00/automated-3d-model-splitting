@@ -449,7 +449,14 @@ def orient_mesh_faces_consistently(mesh: trimesh.Trimesh) -> dict:
 def build_local_mesh(
     vertices: np.ndarray, faces: np.ndarray, component: Component
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    global_face_array = faces[component.global_faces]
+    return build_local_mesh_from_faces(vertices, faces, component.global_faces)
+
+
+def build_local_mesh_from_faces(
+    vertices: np.ndarray, faces: np.ndarray, global_face_ids: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Extract a local indexed mesh for an arbitrary global face selection."""
+    global_face_array = faces[np.asarray(global_face_ids, dtype=np.int64)]
     global_vertex_ids = np.unique(global_face_array.reshape(-1))
     local_vertices = vertices[global_vertex_ids].copy()
     # Source vertex ids are dense package indices.  A NumPy lookup avoids one

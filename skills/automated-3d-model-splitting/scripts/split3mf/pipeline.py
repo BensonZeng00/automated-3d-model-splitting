@@ -30,6 +30,15 @@ from .stage_cache import (
     normalized_run_arguments,
     sha256_file,
 )
+from .semantic_partition import apply_semantic_partitions
+
+
+def uses_layer_child_cut_references(assembly_mode: str, tree_strategy: str) -> bool:
+    """Whether recursive layer planning is the sole cut-reference consumer."""
+    return (
+        str(assembly_mode) in {"tree", "flat"}
+        and str(tree_strategy) == "recursive-minimal"
+    )
 
 
 class SplitPipeline:
@@ -337,6 +346,28 @@ class SplitPipeline:
         components, _ = summarize_components(
             vertices, faces, recognition_colors, groups, 1,
             display_colors=recognition_token_colors)
+        visual_semantics = load_visual_semantics(
+            Path(args.visual_semantics_json).expanduser()
+            if args.visual_semantics_json else None
+        )
+        visual_semantic_min_confidence = confidence_score(
+            args.visual_semantic_min_confidence, default=0.65
+        )
+        components, semantic_partition_records = apply_semantic_partitions(
+            vertices,
+            faces,
+            components,
+            visual_semantics.get("physical_partitions", []),
+            visual_semantic_min_confidence,
+        )
+        if visual_semantics.get("physical_partitions"):
+            runtime_log(
+                "识别",
+                "visual_semantic_physical_partitions_reviewed",
+                "已审核同材料物理分割平面并应用通过安全门的拆分",
+                applied=semantic_partition_records["applied"],
+                rejected=semantic_partition_records["rejected"],
+            )
         source_region_classifications = list(review_decisions.values())
         if not components:
             raise SystemExit("No source components found")
@@ -432,8 +463,6 @@ class SplitPipeline:
             ),
             excluded_separator_candidates=[f"P{index:02d}" for index in sorted(excluded_auto_body_indices)],
         )
-        visual_semantics = load_visual_semantics(Path(args.visual_semantics_json).expanduser() if args.visual_semantics_json else None)
-        visual_semantic_min_confidence = confidence_score(args.visual_semantic_min_confidence, default=0.65)
         components, interface_retreat_records = apply_visual_interface_retreats(
             vertices,
             faces,
@@ -833,27 +862,41 @@ class SplitPipeline:
             semantic_direction_overrides["applied"].append(applied)
             inward_override_records.append({**applied, "overridden": True})
 
-        runtime_log(
-            "几何",
-            "cut_reference_start",
-            "开始建立部件切割边界与方向引用",
-            components=int(len(components)),
+        layer_cut_references_only = uses_layer_child_cut_references(
+            args.assembly_mode, args.assembly_tree_strategy
         )
-        all_cut_refs = build_component_cut_references(
-            vertices,
-            faces,
-            components,
-            model_center,
-            inward_overrides,
-            fit_clearance_by_part=effective_fit_clearance_by_part,
-            clearance_mode=args.clearance_mode,
-        )
-        runtime_log(
-            "几何",
-            "cut_reference_done",
-            "切割边界与方向引用建立完成",
-            cut_references=int(len(all_cut_refs)),
-        )
+        if layer_cut_references_only:
+            all_cut_refs = []
+            runtime_log(
+                "几何",
+                "global_cut_references_skipped",
+                "递归最小装配将按层建立切割引用，跳过无人消费的全局预计算",
+                components=int(len(components)),
+                assembly_mode=str(args.assembly_mode),
+                assembly_tree_strategy=str(args.assembly_tree_strategy),
+            )
+        else:
+            runtime_log(
+                "几何",
+                "cut_reference_start",
+                "开始建立部件切割边界与方向引用",
+                components=int(len(components)),
+            )
+            all_cut_refs = build_component_cut_references(
+                vertices,
+                faces,
+                components,
+                model_center,
+                inward_overrides,
+                fit_clearance_by_part=effective_fit_clearance_by_part,
+                clearance_mode=args.clearance_mode,
+            )
+            runtime_log(
+                "几何",
+                "cut_reference_done",
+                "切割边界与方向引用建立完成",
+                cut_references=int(len(all_cut_refs)),
+            )
         refs_by_component_index: dict[int, list[dict]] = collections.defaultdict(list)
         for ref in all_cut_refs:
             ref["processing_mode"] = "inward"
@@ -909,7 +952,7 @@ class SplitPipeline:
             return layer_child_context_cache[parent_index]
 
         def direct_child_refs(parent_index: int) -> list[dict]:
-            if recursive_assembly_enabled and args.assembly_tree_strategy == "recursive-minimal":
+            if layer_cut_references_only:
                 refs, _union_by_child, _subtree_by_child = layer_child_context(parent_index)
                 results = []
                 for ref in refs:

@@ -11,6 +11,8 @@ import numpy as np
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
+from split3mf.common import load_core_dependencies
+load_core_dependencies()
 from split3mf.cli import build_parser
 from split3mf.recursive_preflight import (
     FullTreePreflightError,
@@ -20,6 +22,7 @@ from split3mf.stage_cache import RecursiveStageCache, normalized_run_arguments
 from split3mf.common import Component
 from split3mf.explicit_merge import merge_body_components, parse_part_group
 from split3mf.cap_template import fit_affine_cap_inside_parent
+from split3mf.pipeline import uses_layer_child_cut_references
 
 
 class _Decision:
@@ -34,6 +37,12 @@ class _Decision:
 
 
 class PipelineOptimizationTests(unittest.TestCase):
+    def test_only_recursive_minimal_uses_exclusive_layer_cut_references(self) -> None:
+        self.assertTrue(uses_layer_child_cut_references("tree", "recursive-minimal"))
+        self.assertTrue(uses_layer_child_cut_references("flat", "recursive-minimal"))
+        self.assertFalse(uses_layer_child_cut_references("legacy-flat", "recursive-minimal"))
+        self.assertFalse(uses_layer_child_cut_references("tree", "strongest-path"))
+
     def test_affine_cap_backoff_can_converge_after_four_measurements(self) -> None:
         template = np.array(
             [

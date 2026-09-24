@@ -48,6 +48,16 @@ PARENT_THICKNESS_CLEARANCE_MM = 0.05
 # curved source rim.  Keep enough depth beyond the 0.60 mm lead-in for a
 # continuous printable skin instead of forcing a folded local-offset cap.
 MINIMUM_COHERENT_PLANAR_FLOOR_DEPTH_MM = 0.08
+# Intersections this close to a seam probe origin belong to the sampled
+# exterior surface neighborhood, not to the opposite wall.  Keep this
+# classification tolerance tied to the geometry policy: a hit that cannot
+# leave both the required clearance and the minimum coherent floor is still
+# inside the unusable local seam band.  This avoids an independent magic
+# threshold while keeping farther opposing walls as real obstacles.
+PARENT_SURFACE_HIT_TOLERANCE_MM = (
+    PARENT_THICKNESS_CLEARANCE_MM
+    + MINIMUM_COHERENT_PLANAR_FLOOR_DEPTH_MM
+)
 MAXIMUM_INWARD_CAP_PLANARITY_ERROR_MM = 0.05
 MINIMUM_INWARD_CAP_NORMAL_COSINE = 0.90
 # Compatibility alias for older call sites and reports. Geometry may go below

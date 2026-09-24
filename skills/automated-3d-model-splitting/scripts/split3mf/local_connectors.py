@@ -649,6 +649,7 @@ class LocalConnectorSpec:
     compact_peg_enabled: bool = True
     slope_validation_mode: str = "strict"
     surface_validation_mode: str = "strict"
+    visible_interface_simplification_tolerance: float = 0.0
 
     def __post_init__(self) -> None:
         positive = {
@@ -678,6 +679,9 @@ class LocalConnectorSpec:
             "nominal_engagement_depth_mm": self.nominal_engagement_depth_mm,
             "backing_safety_limit_mm": self.backing_safety_limit_mm,
             "total_safety_limit_mm": self.total_safety_limit_mm,
+            "visible_interface_simplification_tolerance": (
+                self.visible_interface_simplification_tolerance
+            ),
         }
         for name, value in nonnegative.items():
             if float(value) < 0.0:
@@ -1025,11 +1029,14 @@ def plan_local_connector(
         full_backing_taper_reserved = selected_dimensions is not None
         if selected_dimensions is None:
             if backing_reserve > 1e-9:
-                raise ValueError(
-                    "interface is too small for a continuous full-depth 45-degree "
-                    "backing wedge"
-                )
-            selected_dimensions = select_dimensions(require_backing_reserve=False)
+                # Load-bearing backing has priority over an optional compact
+                # peg.  On a narrow interface, removing the peg preserves the
+                # full source boundary and avoids forcing a fixed 45-degree
+                # lateral reserve that the measured footprint cannot supply.
+                compact_peg_enabled = False
+                selected_dimensions = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+            else:
+                selected_dimensions = select_dimensions(require_backing_reserve=False)
         if selected_dimensions is None:
             raise ValueError("interface is too small for a protected local connector mouth")
     else:
@@ -1047,7 +1054,13 @@ def plan_local_connector(
         throat_length,
         mouth_chamfer,
     ) = selected_dimensions
-    socket_depth = float(spec.engagement_depth_mm + spec.socket_bottom_clearance_mm)
+    effective_engagement_depth = (
+        float(spec.engagement_depth_mm) if compact_peg_enabled else 0.0
+    )
+    socket_depth = (
+        float(effective_engagement_depth + spec.socket_bottom_clearance_mm)
+        if compact_peg_enabled else 0.0
+    )
 
     def ring(width: float, length: float, radius: float, depth: float) -> np.ndarray:
         xy = _rounded_rectangle_xy(width, length, radius, samples)
@@ -1072,7 +1085,7 @@ def plan_local_connector(
         "peg_width_mm": peg_width,
         "peg_length_mm": peg_length,
         "corner_radius_mm": corner_radius,
-        "engagement_depth_mm": float(spec.engagement_depth_mm),
+        "engagement_depth_mm": effective_engagement_depth,
         "total_clearance_mm": float(spec.total_clearance_mm),
         "per_side_clearance_mm": per_side_clearance,
         "socket_depth_mm": socket_depth,
@@ -1110,9 +1123,12 @@ def plan_local_connector(
         ),
         "backing_safety_limit_mm": float(spec.backing_safety_limit_mm),
         "total_safety_limit_mm": float(spec.total_safety_limit_mm),
-        "compact_peg_enabled": bool(spec.compact_peg_enabled),
+        "compact_peg_enabled": bool(compact_peg_enabled),
         "backing_slope_validation_mode": str(spec.slope_validation_mode),
         "backing_surface_validation_mode": str(spec.surface_validation_mode),
+        "visible_interface_simplification_tolerance_mm": float(
+            spec.visible_interface_simplification_tolerance
+        ),
         "full_backing_taper_reserved": bool(full_backing_taper_reserved),
         "peg_top": ring(peg_width, peg_length, corner_radius, 0.0),
         "peg_straight": ring(

@@ -4,6 +4,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 import numpy as np
@@ -20,19 +21,159 @@ from split3mf.cli import build_parser
 from split3mf.domain import PlanarArcRetopologyConfig, PlanarArcRetopologyContext
 from split3mf.debug_export import export_retopology_failure_diagnostics
 from split3mf.planar_arc import PlanarArcError
+from split3mf.planar_arc import CurveClarityRequired
 from split3mf.interface_retopology import (
     InterfaceRetopologyService,
     _directed_edge_topology_issues,
     _repair_flipped_boundary_ears,
+    _reliable_source_normal_reversal_mask,
     _locally_inverted_face_mask,
     _surface_band_deformation,
+    _select_visible_boundary_target,
+    generated_geometry_boundary_vertices,
     _triangle_shape_quality,
     _untangle_interior_surface_vertices,
+    _visual_displacement_advisory,
 )
+from split3mf.surface_quality import face_edge_keys as _face_edge_keys
 from split3mf.surface_quality import sparse_local_inversion_audit
 
 
 class InterfaceRetopologyTests(unittest.TestCase):
+    def test_reversal_broad_phase_rejects_unstable_source_normal(self) -> None:
+        mask = _reliable_source_normal_reversal_mask(
+            source_normals=np.asarray([[0.0, 0.0, 1e-16], [0.0, 0.0, 1.0]]),
+            result_normals=np.asarray([[0.0, 0.0, -1e16], [0.0, 0.0, -1.0]]),
+            source_lengths=np.asarray([1e-16, 1.0]),
+            result_lengths=np.asarray([1e16, 1.0]),
+            source_shape_quality=np.asarray([1.0, 1.0]),
+        )
+
+        np.testing.assert_array_equal(mask, np.asarray([False, True]))
+
+    def test_advisory_preserves_source_when_planar_fit_crosses(self) -> None:
+        points = np.asarray([[0., 0., 0.], [1., 1., .2],
+                             [0., 1., 0.], [1., 0., .2]])
+        proposal = type('Proposal', (), {'record': {
+            'projected_crossings_before': 1, 'status': 'proposed'}})()
+        failure = CurveClarityRequired(points, points, proposal,
+                                       (np.zeros(3), np.eye(3)[0],
+                                        np.eye(3)[1], np.eye(3)[2]))
+        context = PlanarArcRetopologyContext(
+            PlanarArcRetopologyConfig(surface_band_validation='advisory'))
+        with patch(
+                'split3mf.interface_retopology.build_planar_arc_boundary',
+                side_effect=failure):
+            target, record = InterfaceRetopologyService.retopologize_loop(
+                points, np.arange(4), context)
+        np.testing.assert_array_equal(target, points)
+        self.assertEqual(record['status'], 'source_curve_preserved')
+        self.assertTrue(record['ambiguous_planar_fit_skipped'])
+
+    def test_strict_preserves_3d_disjoint_projected_crossing(self) -> None:
+        # The source itself has a true 3-D crossing, but clarity is reporting
+        # the fitted target.  Classification must therefore use the target,
+        # rather than unrelated source-ring micro-folds.
+        source = np.asarray([[0., 0., 0.], [1., 1., 0.],
+                             [0., 1., 0.], [1., 0., 0.]])
+        target = source.copy()
+        target[2:, 2] = 2.0
+        proposal = type('Proposal', (), {'record': {
+            'projected_crossings_before': 1, 'status': 'proposed'}})()
+        failure = CurveClarityRequired(source, target, proposal,
+                                       (np.zeros(3), np.eye(3)[0],
+                                        np.eye(3)[1], np.eye(3)[2]))
+        context = PlanarArcRetopologyContext(PlanarArcRetopologyConfig())
+        with patch(
+                'split3mf.interface_retopology.build_planar_arc_boundary',
+                side_effect=failure):
+            target, record = InterfaceRetopologyService.retopologize_loop(
+                source, np.arange(4), context)
+
+        np.testing.assert_array_equal(target, source)
+        self.assertEqual(record['status'], 'source_curve_preserved')
+        self.assertTrue(record['projected_crossings_are_3d_disjoint'])
+        self.assertAlmostEqual(
+            record['minimum_projected_crossing_3d_separation_mm'], 2.0)
+
+    def test_large_target_preserves_visible_rim_and_reaches_hidden_planner(self) -> None:
+        source = np.asarray(
+            [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0]],
+            dtype=np.float64,
+        )
+        fitted = source + np.asarray([0.0, 0.0, 2.0])
+
+        visible, record = _select_visible_boundary_target(
+            source, fitted, 0.5, 0.225
+        )
+        planned = generated_geometry_boundary_vertices(
+            visible, [[0, 1, 2]], [record]
+        )
+
+        np.testing.assert_allclose(visible, source)
+        np.testing.assert_allclose(planned, fitted)
+        self.assertTrue(record["large_displacement_source_boundary_preserved"])
+        self.assertEqual(record["maximum_visible_boundary_offset_mm"], 0.225)
+        self.assertEqual(
+            record["large_displacement_strategy"],
+            "generated_inward_wall_from_immutable_source_ring",
+        )
+
+    def test_cathead_scale_target_uses_hidden_ring_without_widening_band(self) -> None:
+        source = np.zeros((4, 3), dtype=np.float64)
+        fitted = source.copy()
+        fitted[:, 0] = 5.975
+
+        visible, record = _select_visible_boundary_target(
+            source,
+            fitted,
+            visible_band_mm=3.0,
+            maximum_visible_offset_mm=1.35,
+        )
+
+        np.testing.assert_array_equal(visible, source)
+        self.assertTrue(record["large_displacement_source_boundary_preserved"])
+        self.assertAlmostEqual(
+            record["requested_maximum_target_displacement_mm"], 5.975
+        )
+
+    def test_visible_target_is_used_within_safe_band_fraction(self) -> None:
+        source = np.zeros((3, 3), dtype=np.float64)
+        fitted = source.copy()
+        fitted[:, 1] = 1.35
+
+        visible, record = _select_visible_boundary_target(
+            source,
+            fitted,
+            visible_band_mm=3.0,
+            maximum_visible_offset_mm=1.35,
+        )
+
+        np.testing.assert_allclose(visible, fitted)
+        self.assertFalse(record["large_displacement_source_boundary_preserved"])
+
+    def test_visual_advisory_uses_physical_displacement_not_coverage(self) -> None:
+        policy = PlanarArcRetopologyConfig().smoothing_policy
+        broad_submillimeter = np.full(100_000, 0.4, dtype=np.float64)
+
+        strict, _maximum, _p95 = _visual_displacement_advisory(
+            "strict", broad_submillimeter, policy
+        )
+        advisory, maximum, p95 = _visual_displacement_advisory(
+            "advisory", broad_submillimeter, policy
+        )
+        excessive_displacement = policy.maximum_displacement_mm + 0.025
+        visible_drift, drift_maximum, _drift_p95 = _visual_displacement_advisory(
+            "advisory", np.r_[broad_submillimeter, excessive_displacement], policy
+        )
+
+        self.assertFalse(strict)
+        self.assertTrue(advisory)
+        self.assertAlmostEqual(maximum, 0.4)
+        self.assertAlmostEqual(p95, 0.4)
+        self.assertFalse(visible_drift)
+        self.assertAlmostEqual(drift_maximum, excessive_displacement)
+
     def test_user_reviewed_surface_band_lowers_only_sparse_angle_floor(self) -> None:
         face_count = 36402
         faces = np.arange(face_count * 3, dtype=np.int64).reshape((-1, 3))
@@ -231,6 +372,44 @@ class InterfaceRetopologyTests(unittest.TestCase):
         )
         self.assertTrue(np.all(np.einsum("ij,ij->i", source_normals, result_normals) > 0.0))
 
+    def test_unchanged_large_band_skips_per_face_topology_narrow_phase(self) -> None:
+        strip_count = 10_000
+        x = np.arange(strip_count + 1, dtype=np.float64)
+        source = np.column_stack(
+            (
+                np.repeat(x, 2),
+                np.tile(np.asarray([0.0, 1.0]), strip_count + 1),
+                np.zeros(2 * (strip_count + 1), dtype=np.float64),
+            )
+        )
+        faces = np.asarray(
+            [
+                face
+                for strip_index in range(strip_count)
+                for face in (
+                    (2 * strip_index, 2 * strip_index + 2, 2 * strip_index + 1),
+                    (2 * strip_index + 1, 2 * strip_index + 2, 2 * strip_index + 3),
+                )
+            ],
+            dtype=np.int64,
+        )
+
+        with patch(
+            "split3mf.interface_retopology._face_edge_keys",
+            wraps=_face_edge_keys,
+        ) as topology_narrow_phase:
+            repaired, repair_count = _repair_flipped_boundary_ears(
+                source,
+                source.copy(),
+                faces,
+                np.arange(len(source), dtype=np.int64),
+                candidate_face_mask=np.ones(len(faces), dtype=bool),
+            )
+
+        self.assertEqual(repair_count, 0)
+        np.testing.assert_array_equal(repaired, faces)
+        topology_narrow_phase.assert_not_called()
+
     def test_dense_independent_boundary_ears_converge_past_legacy_cap(self) -> None:
         source_patches = []
         result_patches = []
@@ -277,6 +456,38 @@ class InterfaceRetopologyTests(unittest.TestCase):
         self.assertEqual(args.boundary_target_samples, 384)
         self.assertEqual(args.boundary_smooth_passes, 28)
         self.assertEqual(args.boundary_retopology_band_mm, 3.0)
+        self.assertEqual(args.maximum_boundary_displacement_mm, 10.0)
+        self.assertEqual(args.seam_smoothing_profile, "print-balanced")
+        config = PlanarArcRetopologyConfig.from_namespace(args)
+        self.assertEqual(config.smoothing_policy.profile, "print-balanced")
+        self.assertEqual(config.smoothing_policy.maximum_displacement_mm, 10.0)
+        self.assertEqual(config.smoothing_policy.p95_displacement_mm, 10.0)
+        self.assertEqual(config.smoothing_policy.maximum_affected_area_ratio, 0.01)
+        self.assertEqual(config.smoothing_policy.maximum_topology_layers, 8)
+        self.assertEqual(config.smoothing_policy.maximum_introduced_reversed_ratio, 0.001)
+
+        custom = PlanarArcRetopologyConfig.from_namespace(parser.parse_args([
+            "--input", "placeholder.3mf",
+            "--maximum-boundary-displacement-mm", "6.25",
+        ]))
+        self.assertEqual(custom.smoothing_policy.maximum_displacement_mm, 6.25)
+        self.assertEqual(custom.smoothing_policy.p95_displacement_mm, 6.25)
+
+    def test_conservative_and_smooth_profiles_have_ordered_budgets(self) -> None:
+        parser = build_parser()
+        conservative = PlanarArcRetopologyConfig.from_namespace(parser.parse_args([
+            "--input", "placeholder.3mf", "--seam-smoothing-profile", "source-conservative"])
+        ).smoothing_policy
+        smooth = PlanarArcRetopologyConfig.from_namespace(parser.parse_args([
+            "--input", "placeholder.3mf", "--seam-smoothing-profile", "print-smooth"])
+        ).smoothing_policy
+        self.assertEqual(conservative.maximum_displacement_mm, smooth.maximum_displacement_mm)
+        self.assertEqual(conservative.maximum_affected_area_ratio, smooth.maximum_affected_area_ratio)
+        self.assertLess(
+            conservative.maximum_introduced_reversed_ratio,
+            smooth.maximum_introduced_reversed_ratio,
+        )
+        self.assertLess(conservative.maximum_edge_stretch_ratio, smooth.maximum_edge_stretch_ratio)
 
     def test_user_reviewed_surface_band_can_use_sixty_percent_of_real_band(self) -> None:
         parser = build_parser()

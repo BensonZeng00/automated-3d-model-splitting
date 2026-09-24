@@ -513,13 +513,45 @@ def topology_safe_planar_inset_ring(
     try:
         import manifold3d
 
-        section = manifold3d.CrossSection(
-            [positive],
-            manifold3d.FillRule.Positive,
-        )
         simplify_tolerance = max(
             1e-7,
             min(0.005, distance * 0.0015),
+        )
+        from .print_tolerance import current as current_print_tolerance
+        input_simplify_tolerance = min(
+            simplify_tolerance,
+            max(
+                1e-7,
+                float(current_print_tolerance().surface_distance_mm) * 0.001,
+            ),
+        )
+        # The visible source rim remains immutable and is still used by the
+        # outer annulus.  The hidden planar cross-section, however, often has
+        # tens of thousands of nearly collinear paint-expanded samples.  Feed
+        # Clipper its tolerance-equivalent contour before offsetting; otherwise
+        # every binary-search probe repeats the same oversized polygon solve
+        # only to simplify the result afterwards.
+        section_cache_key = "_backing_inset_simplified_section"
+        section = plan.get(section_cache_key)
+        if section is None:
+            section = manifold3d.CrossSection(
+                [positive],
+                manifold3d.FillRule.Positive,
+            ).simplify(input_simplify_tolerance)
+            plan[section_cache_key] = section
+            plan["backing_inset_section_cache_builds"] = 1
+            plan["backing_inset_section_cache_hits"] = 0
+        else:
+            plan["backing_inset_section_cache_hits"] = int(
+                plan.get("backing_inset_section_cache_hits", 0)
+            ) + 1
+        plan["backing_inset_input_vertices"] = int(len(positive))
+        plan["backing_inset_input_simplify_tolerance_mm"] = float(
+            input_simplify_tolerance
+        )
+        simplified_polygons = section.to_polygons()
+        plan["backing_inset_simplified_input_vertices"] = int(
+            sum(len(polygon) for polygon in simplified_polygons)
         )
         inset = section.offset(
             -distance,
@@ -648,7 +680,16 @@ def printable_backing_rings(
         low = 0.0
         high = float(taper_depth)
         best_lead: np.ndarray | None = None
-        for _ in range(24):
+        # Stop at the active physical surface tolerance.  Chasing binary-search
+        # differences far below FDM and exported-coordinate resolution only
+        # repeats the complete polygon offset without changing printable output.
+        from .print_tolerance import current as current_print_tolerance
+        depth_tolerance = max(
+            0.01,
+            min(0.05, float(current_print_tolerance().surface_distance_mm)),
+        )
+        iteration_count = 0
+        while high - low > depth_tolerance and iteration_count < 16:
             middle = (low + high) * 0.5
             candidate = topology_safe_planar_inset_ring(
                 boundary,
@@ -660,6 +701,9 @@ def printable_backing_rings(
             else:
                 low = middle
                 best_lead = candidate
+            iteration_count += 1
+        plan["backing_inset_search_iterations"] = int(iteration_count)
+        plan["backing_inset_search_tolerance_mm"] = float(depth_tolerance)
         if best_lead is None or low < 0.05:
             if _user_reviewed_shallow_minimal_closure_is_eligible(
                 plan,
@@ -684,6 +728,7 @@ def printable_backing_rings(
                     requested_taper_depth
                 )
                 plan["backing_taper_shape_backoff_applied"] = False
+                plan.pop("_backing_inset_simplified_section", None)
                 return (
                     shallow_floor.copy(),
                     shallow_floor.copy(),
@@ -823,6 +868,10 @@ def printable_backing_rings(
     plan["backing_floor_ring_vertices"] = int(len(lead))
     plan["backing_taper_requested_mm"] = float(requested_taper_depth)
     plan["backing_taper_shape_backoff_applied"] = bool(shape_backoff_applied)
+    # The manifold object is an implementation cache, not report data.  Drop
+    # it before the plan leaves this geometry service so JSON/report callers
+    # continue to receive a purely serializable record.
+    plan.pop("_backing_inset_simplified_section", None)
     return lead, backing, float(taper_depth)
 
 

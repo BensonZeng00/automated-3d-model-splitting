@@ -9,7 +9,7 @@
 `split3mf.pipeline.SplitPipeline` owns one complete split run. It coordinates services in this order:
 
 1. read and normalize the source project;
-2. recognize connected painted components, apply the <=2 mm adjacent merge, screen long strips regardless of face count, auto-merge remaining noise-sized regions, and review long strips plus remaining sub-threshold regions until source-matched user decisions are supplied;
+2. recognize connected painted source regions, review <=100-face noise candidates, 101–999-face small-region candidates, and long strips, then preserve every confirmed noise/part/uncertain region for normal interface planning;
 3. select the root body from geometry and separator evidence;
 4. infer the recursive-minimal assembly tree and deterministic depth-first execution steps;
 5. plan safe inward directions and adaptive caps;
@@ -79,7 +79,7 @@ Prefer these explicit records when data crosses stage boundaries. Do not introdu
 - `ThreeMFReader` reads vendor packages and resolves build/component transforms.
 - `VendorPaintDecoder` restores composite `paint_color` subdivision streams.
 - `PartRecognizer` groups material-equivalent, edge-connected exterior paint.
-- `small_component_review.py` excludes auto-noise regions at or below the configured face threshold, renders deterministic whole-model and local-zoom PNG sheets for the remaining review candidates, writes the review manifest/template, and validates complete user-confirmed decisions. It does not call an image model itself; the Codex skill inspects the images and asks the user.
+- `source_region_review.py` renders deterministic whole-model and local-zoom PNG sheets for every face-count or long-strip candidate, writes the classification manifest/template, and validates complete user-confirmed noise/part/uncertain decisions without changing source geometry.
 - `explicit_merge.py` applies user-authorized recognition-space body merges,
   preserves the first member as the body identity, recomputes component
   geometry, and records the original-to-effective index mapping. Per-face
@@ -89,7 +89,7 @@ Prefer these explicit records when data crosses stage boundaries. Do not introdu
 - `InwardDirectionPlanner` creates locally safe, smoothed inward directions.
 - `HiddenInterfacePlanner` proposes deterministic parent-interior direction fields only when the baseline interface is thinner than the 0.45 mm load-bearing minimum. `inward.py` remains responsible for passing each candidate through the complete cap, reserve, and authoritative thickness gates before adoption.
 - `GuidedInternalCutPlanner` converts a high-confidence image-guided internal-section constraint into a symmetric child/socket `CapDecision`. It localizes entry inset to measured thin arcs, ranks bounded parent-interior direction and plane-shift candidates, locks the already-retopologized visible rim, and emits the source-id fit ring and diagnostics consumed unchanged by both sides.
-- `InterfaceRetopologyService` owns the actual shared visible seam and its topology-connected C2 surface-band deformation. It moves child and parent seam vertices to one canonical planar-arc target, preserves vertices outside the band, and blocks degenerate, topologically inconsistent, mismatched, excessively stretched, or materially clustered fold results. On a large band only, at most 0.05% nondegenerate source-normal outliers may remain advisory when each result angle is at least 3 degrees and edge-connected clusters contain at most two faces.
+- `InterfaceRetopologyService` owns the actual shared visible seam and its topology-connected C2 surface-band deformation. It moves child and parent seam vertices to one canonical planar-arc target, preserves vertices outside the band, and blocks degenerate, topologically inconsistent, mismatched, excessively stretched, or materially clustered fold results. Boundary-ear repair first performs one vectorized source/result-normal broad phase, then runs topology-aware local repair only for reversed candidates; the complete vectorized quality audit remains authoritative. On a large band only, at most 0.05% nondegenerate source-normal outliers may remain advisory when each result angle is at least 3 degrees and edge-connected clusters contain at most two faces.
 - `ConnectorSurfaceService` regularizes the hidden 45-degree annulus. Index-aligned rings use complete intermediate rings; unequal rings use conforming internal refinement followed by bounded convex-quad edge flips that break inherited radial spoke chains without moving either boundary. Both shared rim rings remain immutable after visible retopology.
 - `LocalConnectorPlanningService` owns immutable manufacturing/depth policy,
   rim and footprint safety selection, and the pure priority allocator that
@@ -126,14 +126,31 @@ Services should be stateless where practical. Inject or replace collaborators th
 
 ## Performance invariants
 
+- Vendor paint-selector expansion is required to recover the actual material
+  boundary: one source triangle may contain multiple painted leaf regions, so
+  skipping conformance would change part ownership.  The expanded mesh is an
+  immutable recognition/source representation, not a license to run unrelated
+  global repair.  Later work must remain interface-local and use acceleration
+  structures rather than repeatedly scanning every expanded face.
+- Physical search convergence uses the active print tolerance and a bounded
+  iteration guard; it must not chase sub-micron numerical differences that
+  cannot change millimetre-scale FDM output.  Accepted geometry still receives
+  the complete topology and safety audit.
+- Small-impact completion applies only to generated/interface-local geometry.
+  Source faces and material regions remain preserved regardless of whether
+  their affected ratio is below one percent; they may be diagnosed or bypassed
+  when irrelevant to an interface, never silently deleted.
+
 - `boundary_correspondence.py` proves a bounded sampled source-loop match
   before the cap remapper increases its geometric projection allowance.
   Exact-ID handling and visible source coordinates remain unchanged.
 - `subdivision_proof.py` verifies complete edge-fan coverage using actual
   replacement geometry; aggregate area alone is not a coverage proof.
 - `cap_backoff.py` computes a proposed translation from one measured depth
-  constraint. `cap_template.py` owns the required fresh thickness query and
-  may publish only a result passing that query.
+  constraint. `cap_template.py` reuses a direction-independent conservative
+  broad-phase candidate superset across retries, but every retry reruns the
+  directional capsule filter, exact ray intersections, and complete thickness
+  safety policy. It may publish only a result passing that fresh measurement.
 
 - `region_review.py` partitions physical long-strip candidates and ordinary
   face-count candidates consistently for recognition, image review, and
@@ -168,7 +185,7 @@ Services should be stateless where practical. Inject or replace collaborators th
 - `interface_retreat.py`: opt-in, user-confirmed source-face ownership retreat
   across an existing child/parent seam, with deterministic geodesic growth,
   material preservation, and connectivity/size safety gates;
-- `small_component_review.py`: sub-threshold review rendering, manifest generation, and confirmed-decision validation;
+- `source_region_review.py`: source-region review rendering, manifest generation, and classification validation;
 - `selection.py`: structural evidence and root-body selection;
 - `assembly.py`: parent inference, cycle repair, recursive layers;
 - `inward.py`: recursive inward orchestration, thickness probing, cap planning,
@@ -293,9 +310,34 @@ loops is a performance regression even when the resulting geometry matches.
 
 ## General tolerance services (2.0.6)
 
-`tolerance_policy.py` owns ratio and physical-span semantics. `micro_regions.py` merges <=2 mm connected regions before tiny-component review. Ownership and material arrays remain separate. `micro_openings.py` appends source-hole caps after component policy and before tree construction, verifies exact rim closure and directed internal edges, then extends paint and component membership. Failed candidates remain unresolved. Existing assembly and mesh validation still decide deliverability.
+`region_review.py` owns face-count and long-strip candidate selection. These measurements request semantic review only. The production pipeline does not invoke `micro_regions.py` or `micro_openings.py`: source regions and openings remain unchanged, while interface validation alone decides whether a split can proceed.
 
-Boundary cycle decomposition uses an explicit stack. Inward conormals accumulate only faces incident to the requested ring, retaining source order. `prepare_debug_directory` returns an atomically reserved new `Path`; callers must use that returned path. A collision never removes earlier artifacts. See [tolerance-and-runtime-policy.md](tolerance-and-runtime-policy.md) for ratios, reporting, and execution recovery.
+Boundary cycle decomposition uses a heap-backed Euler walk and an online
+path/position stack, so every adjacency and trail occurrence is consumed a
+bounded number of times even when thousands of simple cycles touch at one
+vertex. Inward conormal evidence is accumulated once per component and reused
+by every requested ring while retaining source order. `prepare_debug_directory`
+returns an atomically reserved new `Path`; callers must use that returned path.
+A collision never removes earlier artifacts. See
+[tolerance-and-runtime-policy.md](tolerance-and-runtime-policy.md) for ratios,
+reporting, and execution recovery.
+
+Boundary inward-direction smoothing keeps its physical-radius Gaussian window
+and all 32 inward-hemisphere projection rounds, but executes the closed-loop
+weighted sums through compiled wraparound convolution rather than allocating
+one `np.roll` array per offset. This is a performance substitution, not a
+higher-resolution geometry mode: print-scale tolerances remain authoritative,
+and no CAD-style sub-resolution refinement is introduced.
+
+Strict recursion still writes every changed node as a standalone 3MF and
+performs a real disk reload, package/material/provenance validation, and
+SHA-256 identity check before descendants consume it. The validated parsed
+object is retained by `VerifiedRecursiveArtifactCache`; later consumption uses
+that exact object after identity verification instead of parsing the same 3MF
+again. Stage-cache hits remain content-addressed and independently validated.
+Do not remove the first disk round trip to gain speed: it is the serialization
+quality gate that prevents a valid in-memory mesh from becoming an invalid
+print artifact.
 
 ## Compatibility invariants
 
@@ -316,7 +358,9 @@ triangles, and paint are not edited by this service. Original/generated face rol
 are not inferred from color when provenance is absent.
 
 `boundary_preview.py` emits assembly and local X-ray candidate comparisons. CLI
-stops with exit code 4 before cutting when review is needed. Candidate topology
+returns exit code 4 before cutting when no candidate can be accepted automatically.
+The agent then applies completion-first impact assessment and authorized repair;
+this diagnostic return does not itself require a user confirmation. Candidate topology
 passing is not semantic or print acceptance. `--boundary-review-json` accepts an
 explicit user-confirmed decision, bound to both input and regenerated candidate
 fingerprints; a `decisions` list supports independent recursive-stage approvals.
@@ -324,16 +368,18 @@ Never set `user_confirmed` without actual user approval. Unmatched approvals do
 not approve another stage. `--boundary-check-only` stops after the input gate.
 Changes to these modules and approval-file contents invalidate stage caches.
 
-When the user explicitly requests keeping an approved visible boundary unchanged,
-that same fingerprint-bound decision may set `preserve_visible_boundary: true`.
-Only after successful input approval does the pipeline activate the immutable
-`preserve_confirmed_seam` context field. `confirmed_seam.py` keeps source points,
-face membership, and paint unchanged instead of fitting another visible spline.
-It still audits finite coordinates, unique seam ids, shared-loop edges, and source
-indexed winding. It reports inherited source degeneracies without deleting them;
-all generated-geometry, thickness, Boolean, and package gates remain unchanged.
-This is an explicit reviewed geometry constraint, never an automatic fallback
-after a rejected spline and never a global relaxation of validation defaults.
+Boundary mode is always `smooth`; source-mode and immutable visible-seam bypasses
+have been removed. Already generated parent-contact interfaces remain shared and
+immutable to preserve assembly correspondence.
+
+`boundary_budget.py` freezes original per-region surface areas and tracks cumulative
+changed faces. `boundary_simplification.py` repairs small projected crossing lobes
+by local ownership transfer, retaining the mesh and paint. Strictly below 1% is the
+automatic cleanup path. At or above 1%, `boundary_review.py` evaluates admissible
+local branch candidates by impact: retained parts, unchanged surface and paint,
+no added disconnections, and a clear boundary. Such candidates continue as
+`completion_priority_local_merge`; percentage alone never forces a stop.
+Complex remaining failures follow `completion-first.md` before user handoff.
 
 Regression command: `python -m unittest discover -s tests -p test_boundary_clarity.py`.
 
@@ -354,8 +400,12 @@ review and surface remeshing; it is never forced onto the original vertex list.
 actual before/after curves plus numerical NPZ/JSON through `curve_preview.py` and
 raises `BoundaryReviewRequired` (CLI exit 4). Existing ownership approvals do not
 approve a new geometric contour. Explicit immutable-seam mode still preserves
-the user-selected original seam and bypasses spline construction. This release
-does not implement applying a topology-changing contour to a surface mesh.
+the user-selected original seam and bypasses spline construction. A separately
+user-confirmed `apply_clear_curve` decision must match both the source/target
+fingerprint and candidate fingerprint. The approved contour is resampled without
+treating proposal rows as source IDs, then passed through the existing surface-band
+remesher and all authoritative face, topology, connector, Boolean, and output audits.
+Approval therefore permits an attempted remesh; it never approves the final 3MF.
 
 Regression: `python -m unittest discover -s tests -p test_curve_clarity.py`.
 Replay: `python tools/review_curve_clarity.py CAPTURE.npz OUTPUT_DIRECTORY`.

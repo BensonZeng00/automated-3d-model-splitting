@@ -21,7 +21,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
     parser.add_argument('--micro-defect-area-mm2', type=float, default=1.0)
     parser.add_argument('--print-surface-tolerance-mm', type=float, default=0.05)
-    parser.add_argument('--boundary-shape', choices=['source','smooth'], default='source')
+    parser.add_argument('--boundary-shape', type=str.lower, choices=['smooth'], default='smooth', help='Smooth shared cut boundaries; source mode has been removed.')
     parser.add_argument('--hidden-surface-refinement', choices=['preserve', 'refine'],
                         default='preserve', help='Preserve audited hidden annuli or request strict density refinement.')
     parser.add_argument('--recovery-dir', help='Persistent inputs and candidates for local failure replay')
@@ -178,45 +178,42 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Resolve uncertain automatic classifications as legacy inward inserts instead of stopping for confirmation.",
     )
-    parser.add_argument("--min-faces", type=int, default=1000)
     parser.add_argument(
-        "--tiny-component-policy",
-        choices=["semantic", "merge", "ignore"],
-        default="semantic",
-        help=(
-            "How to handle color-connected fragments below --min-faces. "
-            "semantic auto-merges fragments at or below --tiny-component-auto-noise-max-faces, "
-            "then renders the remaining candidates for image review and requires a user-confirmed decision file; "
-            "merge assigns every fragment to an effective part; ignore preserves legacy filtering."
-        ),
-    )
-    parser.add_argument(
-        "--tiny-component-auto-noise-max-faces",
+        "--noise-review-max-faces",
         type=int,
         default=100,
         help=(
-            "Under semantic policy, automatically classify connected regions with at most this many faces "
-            "as noise and merge them without image review (default: 100)."
+            "Classify source regions with at most this many faces as noise candidates "
+            "for mandatory review; never merge or repair them (default: 100)."
         ),
     )
     parser.add_argument(
-        "--tiny-component-review-json",
+        "--small-region-review-max-faces",
+        type=int,
+        default=999,
+        help=(
+            "Require semantic review for source regions through this face count; "
+            "regions remain unchanged and enter normal splitting (default: 999)."
+        ),
+    )
+    parser.add_argument(
+        "--region-review-json",
         default=None,
         help=(
-            "User-confirmed image-review decisions for every rendered candidate above the auto-noise threshold. "
-            "Selected items are preserved and every unselected item is merged."
+            "User-confirmed noise/part/uncertain classifications for every review candidate. "
+            "Classifications never change source geometry."
         ),
     )
     parser.add_argument(
-        "--tiny-component-review-dir",
+        "--region-review-dir",
         default=None,
-        help="Directory for generated small-component review PNGs and manifest; defaults beside the source 3MF.",
+        help="Directory for generated source-region review PNGs and manifest; defaults beside the source 3MF.",
     )
     parser.add_argument(
-        "--tiny-component-review-resolution",
+        "--region-review-resolution",
         type=int,
         default=320,
-        help="Pixel size of each whole-model or zoom tile in a six-view small-component review sheet.",
+        help="Pixel size of each whole-model or zoom tile in a six-view source-region review sheet.",
     )
     parser.add_argument(
         "--max-extension-mm",
@@ -309,6 +306,35 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--boundary-target-samples", type=int, default=384)
     parser.add_argument("--boundary-smooth-passes", type=int, default=28)
     parser.add_argument(
+        "--visible-interface-simplification-tolerance",
+        type=float,
+        default=0.4,
+        metavar="MM",
+        help=(
+            "Maximum geometric deviation in millimeters when simplifying the "
+            "visible-interface backing contour before annulus triangulation "
+            "(default: 0.4; use 0 to disable)."
+        ),
+    )
+    parser.add_argument(
+        "--maximum-boundary-displacement-mm",
+        type=float,
+        default=10.0,
+        help=(
+            "Maximum and P95 planar-arc target displacement in millimeters "
+            "before the interface is rejected (default: 10)."
+        ),
+    )
+    parser.add_argument(
+        "--seam-smoothing-profile",
+        choices=["source-conservative", "print-balanced", "print-smooth"],
+        default="print-balanced",
+        help=(
+            "Printable seam quality budget. print-balanced tolerates sparse, "
+            "isolated source-normal outliers while preserving hard topology gates."
+        ),
+    )
+    parser.add_argument(
         "--boundary-retopology-band-mm",
         type=float,
         default=3.0,
@@ -331,6 +357,8 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Whether a user-reviewed surface band may report source-normal "
             "changes and bounded edge stretch up to 128x as visual advisories, "
+            "replace area/vertex coverage limits with the 0.5 mm maximum and "
+            "P95 displacement envelope when both are satisfied, "
             "allow the target to use up to 60%% of the requested real surface "
             "band, and accept eligible sparse isolated inversions down to a 1 degree "
             "result angle. Degeneracy, topology, and Boolean checks remain "
@@ -411,14 +439,16 @@ def main(argv: list[str] | None = None) -> None:
         configure_uniform_fit(args)
     except ValueError as exc:
         parser.error(str(exc))
-    if args.min_faces < 1:
-        parser.error("--min-faces must be at least 1")
     if args.boundary_target_samples < 16:
         parser.error("--boundary-target-samples must be at least 16")
     if args.boundary_smooth_passes < 0:
         parser.error("--boundary-smooth-passes must be non-negative")
+    if args.visible_interface_simplification_tolerance < 0:
+        parser.error("--visible-interface-simplification-tolerance must be non-negative")
     if args.boundary_retopology_band_mm <= 0:
         parser.error("--boundary-retopology-band-mm must be positive")
+    if args.maximum_boundary_displacement_mm <= 0:
+        parser.error("--maximum-boundary-displacement-mm must be positive")
     if args.fit_clearance_mm < 0 or args.lead_in_mm < 0 or args.sibling_clearance_mm < 0:
         parser.error("clearance and lead-in values must be non-negative")
     if args.clearance_feature_ratio <= 0 or args.clearance_min_mm < 0:
@@ -427,10 +457,12 @@ def main(argv: list[str] | None = None) -> None:
         parser.error("--exterior-view-count must be at least 6")
     if args.exterior_depth_map_resolution < 64:
         parser.error("--exterior-depth-map-resolution must be at least 64")
-    if not 128 <= args.tiny_component_review_resolution <= 1024:
-        parser.error("--tiny-component-review-resolution must be between 128 and 1024")
-    if args.tiny_component_auto_noise_max_faces < 0:
-        parser.error("--tiny-component-auto-noise-max-faces must be non-negative")
+    if not 128 <= args.region_review_resolution <= 1024:
+        parser.error("--region-review-resolution must be between 128 and 1024")
+    if args.noise_review_max_faces < 0:
+        parser.error("--noise-review-max-faces must be non-negative")
+    if args.small_region_review_max_faces < args.noise_review_max_faces:
+        parser.error("--small-region-review-max-faces must be at least --noise-review-max-faces")
     if args.exterior_depth_tolerance_mm < 0:
         parser.error("--exterior-depth-tolerance-mm must be non-negative")
     if args.max_planar_travel_mm < max(float(args.max_extension_mm), 0.4):

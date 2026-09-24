@@ -11,6 +11,8 @@ import numpy as np
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
+from split3mf.common import load_core_dependencies
+load_core_dependencies()
 from split3mf.cli import build_parser
 from split3mf.recursive_preflight import (
     FullTreePreflightError,
@@ -20,6 +22,8 @@ from split3mf.stage_cache import RecursiveStageCache, normalized_run_arguments
 from split3mf.common import Component
 from split3mf.explicit_merge import merge_body_components, parse_part_group
 from split3mf.cap_template import fit_affine_cap_inside_parent
+from split3mf.inward import ParentThicknessProbe
+from split3mf.pipeline import uses_layer_child_cut_references
 
 
 class _Decision:
@@ -34,6 +38,12 @@ class _Decision:
 
 
 class PipelineOptimizationTests(unittest.TestCase):
+    def test_only_recursive_minimal_uses_exclusive_layer_cut_references(self) -> None:
+        self.assertTrue(uses_layer_child_cut_references("tree", "recursive-minimal"))
+        self.assertTrue(uses_layer_child_cut_references("flat", "recursive-minimal"))
+        self.assertFalse(uses_layer_child_cut_references("legacy-flat", "recursive-minimal"))
+        self.assertFalse(uses_layer_child_cut_references("tree", "strongest-path"))
+
     def test_affine_cap_backoff_can_converge_after_four_measurements(self) -> None:
         template = np.array(
             [
@@ -65,6 +75,78 @@ class PipelineOptimizationTests(unittest.TestCase):
         self.assertGreater(result.distances.min(), 0.08)
         self.assertEqual(result.thickness_record["calls"], 6)
         self.assertEqual(len(result.trace), 6)
+
+    def test_affine_cap_reuses_only_broad_phase_and_remeasures_safety(self) -> None:
+        class Probe:
+            def __init__(self) -> None:
+                self.preparations = 0
+                self.measurements = 0
+                self.cache = object()
+
+            def prepare_safety_limit_candidates(self, points, search_limit):
+                self.preparations += 1
+                self.asserted_points = np.asarray(points).copy()
+                self.asserted_limit = search_limit
+                return self.cache
+
+            def safety_limit(
+                self, points, directions, maximum, *, broad_phase_cache=None
+            ):
+                self.measurements += 1
+                if broad_phase_cache is not self.cache:
+                    raise AssertionError("affine retry did not reuse candidate cache")
+                safe = 3.9 if self.measurements == 1 else 10.0
+                return safe, {"measurement": self.measurements}
+
+        template = np.array(
+            [[0.0, 0.0, 4.0], [1.0, 0.0, 4.0], [0.0, 1.0, 4.0]],
+            dtype=np.float64,
+        )
+        fit_points = template.copy()
+        fit_points[:, 2] = 0.0
+        probe = Probe()
+        result = fit_affine_cap_inside_parent(
+            template_points=template,
+            boundary_indices=np.arange(3, dtype=np.int64),
+            fit_points=fit_points,
+            inward_axis=np.array([0.0, 0.0, 1.0]),
+            safety_limit=probe.safety_limit,
+            maximum_depth_mm=10.0,
+        )
+
+        self.assertEqual(probe.preparations, 1)
+        self.assertEqual(probe.measurements, 2)
+        self.assertEqual(result.attempts, 2)
+        self.assertEqual(result.thickness_record["measurement"], 2)
+        np.testing.assert_array_equal(probe.asserted_points, fit_points)
+        self.assertAlmostEqual(probe.asserted_limit, 10.0)
+
+    def test_reusable_candidates_preserve_exact_directional_hits(self) -> None:
+        vertices = np.array(
+            [
+                [-2.0, -2.0, 2.0], [2.0, -2.0, 2.0],
+                [2.0, 2.0, 2.0], [-2.0, 2.0, 2.0],
+                [3.0, -2.0, 3.0], [3.0, 2.0, 3.0],
+                [3.0, 2.0, 7.0], [3.0, -2.0, 7.0],
+            ],
+            dtype=np.float64,
+        )
+        faces = np.array(
+            [[0, 2, 1], [0, 3, 2], [4, 5, 6], [4, 6, 7]],
+            dtype=np.int64,
+        )
+        probe = ParentThicknessProbe(vertices, faces)
+        points = np.array([[0.0, 0.0, 0.0]], dtype=np.float64)
+        cache = probe.prepare_safety_limit_candidates(points, 10.0)
+        for directions in (
+            np.array([[0.0, 0.0, 1.0]]),
+            np.array([[3.0, 0.0, 5.0]]),
+        ):
+            expected = probe.first_hit_distances(points, directions, 10.05)
+            actual = probe.first_hit_distances(
+                points, directions, 10.05, broad_phase_cache=cache
+            )
+            np.testing.assert_allclose(actual, expected, rtol=0.0, atol=1e-12)
 
     def test_explicit_body_merge_preserves_anchor_and_remaps_indices(self) -> None:
         vertices = np.array(

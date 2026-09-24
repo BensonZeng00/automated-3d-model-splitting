@@ -169,24 +169,11 @@ def finalize_mesh(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
 
 
 def finalize_large_partition_mesh(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
-    """Linear cleanup for large source-preserving recursive bodies.
-
-    Large bodies usually inherit consistently oriented source faces, but generated
-    caps and sockets can introduce locally reversed triangles. Keep the linear
-    cleanup, then run winding repair only when the fast consistency check fails.
-    """
-    # Do not weld coincident vendor vertices here. Paint junctions may use
-    # separate vertex identities even when their coordinates match exactly.
-    if hasattr(mesh, "remove_degenerate_faces"):
-        mesh.remove_degenerate_faces()
-    else:
-        mesh.update_faces(mesh.nondegenerate_faces())
-    mesh.remove_unreferenced_vertices()
-    if open_edge_count(mesh) > 0:
-        mesh = close_residual_boundaries(mesh)
-    orientation_record = orient_mesh_faces_consistently(mesh)
-    mesh.metadata["orientation_repair"] = orientation_record
-    return mesh
+    """Record source topology without repairing a large partition."""
+    result = mesh.copy()
+    result.metadata["source_topology_diagnostics"] = validate_mesh_in_memory(result)
+    result.metadata["source_geometry_mutation"] = "none"
+    return result
 
 
 @dataclass(frozen=True)

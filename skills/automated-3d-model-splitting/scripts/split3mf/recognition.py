@@ -265,23 +265,37 @@ def enclosed_occluded_same_color_mask(
 
 
 def connected_components_by_color(faces: np.ndarray, colors: list[str]) -> list[np.ndarray]:
-    dsu = DSU(len(faces))
-    first_edge_face: dict[tuple[str, int, int], int] = {}
-    for face_index, (face, color) in enumerate(zip(faces, colors)):
-        for a, b in ((face[0], face[1]), (face[1], face[2]), (face[2], face[0])):
-            if a > b:
-                a, b = b, a
-            key = (color, int(a), int(b))
-            previous = first_edge_face.get(key)
-            if previous is None:
-                first_edge_face[key] = face_index
-            else:
-                dsu.union(face_index, previous)
+    """Return same-material face components using the sparse graph backend.
 
-    groups: dict[int, list[int]] = collections.defaultdict(list)
-    for face_index in range(len(faces)):
-        groups[dsu.find(face_index)].append(face_index)
-    return [np.array(indices, dtype=np.int64) for indices in groups.values()]
+    The former Python dictionary stored three ``(color, vertex, vertex)``
+    tuples per face and performed millions of interpreted DSU operations.
+    Vendor-painted examples exceed 700k conformed faces, where that became a
+    multi-minute stage.  Trimesh already computes the shared-edge adjacency in
+    vectorized code; filtering that array by material and using SciPy preserves
+    exactly the same edge-connected definition with bounded memory.
+    """
+    faces = np.asarray(faces, dtype=np.int64)
+    labels = np.asarray(colors).astype(str)
+    if labels.shape != (len(faces),):
+        raise ValueError('One material label is required per face')
+    started = time.perf_counter()
+    adjacency = trimesh.graph.face_adjacency(faces=faces)
+    runtime_log('识别', 'material_adjacency_ready',
+                '共享边邻接已生成，开始按材料求连通分量',
+                faces=len(faces), adjacency_edges=len(adjacency),
+                duration_seconds=round(time.perf_counter()-started, 4))
+    if len(adjacency):
+        adjacency = adjacency[labels[adjacency[:, 0]] == labels[adjacency[:, 1]]]
+    groups = trimesh.graph.connected_components(
+        adjacency,
+        nodes=np.arange(len(faces), dtype=np.int64),
+        min_len=1,
+        engine='scipy',
+    )
+    runtime_log('识别', 'material_components_ready',
+                '按材料共享边连通分量计算完成', groups=len(groups),
+                duration_seconds=round(time.perf_counter()-started, 4))
+    return [np.asarray(indices, dtype=np.int64) for indices in groups]
 
 
 def material_identity(color_code: str) -> tuple[str, object]:
@@ -511,13 +525,13 @@ def tiny_group_pair_similarity(left: dict, right: dict) -> float:
     )
 
 
-def classify_tiny_groups_semantically(
+def classify_review_groups_semantically(
     vertices: np.ndarray,
     faces: np.ndarray,
     connectivity_colors: list[str],
     display_colors: list[str],
     all_groups: list[np.ndarray],
-    tiny_groups: list[np.ndarray],
+    review_groups: list[np.ndarray],
     min_faces: int,
     visible_faces: np.ndarray | None = None,
     view_count: int = 32,
@@ -525,7 +539,7 @@ def classify_tiny_groups_semantically(
     keep_score_threshold: float = 0.55,
 ) -> list[dict]:
     """Classify review regions using auditable projected/mesh evidence."""
-    if not tiny_groups:
+    if not review_groups:
         return []
     from .region_review import strip_evidence
     areas = triangle_areas(vertices, faces)
@@ -541,7 +555,7 @@ def classify_tiny_groups_semantically(
         int(np.min(group)): int(slot) for slot, group in enumerate(all_groups) if len(group)
     }
     records: list[dict] = []
-    for fragment_id, group in enumerate(tiny_groups, start=1):
+    for fragment_id, group in enumerate(review_groups, start=1):
         record = tiny_group_record(
             vertices, faces, display_colors, areas, group, fragment_id
         )
@@ -764,6 +778,15 @@ def _merge_partitioned_groups_into_components(
                 for slot in edge_to_component_slots.get(edge_key_from_vertices(a, b), set()):
                     shared_counts[int(slot)] += 1
 
+        compatible_slots = {
+            slot for slot, component in enumerate(components)
+            if material_identity(component.color_code)
+            == material_identity(str(display_colors[int(group[0])]))
+        }
+        shared_counts = collections.Counter({
+            slot: count for slot, count in shared_counts.items()
+            if slot in compatible_slots
+        })
         if shared_counts:
             assigned_slot, shared_edges = max(
                 shared_counts.items(),
@@ -774,8 +797,11 @@ def _merge_partitioned_groups_into_components(
         else:
             fragment_min = np.array(record["bbox_min"], dtype=np.float64)
             fragment_max = np.array(record["bbox_max"], dtype=np.float64)
+            if not compatible_slots:
+                ignored.append(record)
+                continue
             assigned_slot, nearest_component = min(
-                enumerate(components),
+                ((slot, components[slot]) for slot in compatible_slots),
                 key=lambda item: (
                     bbox_distance_sq(fragment_min, fragment_max, item[1].bbox_min, item[1].bbox_max),
                     -item[1].face_count,
@@ -819,214 +845,6 @@ def _merge_partitioned_groups_into_components(
     return merged_components, ignored, merged_records
 
 
-def merge_tiny_groups_into_components(
-    vertices: np.ndarray,
-    faces: np.ndarray,
-    colors: list[str],
-    groups: Iterable[np.ndarray],
-    min_faces: int,
-    display_colors: list[str] | None = None,
-) -> tuple[list[Component], list[dict], list[dict]]:
-    """Compatibility policy: merge every group below ``min_faces``."""
-    effective_groups: list[np.ndarray] = []
-    tiny_groups: list[np.ndarray] = []
-    for group in groups:
-        target = effective_groups if len(group) >= min_faces else tiny_groups
-        target.append(np.array(group, dtype=np.int64))
-    return _merge_partitioned_groups_into_components(
-        vertices,
-        faces,
-        colors,
-        effective_groups,
-        tiny_groups,
-        display_colors=display_colors,
-    )
-
-
-def merge_tiny_groups_with_semantic_preservation(
-    vertices: np.ndarray,
-    faces: np.ndarray,
-    colors: list[str],
-    groups: Iterable[np.ndarray],
-    min_faces: int,
-    display_colors: list[str] | None = None,
-    visible_faces: np.ndarray | None = None,
-    view_count: int = 32,
-    depth_map_resolution: int = 768,
-    keep_score_threshold: float = 0.55,
-) -> tuple[list[Component], list[dict], list[dict], list[dict]]:
-    """Preserve visually meaningful small regions and merge probable noise."""
-    display_colors = display_colors or colors
-    normalized_groups = [np.asarray(group, dtype=np.int64) for group in groups]
-    effective_groups = [group for group in normalized_groups if len(group) >= min_faces]
-    tiny_groups = [group for group in normalized_groups if len(group) < min_faces]
-    semantic_records = classify_tiny_groups_semantically(
-        vertices=vertices,
-        faces=faces,
-        connectivity_colors=colors,
-        display_colors=display_colors,
-        all_groups=normalized_groups,
-        tiny_groups=tiny_groups,
-        min_faces=min_faces,
-        visible_faces=visible_faces,
-        view_count=view_count,
-        depth_map_resolution=depth_map_resolution,
-        keep_score_threshold=keep_score_threshold,
-    )
-    record_by_min_face = {
-        int(np.min(group)): record for group, record in zip(tiny_groups, semantic_records)
-    }
-    preserved_groups: list[np.ndarray] = []
-    merge_groups: list[np.ndarray] = []
-    preserved_records: list[dict] = []
-    for group in tiny_groups:
-        record = record_by_min_face[int(np.min(group))]
-        if record["semantic_decision"] == "preserve_independent_small_component":
-            preserved_groups.append(group)
-            preserved_records.append(record)
-        else:
-            merge_groups.append(group)
-    components, ignored, merged_records = _merge_partitioned_groups_into_components(
-        vertices,
-        faces,
-        colors,
-        [*effective_groups, *preserved_groups],
-        merge_groups,
-        display_colors=display_colors,
-    )
-    semantic_record_by_min_face = {
-        int(record["source_min_face_index"]): record for record in semantic_records
-    }
-    for record in merged_records:
-        semantic = semantic_record_by_min_face.get(int(record["source_min_face_index"]))
-        if semantic is not None:
-            assignment_fields = {
-                key: value
-                for key, value in record.items()
-                if key.startswith("assigned_")
-                or key in {
-                    "assignment_method",
-                    "shared_edges_to_assigned_component",
-                    "nearest_bbox_distance_mm",
-                }
-            }
-            record.clear()
-            record.update(semantic)
-            record.update(assignment_fields)
-    return components, ignored, merged_records, preserved_records
-
-
-def merge_tiny_groups_with_user_review(
-    vertices: np.ndarray,
-    faces: np.ndarray,
-    colors: list[str],
-    groups: Iterable[np.ndarray],
-    min_faces: int,
-    decisions: dict[int, dict],
-    auto_noise_max_faces: int = 100,
-    display_colors: list[str] | None = None,
-    visible_faces: np.ndarray | None = None,
-    view_count: int = 32,
-    depth_map_resolution: int = 768,
-) -> tuple[list[Component], list[dict], list[dict], list[dict]]:
-    """Auto-merge very small noise, then apply review to remaining tiny groups."""
-    display_colors = display_colors or colors
-    normalized_groups = [np.asarray(group, dtype=np.int64) for group in groups]
-    from .region_review import partition_review_groups
-    effective_groups, auto_noise_groups, review_groups = partition_review_groups(
-        vertices, faces, normalized_groups, min_faces, auto_noise_max_faces, visible_faces)
-    review_records = classify_tiny_groups_semantically(
-        vertices=vertices,
-        faces=faces,
-        connectivity_colors=colors,
-        display_colors=display_colors,
-        all_groups=normalized_groups,
-        tiny_groups=review_groups,
-        min_faces=min_faces,
-        visible_faces=visible_faces,
-        view_count=view_count,
-        depth_map_resolution=depth_map_resolution,
-    )
-    record_by_min_face: dict[int, dict] = {}
-    preserved_groups: list[np.ndarray] = []
-    merge_groups: list[np.ndarray] = []
-    preserved_records: list[dict] = []
-    for group, record in zip(review_groups, review_records):
-        fragment_id = int(record["fragment_id"])
-        decision = decisions[fragment_id]
-        preserve = bool(decision["preserve"])
-        record.update(
-            {
-                "semantic_label": str(decision["semantic_label"]),
-                "visual_confidence": str(decision.get("visual_confidence", "UNKNOWN")),
-                "semantic_decision": (
-                    "preserve_independent_small_component"
-                    if preserve
-                    else "merge_user_unselected_component"
-                ),
-                "semantic_decision_source": "user_confirmed_image_review",
-                "user_confirmed": True,
-            }
-        )
-        record_by_min_face[int(np.min(group))] = record
-        if preserve:
-            preserved_groups.append(group)
-            preserved_records.append(record)
-        else:
-            merge_groups.append(group)
-
-    areas = triangle_areas(vertices, faces)
-    for auto_noise_index, group in enumerate(auto_noise_groups, start=1):
-        record = tiny_group_record(
-            vertices,
-            faces,
-            display_colors,
-            areas,
-            group,
-            len(review_records) + auto_noise_index,
-        )
-        record.update(
-            {
-                "semantic_label": "automatic face-count noise",
-                "visual_confidence": "NOT_REVIEWED",
-                "semantic_decision": "merge_auto_noise_face_threshold",
-                "semantic_decision_source": "automatic_face_threshold",
-                "auto_noise_max_faces": int(auto_noise_max_faces),
-                "user_confirmed": False,
-                "review_image_generated": False,
-            }
-        )
-        record_by_min_face[int(np.min(group))] = record
-        merge_groups.append(group)
-
-    components, ignored, merged_records = _merge_partitioned_groups_into_components(
-        vertices,
-        faces,
-        colors,
-        [*effective_groups, *preserved_groups],
-        merge_groups,
-        display_colors=display_colors,
-    )
-    for record in merged_records:
-        review = record_by_min_face.get(int(record["source_min_face_index"]))
-        if review is not None:
-            assignment_fields = {
-                key: value
-                for key, value in record.items()
-                if key.startswith("assigned_")
-                or key
-                in {
-                    "assignment_method",
-                    "shared_edges_to_assigned_component",
-                    "nearest_bbox_distance_mm",
-                }
-            }
-            record.clear()
-            record.update(review)
-            record.update(assignment_fields)
-    return components, ignored, merged_records, preserved_records
-
-
 def component_owned_face_colors(
     source_colors: list[str],
     components: list[Component],
@@ -1065,6 +883,4 @@ class PartRecognizer:
     visible_mask = staticmethod(exterior_visible_face_mask)
     exterior_colors = staticmethod(recognition_colors_from_exterior)
     connected_components = staticmethod(connected_components_by_color)
-    merge_tiny = staticmethod(merge_tiny_groups_into_components)
-    merge_tiny_semantic = staticmethod(merge_tiny_groups_with_semantic_preservation)
     summarize = staticmethod(summarize_components)

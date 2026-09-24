@@ -1,92 +1,197 @@
 ---
 name: automated-3d-model-splitting
-description: Split externally painted 3MF source regions into an assembled multi-part 3MF by planning shared seams and interfaces without repairing or merging source defects.
+description: Automated painted-3MF model-part splitting for vendor projects with externally visible per-triangle paint. Use when Codex must recognize printable color regions, infer a root body and nested insert tree, generate inward parts and sockets, preserve filament slots, export one grouped assembly 3MF, and validate topology plus multi-view visual surface consistency.
 ---
 
-# 自动化 3D 模型拆件
+# 自动化3d模型拆件
 
 Current release: `2.1.0`, positioned as automated painted-3MF model-part splitting.
 
-## 职责边界
+## Assembly fit handoff
 
-拆件只负责识别 source 区域、确定零件关系、规划双方共用的交接线、生成交接面与装配结构，并导出一个分组 3MF。输入模型已有的小碎片、噪声、小孔、翻转面、退化面、非流形边和断开壳体均属于 source：默认原样保留，不自动合并、删除、补面、焊接或翻面，也不因面积、跨度、面数或比例阻断拆件。
+Default `--assembly-ignore-overlap-ratio 0.01` silently ignores a pair's total intersection volume when it is strictly below **1% of the corresponding actual cutting volume**. This is volume / volume, not area. Freeze the original sequential full-size socket-removal volume before scaling or fitting; never substitute the body volume or bounding box. Sum disconnected overlaps per pair. For non-direct pairs use the smaller recorded incoming cutting volume, excluding a root's absent incoming cut; missing references on non-root parts disable ratio acceptance. Retain raw volumes and ratios without a repair, manual-adjustment label or user notification solely for an accepted overlap. Numerical Boolean precision stays unchanged. For residual issues at or above the threshold, finish export and ask the user to observe the model and judge whether printing is affected, adjusting manually only if necessary; do not call a measured fit discrepancy a failed print. This ratio policy and observation wording override stricter assembly guidance below. `0` disables ratio acceptance. The former fixed 1 mm³ CLI policy is retired.
 
-只有交接线、交接面或本工具新增的几何可以被调整。source 异常可写入 `source_diagnostics`，但必须标记为非阻断；只有无法形成一致交接线、交接面或必要生成结构时，当前接口才可失败。
+Apply [manual-assembly-fit.md](references/manual-assembly-fit.md) for final assembly issues. The default `--assembly-fit-validation manual` completes export of valid split parts after attempted post-fit difference and bounded seating, retaining measured unresolved interference, occlusion and assembled-view errors for user adjustment. No further approval is needed for this handoff. Label the final package `manual_adjustment_required`, keep raw failed fit/visual checks, and tell the user which parts need adjustment. This overrides the blocking assembly/visual wording below in default manual mode; individual topology, backing thickness, source-surface, color and package gates remain active. Explicit `strict` restores blocking assembly validation.
 
-只读取用户指定的 `.3mf`。拒绝 STL、OBJ 或改扩展名的输入。使用 `scripts/split_painted_3mf.py`，不要使用 Blender 或切片器 UI。
+## License
 
-## 100/1000 面语义审核
+This skill is licensed under [PolyForm Noncommercial 1.0.0](LICENSE). Uses outside its permissions require a [separate written commercial license](COMMERCIAL_LICENSE.md). Distribute the complete skill folder with `LICENSE`, `NOTICE` and `COMMERCIAL_LICENSE.md`; preserve required notices. Third-party dependencies retain their own licenses.
 
-面数只筛选审核候选，不决定几何处置：
+## Runtime and platform support
 
-- `<=100` 面：`noise_candidate`；
-- `101–999` 面：`small_region_candidate`；
-- `>=1000` 面：不因面数审核；
-- 长细条候选：不受面数限制，必须审核。
+Resolve `SKILL_ROOT` as the directory containing the exact `SKILL.md` loaded for this task. All `scripts/`, `tools/`, `references/` and `requirements.txt` paths in this skill are relative to that directory, not the current project directory or the model's directory. In a source checkout the skill is under `skills/automated-3d-model-splitting/`; an installed skill may live elsewhere. Use the provided skill location rather than searching unrelated projects or assuming a machine-specific installation path.
 
-所有候选都必须由用户分类为 `noise`、`part` 或 `uncertain`。分类只改变报告标签；三类都保持完整 source 顶点、面、颜色、方向和组件身份，并进入相同的正常拆件流程。确认成 noise 也不得合并、删除、改色、修复或跳过交接面规划。
+The entry point is `<SKILL_ROOT>/scripts/split_painted_3mf.py`, with its sibling `split3mf/` package. Invoke the entry point by its resolved absolute path using the selected Python interpreter; it can run from any working directory. Resolve the user's input, output and recovery paths before changing directories. The relative command examples below assume the skill directory as the working directory. If the entry point or package is missing at the resolved skill root, report an incomplete installation and restore the complete skill folder; do not create a substitute script in the user's project.
 
-运行识别：
+Use Python 3.10–3.12 and install `<SKILL_ROOT>/requirements.txt` with the selected interpreter's `-m pip`. Reuse a compatible configured environment; do not copy another machine's interpreter path. Run the resolved entry point with `--input <absolute-source.3mf> --preflight-only` before processing a new environment.
 
-```bash
-python scripts/split_painted_3mf.py --input model.3mf --recognize-only
-```
+## Default print tolerance and recovery
 
-若需要审核，命令以退出码 `4` 生成六视图和 `user_decisions.json`。检查图片、填写每项 `semantic_label`、`visual_confidence` 与 `classification`，设置 `user_confirmed=true`，然后运行：
+Apply [print-tolerance-and-replay.md](references/print-tolerance-and-replay.md) first. Ordinary production preserves source seams, tolerates harmless affected patches up to **1 mm²**, accepts verified equivalent triangle subdivision, and uses local failure replay. Retain actual part identity, palette, printable thickness, closed solid operations and assembly checks. Do not ask again about already authorized micro-defect tolerance.
 
-```bash
-python scripts/split_painted_3mf.py \
-  --input model.3mf \
-  --output model_split_parts.3mf \
-  --region-review-json review/user_decisions.json
-```
+Use `--boundary-shape source --micro-defect-area-mm2 1 --print-surface-tolerance-mm 0.05` by default. Use `--recovery-dir` for persistent finalization snapshots and `--resume auto --cache-dir` for validated recursive stages. Prefer local replay after a failure before re-running the full model. Keep [tolerance-and-runtime-policy.md](references/tolerance-and-runtime-policy.md) for endpoint ownership, small-part recognition and slope reporting.
 
-审核阈值 CLI：
+## Protect the Source
 
-```text
---noise-review-max-faces 100
---small-region-review-max-faces 999
---region-review-json PATH
---region-review-dir PATH
---region-review-resolution 320
-```
+### Curved insert backing repair
 
-旧版 `--min-faces`、`--tiny-component-policy`、`--tiny-component-auto-noise-max-faces` 和 `--tiny-component-review-*` 不兼容且不再接受。不得增加兼容别名或把旧参数静默映射到新参数。
+When a curved insert shows fragments, a broad thin backing, or failed final seating, inspect the generated backing before attributing the defect to the final difference. Watertightness alone does not establish adequate thickness. For an authorized complete-tree repair, use `--repair-thin-backing` and follow [Pre-Boolean backing repair](references/cli-reference.md#pre-boolean-backing-repair). The pipeline screens actual source-local thickness, leaves passing children unchanged, and reconstructs failing hidden backing along local inward normals while preserving source front triangles and material ownership. Recut the complete current parent with the rebuilt full-size child, then retain final scaling, thickness, connectivity, all-pair collision, visual and package-reload checks. This reconstruction is explicit opt-in, not an unconditional automatic fallback.
 
-## Source 保持约束
+Keep [curved-backing-repair.md](references/curved-backing-repair.md) for standalone two-part recovery; its single-material restrictions do not apply to the complete-tree adapter. Do not use final difference or largest-shell deletion to conceal an upstream backing failure. `--post-fit-parent-difference` is enabled by default: after final uniform scaling, subtract final ancestor solids from each insert before seating, retaining thickness, source-surface, topology and color checks. No additional confirmation is required for this default step. Use `--no-post-fit-parent-difference` only for an explicit diagnostic opt-out. Record this shape change separately from scaling, and report accepted nonzero contacts under the requested physical tolerance without confusing millimeters with cubic millimeters. When the user requests a cache-free rebuild, use the original source, `--resume off`, and a fresh output/recovery namespace; prior geometry remains diagnostic evidence only.
 
-- 不运行按 `<=2 mm` 区域归并或小口封闭。
-- 不按 `<1%`、`<=1 mm²`、长度、体积或面数自动修复 source。
-- 不对 source 执行全局 winding 修复；生成面的朝向由父子关系和共享接口决定。
-- source 小孔远离接口时忽略；碰到接口时重新规划接口，不修补整个 source。
-- 孤立 source shell 原样输出，不虚构连接结构。
-- `--merge-body-parts` 仅在用户明确指定时允许合并。
+### Print-first execution and long-strip review
 
-## 交接线与交接面
+Default `--hidden-surface-refinement preserve` retains hidden annuli after their existing topology, bridge, fanout, winding and degeneracy audits. It skips cosmetic density refinement without changing either boundary or any accepted triangle. Final wedge, thickness, Boolean and multi-view checks still run. Use `--hidden-surface-refinement refine` for requested density diagnostics; do not repeatedly refine a valid hidden surface for an aesthetic edge-length target.
 
-识别完成后，每个非主体 source 区域均采用 inward 流程。父件和子件必须消费同一个不可变共享边界定义。允许处理范围限于接口局部和新生成几何；不得以生成可打印实体为由改写无关 source。
+After the <=2 mm micro-region merge, screen exposed regions for long-thin noise candidates **regardless of face count**, including regions above 1000 faces or below 101 faces. The initial review screen uses visible area A and boundary length P: estimated width `2A/P <= 1.2 mm`, elongation proxy `P²/(4A) >= 12`, and visible bounding-box diagonal `>= 10 mm`. These are review heuristics, not measured minimum width or proof of noise. Inspect the existing whole-model/local six-view review sheets and ask the user whether to preserve or merge each candidate before splitting. A long-strip candidate takes precedence over automatic face-count noise merging. Never hardcode a model or part id. Ordinary non-strip regions use the face-count thresholds in the workflow below.
 
-交接验证至少包括：共享边界一致、生成面非退化、生成面方向正确、接口不明显穿出、必要装配间隙、材料槽保持，以及输出 3MF 可重新读取。source 自身的开边、翻面或非流形只记录。
+Measure disconnected needle-patch spans separately while preserving one summed affected-area budget. Report total extent and checked component spans. Do not restart the entire split for accepted micro-patches or cosmetic hidden density. Prefer local replay and verified stage resume; structural failures still require repair.
 
-边界统一使用 `--boundary-shape smooth`。阅读 [boundary-smoothing.md](references/boundary-smoothing.md)、[assembly-algorithm.md](references/assembly-algorithm.md) 和 [architecture.md](references/architecture.md) 后再修改接口算法。
+Use the bounded numerical fast paths described in [print-tolerance-and-replay.md](references/print-tolerance-and-replay.md): ordered bidirectional source-loop correspondence, traced complete subdivision fans, and measured cap-backoff intervals. These require geometric evidence and recorded bounds; never globally replace numerical epsilons with a print-sized tolerance or accept an unmeasured cap translation.
 
-## CLI 与执行
+Read only the user-specified source 3MF. Do not inspect other model files unless the user explicitly authorizes them.
 
-安装 `requirements.txt` 后先运行：
+Use `scripts/split_painted_3mf.py`. Do not use Blender. By default, generate no STL, GLB, Markdown, or preview files. Retain task-owned recovery artifacts under the failure-handoff policy below; these are not final deliverables. For small-component and long-strip review, follow the [three-stage workflow](#follow-the-three-stage-workflow). Deliver one final grouped multi-part `.3mf` only after any required review is confirmed.
 
-```bash
-python scripts/split_painted_3mf.py --input model.3mf --preflight-only
-```
+Do not use Computer Use to open or inspect Bambu Studio or another slicer. Complete deterministic offline validation first. When slicer confirmation is needed, ask the user to open the final 3MF and provide screenshots showing the model, the expanded assembly tree, and any visually sensitive region.
 
-CLI 只负责参数解析、输入校验、调用可测试服务、输出报告和退出码。不要把审核、分类或几何逻辑复制到 CLI。退出码 `4` 仅表示等待 source 区域语义确认；退出码 `3` 表示交接面、生成结构或包输出失败，不能用它表示无关 source 缺陷。
+The script is a thin public entry point. Implementation lives in the object-oriented `scripts/split3mf/` package and is coordinated by `SplitPipeline`. Read [references/architecture.md](references/architecture.md) before changing module responsibilities, service boundaries, shared state, or pipeline orchestration. Use `--boundary-shape source` by default; `smooth` is available only when the user requests boundary smoothing. Do not restore removed legacy mode aliases.
 
-最终默认只生成一个分组多零件 `.3mf`。保留原始颜色槽与逐面材料。诊断报告必须区分：
+## Separate Recognition, Body Selection, and Cutting
 
-```text
-source_diagnostics: non_blocking
-interface_validation: blocking_when_invalid
-```
+1. Decode each vendor `paint_color` value first. A multi-nibble value is a reversed hexadecimal `TriangleSelector` subdivision stream, not one color token. Restore its leaf subtriangles, leaf states, shared midpoints, and T-joint conformity before connected-boundary recognition.
+2. Recognize colors and connected boundaries from externally visible restored faces only.
+3. Reassign occluded or deeply recessed paint faces to the recognition base color without editing the source mesh. Preserve a depth-map visibility hole when its complete topological rim is visible and has the same source color, or when at least two thirds of its rim contacts are visible same-color faces with no visible competing color; open and wholly hidden regions remain eligible for reassignment.
+4. Measure through-like structure only as body-selection evidence: opposite-facing surfaces, shell-removal regions, balance, and large shared interfaces.
+5. Penalize or exclude a strong structural separator from automatic body selection.
+6. After the root body is chosen, classify the body as `body` and every other component as `inward`.
+7. Run the ordinary recursive-minimal inward workflow for the complete assembly. Do not create macro bodies, through roots, or direct through cuts.
 
-## 开发验证
+Use normals, opposite-facing surface balance, separation along the dominant normal, component span, and boundary-loop span for automatic classification. Do not classify from color name or area alone. Treat the root body as `body`.
 
-修改后至少运行区域审核、CLI、最终整理和端到端测试。关键不变量：对同一候选分别选择 `noise`、`part`、`uncertain` 时，source 顶点、面、颜色和组件成员必须一致；只有语义 metadata 可以不同。
+There is no printable `through` processing mode. `--part-processing-mode` accepts `auto` or compatibility value `inward`; per-part overrides accept only `P10=inward`.
+
+Default exterior recognition uses 32 deterministic views, a 768-pixel depth map per view, and a `0.08mm` depth tolerance. Report visible, occluded, and reassigned faces by original paint token. Use `--recognition-surface-profile all-faces` only as an explicit compatibility override.
+
+Read [references/assembly-algorithm.md](references/assembly-algorithm.md) before changing recognition, body evidence, tree inference, inward-cap behavior, or inward-direction logic.
+
+## Check Dependencies
+
+Run `--preflight-only` on installation or first use. The script checks `numpy`, `scipy`, `trimesh`, `networkx`, `manifold3d`, `matplotlib`, and Pillow (`PIL`). If a dependency is missing, show the interpreter-scoped install command. Run it when installation is already authorized by the user; otherwise request permission first. After boundary changes, run `python tools/run_planar_arc_harness.py`. Before processing a large vendor model after connector changes, run `python tools/run_connector_harness.py --case all --strategy auto`; all square, curved, and concave-V cases must pass. After changing inward candidate search or dense boundary triangulation, also run `python tools/run_inward_performance_harness.py`; its synthetic 2089-point loop must emit exactly 2087 faces inside the declared time budget.
+
+Relay the script's Chinese preflight, color, recognition, classification, assembly, split, validation, and export annotations during long work. Keep machine-readable JSON lines in logs.
+
+## Follow the Three-Stage Workflow
+
+1. Run recognition and classification first:
+
+   ```bash
+   python scripts/split_painted_3mf.py --input "/path/to/model.3mf" --recognize-only
+   ```
+
+2. Report the input profile, source unit, model entry, exterior-recognition statistics, excluded paint tokens, effective parts, body, colors, face counts, bounding boxes, centers, boundary loops, selected processing mode, confidence, and evidence.
+
+3. Apply the <=2 mm adjacent-region merge first, regardless of face count; it requires no image review. Screen long-strip candidates first and include them in image review regardless of face count. Automatically merge every remaining non-strip connected region with at most `--tiny-component-auto-noise-max-faces` faces (default `100`) as noise, without rendering an image or asking the user. When any long-strip candidate exists or a remaining connected region is above that threshold and below `--min-faces`, the script exits with code `4` after creating its whole-model-highlight plus local-zoom six-view PNG. Inspect every generated PNG with `view_image`, infer a plain visual label with confidence, and show all rendered candidates to the user. Ask the user which candidates to preserve as independent parts. Never continue before the user answers.
+
+4. Fill every item in the generated `user_decisions.json`, set `preserve=true` only for user-selected candidates and `preserve=false` for every other candidate, then set `user_confirmed=true`. Unselected candidates must merge into another component. Geometry scores may be reported as evidence but must never override the user's choice. Re-run recognition with `--tiny-component-review-json` pointing to this confirmed file.
+
+5. Stop only when the body, topology, or semantic parent is ambiguous after the required small-component review. Processing mode is always inward for non-body parts. Do not invent unsupported visual semantics.
+
+6. Export after the inventory is accepted or unambiguous:
+
+   ```bash
+   python scripts/split_painted_3mf.py \
+     --input "/path/to/model.3mf" \
+     --output "/path/to/model_split_parts.3mf"
+   ```
+
+When the user explicitly accepts combining recognized pieces into the body,
+use `--merge-body-parts P14+P04` (with the requested ids). The first id is the
+body anchor. The operation happens after recognition and tiny-component policy,
+removes the internal interface from recursive cutting, and preserves source
+per-face filament assignments in the resulting multi-material body object.
+
+7. Treat exit code `3` as a failed mesh/package deliverable. Exit code `4` means user small-component review is required and is not a geometry failure. Write a temporary 3MF, reload its objects and colors, and atomically replace the final path only after validation passes.
+
+Before the first recursive Boolean, run the default whole-tree interface preflight. It must plan every recursive parent/child interface, perform the authoritative thickness and cap-safety checks available from the source assembly graph, and stop on the first blocking interface. Use `--no-full-tree-preflight` only as an explicit diagnostic compatibility override.
+
+Use `--resume auto --cache-dir <path>` for long vendor runs that benefit from validated recursive checkpoints. A cache hit must match the source, normalized geometry options, recognized components, assembly tree, parent artifact SHA-256, and geometry implementation fingerprint. Reload and validate every cached standalone 3MF before reuse. Never admit a failed or unvalidated stage to the validated resume cache; keep failure artifacts separately for manual recovery. Keep `--resume off` as the compatibility default and use `strict` when any invalid cache entry must block the run.
+
+## Three failures: hand off the cached part for manual repair
+
+Read [references/manual-failure-handoff.md](references/manual-failure-handoff.md) before running a split or continuing from a user-edited cache file. Retain recovery inputs from the first attempt. After at most three failed attempts on the same input and interface/stage, stop automatic retries, show the failure image when available, and give the exact absolute 3MF path for the user to edit. Wait for the user to confirm saving. Rehash and reload their edited file as new input, invalidate affected downstream results, and continue splitting with the sole exact-subtraction/final-uniform-scaling policy. Never substitute an old successful cache hit for the user's edit. This is an agent-managed workflow using existing CLI capabilities, not a claim that the CLI automatically counts retries or watches file changes.
+
+## Assembly fit: one workflow
+
+Read [references/uniform-fit.md](references/uniform-fit.md) before cutting. The assembly fit policy is exact full-size child subtraction followed by XYZ uniform scaling of complete final inward parts, default 99% about each part's own bounding-box center. Root body is unchanged. No added slot clearance or old mode switch is available. This policy governs fit; retain the ordinary recognition, boundary, backing, topology, and package rules below.
+
+Use the complete current recursive source solid before exact subtraction; never replace recessed child surfaces with temporary rim-only caps. After scaling, check actual parent/insert front ownership with exact triangle rays, including near-coplanar covers. When a visibly obstructed leaf requires seating correction, permit only the measured rigid outward translation defined in `uniform-fit.md`, bounded by 0.1 mm and validated by intersection volume plus repeat visibility. Keep insert shape, uniform scale, and socket geometry intact; record the seating transform separately and never independently move a parent that still owns children.
+
+## Apply Hybrid Geometry Rules
+
+- Group recognition colors by shared-edge connectivity after exterior filtering.
+- Resolve package build/component transforms before recognition and bake the unique project instance into millimeter-space vertices. Do not read a mesh submodel at raw scale while ignoring its parent build transform.
+- Treat raw paint tokens that source metadata maps to the same filament slot as one material for edge connectivity. Preserve all contributing raw tokens in provenance; do not create a separate printable part merely because `DEFAULT` and a vendor token serialize the same material differently.
+- Apply small-component and long-strip decisions before body selection and tree inference, as specified in the [three-stage workflow](#follow-the-three-stage-workflow). Keep unconditional `merge` and legacy `ignore` as explicit compatibility policies.
+- Before automatic body selection, score every eligible candidate using relative size and strong-separator strength. Use through likelihood only inside separator evidence; do not subtract it unconditionally from candidates whose removal does not produce a balanced shell split. Exclude a strong structural separator when it passes the through geometry gate, has at least two large structural interfaces, and its removal splits the complete shell into exactly two meaningful regions whose face-count ratio is at least 0.50. Choose the highest-scoring remaining component regardless of color. `DEFAULT` and base-color labels must never filter or boost automatic body candidates. Respect explicit body overrides.
+- Never inward-extrude the body.
+- For `inward`, generate backing and optional pegs with a 3.0 mm preferred depth and measured 10.0 mm safety ceiling. All pre-cut assembly clearances are zero; final whole-part scaling supplies fit.
+- Form the subsurface lead-in as an outer-large, inner-small taper. Derive each boundary vertex's axial lead depth from its actual lateral fit offset for a target slope of about 45 degrees, capped by `--lead-in-mm` and half of the available inward travel. Start from the shared visible ring selected by the boundary-shape policy and record target plus measured taper angles.
+- For compact local connectors on thin painted inserts, keep the 0.60 mm lead-in limit on the female socket mouth only. Treat the nominal 3.0 mm full-boundary backing and nominal 5.0 mm compact-peg engagement as independent depth budgets, plus the configured socket-bottom clearance. Allocate measured safety in this order: bottom clearance, backing, engagement. When local thickness is insufficient, reduce engagement first. If the remaining engagement is below the 0.45 mm minimum printable depth, set it to exactly 0 mm, omit both compact peg and socket, release the now-unused socket-bottom clearance, and recompute the backing from measured safety. Reduce backing only after engagement reaches zero or when measured rim safety itself is below 3.0 mm. Reject load-bearing backing below 0.45 mm. When backing shrinks, scale its lateral inset one-to-one with axial depth to preserve approximately 45 degrees and scale a surviving compact peg linearly, never below 1.20 mm printable width. Build the male printable full-boundary backing as one continuous outer-large/inner-small wedge down to the selected floor; do not append a vertical skirt below a shortened bevel. When engagement is zero, close the backing floor directly and never emit coincident zero-depth rings. Reserve the compact peg footprint before generating the wedge only when a peg remains. On nearly planar concave loops, use a topology-safe constant-distance inset that trims self-intersections and preserve the returned contour's actual vertex count. Join the visible rim directly to that final offset with one constrained non-crossing annulus; do not independently offset multiple Clipper contours because their medial-axis topology changes create cratered seams. Only under requested `--hidden-surface-refinement refine`, when the two final rings are index-aligned, regularize the annulus with complete intermediate height-field rings; otherwise refine internal annulus edges conformingly and run bounded convex-quad edge flips to break inherited collinear radial spokes. Keep both boundary rings immutable, cap internal edge length by the requested resolution plus the unavoidable shared-boundary sampling floor, and project or interpolate inserted vertices on the continuous field whose axial depth equals lateral distance from the outer ring, capped at the selected backing depth. Carry curved source-rim axial variation into that field and fade it continuously to the planar floor. Default `--hidden-surface-refinement preserve` skips this optional density work after the structural audits pass. For an explicitly refined and reviewed surface, `--connector-surface-validation advisory` may also retain the audited annulus without optional flat-shading subdivision; record the measured internal-edge resolution while keeping topology, bridge/fanout, winding, degeneracy, thickness, Boolean, and assembly gates blocking. Use bounded arc-length correspondence where possible and constrained-annulus topology at Clipper medial-axis events. Treat fanout as blocking only together with anomalously long cross-ring bridges, because a dense short fan at a real concave corner is not a 3-D spike. Reject any generated backing strip with degenerate faces, boundary mismatch, cross-ring edges leaving the projected annulus, or a cross-edge longer than both 5.0 mm and ten times the strip median. Never resample a simplified inset back to the dense source-ring count. Permit a nondegenerate sub-nozzle height-field microface only when its maximum edge is at most 0.25 mm; never use that exception for a multi-millimetre bridge. Triangulate the floor-to-connector annulus with the same geometric quality policy. For the matching parent, use the complete current source solid and subtract the exact full-size child solid under [uniform-fit.md](references/uniform-fit.md); do not replace a recessed source surface with a rim-only patch or add clearance cutters. Audit collapsed Boolean seam faces with the active validation profile. Never shorten a geometrically valid wedge merely because triangulation fails; solve the selected shape or fail loudly.
+- In recursive `local-connector` runs, use exact full-size child subtraction and final-only scaling as specified in [references/uniform-fit.md](references/uniform-fit.md). Keep accepted Manifold parents resident across sequential differences; audit each result before advancing.
+- After every sequential Boolean difference, compare disconnected result shells with the immediate pre-cut parent. Remove a shell only when it is newly generated rather than source-supported, has at most 100 faces and at most `1e-5 mm3` volume, has at most `0.01 mm` equivalent thickness, and every vertex lies within `0.05 mm` of the retained dominant shell. Record its bounds, volume, thickness, source-support fraction, and cover distance, then repeat the complete closed-topology and volume audit and re-import the cleaned solid into Manifold before the next cutter. Strict runs keep the `1e-5 mm3` numerical cleanup-volume envelope. After explicit visual approval, surface-band advisory mode may raise only this cleanup roundoff envelope to `5e-5 mm3`; it may also accept at most `0.005 mm3` of Manifold kernel-to-export volume roundoff, but only when the exported Boolean remains watertight and winding-consistent with zero boundary edges, over-shared edges, and degenerate faces. Watertightness, winding, edge topology, and collapsed-face-ratio gates remain blocking. Never use a largest-component-only cleanup and never delete a source-supported detached shell.
+- Under ratio validation, a Boolean may retain new zero-volume seam faces only if watertight, consistently wound, free of boundary/over-shared edges, volume-preserving, and within the 0.5% collapsed-face budget. Strict mode permits no new collapsed faces. Never fill rejected Booleans with residual-hole fans.
+- Set `SPLIT3MF_BOOLEAN_CASE_CACHE` when investigating an expensive vendor Boolean. The recursive exporter writes the closed parent plus ordered proxy/socket cutters to a compressed harness case. Replay it with `python tools/run_boolean_case_harness.py --input <case.npz>` or stop at a cutter with `--through-cutter`; this cache accelerates diagnosis only and is never a deliverable.
+- Do not reuse one component-average inward vector blindly across curved or multi-loop boundaries. At every boundary vertex, compare the candidate direction with the area-weighted local inward normal, blend unsafe directions into the local inward hemisphere, and require zero outward-directed generated vertices. Reuse the same per-source-vertex directions for the matching parent socket.
+- When an otherwise valid interface is blocked by a thin visible-edge tangent, run the deterministic hidden-interface search. Generate locally inward direction fields toward interior parent targets, audit every field against parent thickness and the ordinary cap/reserve gates, and accept only a field that provides at least 0.45 mm load-bearing depth. Keep the selected shared visible rim fixed and reuse the accepted field for the matching parent socket; never turn one model's plane into a global axis rule.
+- Accept high-confidence `force_inward_vector` and `force_parent_direction` visual-semantic overrides as audited escape hatches. Normalize and validate every override, reject zero or non-finite vectors, never apply an override to the root body, and still require geometry and multi-view validation to pass. Never turn one model's axis into a global default.
+- Accept a high-confidence `guided_internal_cut` only as a reusable geometric constraint: its entry direction describes the front internal transition and its target plane describes the deeper shared cut surface. Keep the selected shared visible paint boundary fixed, detect thin parent-wall arcs from measured thickness, and apply the requested entry inset only around those arcs with a smooth circular falloff. Search bounded parent-interior direction variants, require the selected bottom ring to stay on one coherent target-parallel plane within the requested depth and parallel-shift limits, then reuse the exact prevalidated source-id fit ring for the matching socket. Build the wall through a midpoint loft and block degenerate triangles, long circumferential bridges, excessive stretch, or widespread quad-normal conflicts. A guided constraint is never a license to copy one model's plane into the defaults.
+- Preserve visible source seams under default `--boundary-shape source`. For explicitly requested `smooth`, read [boundary-smoothing.md](references/boundary-smoothing.md); its fitted visible seam and surface-band checks apply only in that mode.
+- Default `--connector-slope-validation advisory` records all slope measurements and warns only when strictly more than 1% of finite samples on the current interface lie outside inclusive 30–75 degrees. The median, percentiles, and consecutive outlier runs remain diagnostic; they do not block the default run. Explicit `strict` retains the legacy diagnostic gate. Existing topology, inversion, degeneracy, Boolean, and assembly validation policies remain in force.
+- When the user explicitly requests a `planar-arc-retopology` geometry review, keep the two checks distinct. Plot the original and actual retopologized visible boundary in the stable-plane projection, then plot a representative section from the emitted mesh showing the moved shared rim, regularized backing surface, and 45-degree design line. Report lateral inset, axial depth, and measured minimum/median/maximum backing angles. Never present the 2-D source/target overlay as the 45-degree cut profile. The reusable diagnostics are `tools/plot_planar_arc_actual.py` and `tools/plot_actual_45deg_section.py`; write their images to a task-owned visualization directory, not beside the source model.
+- For `local-connector`, preflight the exact production backing, unequal-count bridge, compact peg or zero-engagement floor, and private Boolean cutters. Simplify the private constant-offset floor contour by at most 0.005 mm (and at most 0.15% of inset depth) so medial-axis micron edges cannot seed radial needle cells. After unequal-ring height-field refinement, regularize safe convex quads and never add a chord within one fixed boundary ring. Never judge a concave connector with the legacy equal-count boundary-extrusion proxy: that proxy can invent folded quads which are absent from the emitted connector. Keep the production builders authoritative and require their face accounting, nondegenerate-triangle, bridge, and watertight-cutter audits to pass before the first large Boolean; slope uses the general >1% warning-only policy by default. When both connector advisories are active, a peg-free minimal closure with at most four rim vertices and at most `0.05 mm` depth may also report rather than block its intrinsic high-aspect side triangles, whether its valid floor came from the constant-offset or axial-fallback branch, but only when every strip audit is present, no bridge leaves the annulus, fanout is at most 64, every reported needle edge is at most `8 mm`, and the generated faces are nondegenerate. Record this narrow exception; it never waives topology, winding, cutter, Boolean, or assembly checks.
+- Measure parent thickness from every boundary point along each candidate inward field before generating a cap. Set `safe maximum = min(10 mm, parent thickness - 0.05 mm)`. Use a 3.0 mm preferred minimum unless measured parent thickness is below 3.05 mm; only then reduce the effective minimum to the remaining safe maximum. During candidate screening, cap ray travel at the preferred minimum plus the reserve and evaluate unique inset candidates from largest to smallest. After selection, always repeat the complete authoritative thickness audit without the screening ceiling; screening is allowed to reject a candidate early, never to certify its final safe maximum.
+- Through-like evidence never changes geometry mode or creates a printable separator; retain it only in body-selection reports.
+- Keep one strict tree-recursive body-splitting flow after body selection. When a parent step creates a direct child, serialize that child immediately as an independent millimeter 3MF with its per-triangle colors and original filament-slot meanings. Process internal nodes in deterministic depth-first preorder, and require every later child step to reload the exact 3MF emitted by its parent step; a sibling branch or the latest cumulative package is never a substitute. Replace exactly one pending subassembly in the active assembly state and carry every untouched mesh forward. Reject missing, already expanded, skipped-parent, color-changed, or descendant-provenance-mismatched inputs. The final assembly must reuse the meshes materialized by this recursion rather than rebuilding all parts in a separate batch.
+- After reloading a pending child, rebuild that step's component faces, boundary-neighbor graph, vertex normals, component centers, and model center from the reloaded mesh. Treat its already generated parent-contact shell as immutable source geometry for the local body cut. Never reuse the original whole-model arrays or regenerate the parent-contact extrusion at a later recursive step. For a multicolor pending subassembly, assign generated parent-contact walls and caps from the local source faces owning that boundary, not from the wrapper object's default/root color.
+- Adaptive caps must try one coherent bottom plane first, comparing the component-global inward plane with an inward-facing loop best-fit plane. Boundary points may travel different distances, but their bottom points must be coplanar. Place the plane at the deepest position whose maximum travel stays within the measured safe maximum and whose minimum travel stays at or above the effective minimum.
+- Use smooth `local-offset` only when no coherent plane can satisfy both depth bounds. In that fallback, move every boundary point along its safe local inward direction to the measured safe maximum, normally up to 10.0 mm. Do not force local-offset merely because a part owns child inserts, is nested, or previously produced a small ratio-accepted topology finding.
+- Prevalidate nested caps before building parent sockets. The parent socket must reuse the child's final cap mode and actual cap distance field, keep any requested bottom clearance inside the same measured safety ceiling, and place its bottom behind the child cap rather than independently fitting another plane.
+- Match shared child-cap and parent-socket boundaries by exact source vertex id first. When vendor paint topology creates coordinate aliases, T-joint subdivisions, or a short alternate triangle-edge route, reconcile only the internal cap field against the original source loops. Bound geometric projection by the larger of the planar-arc band's safe target offset and that interface's effective fit clearance; interpolate the prevalidated fit points, directions, and distances; keep visible top vertices unchanged; record every missing/extra id and maximum error; and reject any mismatch beyond the bound.
+- Local-offset fallback directions must be smoothed over physical boundary arc length, and single-loop caps must use distributed short-diagonal triangulation without a synthetic center fan.
+- Multi-loop caps must bridge holes and use boundary-preserving triangulation. Do not use unconstrained Delaunay plus centroid filtering for concave or holed boundaries.
+- Default to `tree` plus `recursive-minimal`; flatten local bodies and leaf parts into separate mesh objects inside one top-level 3MF component assembly.
+
+Read [references/cli-reference.md](references/cli-reference.md) for options.
+
+## Preserve Colors
+
+Treat `paint_color` values as serialized vendor paint data, not decimal palette indices. Decode simple leaf tokens and composite recursive subdivision trees before color connectivity. Preserve child order, midpoint sharing, and cross-face T-joints; rejecting or atomizing a valid composite token is an input-decoding failure. Resolve decoded leaf states against project filament metadata. Resolve `DEFAULT` from source object or component-parent extruder metadata; never assume slot 1.
+
+Distinguish `source_metadata`, `explicit_override`, and `fallback_estimate`. A fallback requires user acceptance. Synthetic sockets, sides, and inward caps inherit the owning local source boundary's resolved color. A single-color part therefore keeps its part color; a multicolor pending subassembly must not paint every generated face with its wrapper's default/root color.
+
+Preserve the complete source filament palette in its original slot order. Set each source-mapped object's 3MF color index from its resolved zero-based `filament_slot_index`; never rebuild the palette from first object appearance or collapse duplicate-colored slots. Append only explicit overrides or fallback colors that do not belong to a source slot. Treat a source slot/color mismatch as an export failure.
+
+For a Bambu Studio source project, preserve the non-internal source project settings and generate matching `Metadata/project_settings.config`, `Metadata/model_settings.config`, and `Metadata/slice_info.config`. Write each object's one-based Bambu extruder from its resolved source slot. Never emit a `BambuStudio-*` application marker without a nonempty project configuration; Bambu Studio interprets that combination as an obsolete project, loads geometry only, and can discard the intended filament assignment.
+
+For every final object, report object/part id, color name, actual hex value, raw token, filament slot, mapping source, and resolution status. Do not collapse repeated colors.
+
+## Validate and Deliver
+
+Default to ratio validation with `--max-topology-defect-ratio 0.001` (0.10%). Label accepted nonzero defects and the final result `ratio_accepted`; keep `--validation-profile strict` for zero-defect audits.
+
+Do not raise `--max-topology-defect-ratio` above `0.001` merely to publish a failed generated part. A separate localized-short-open-edge rule may accept up to 0.20% only when every defect is an open edge, winding is consistent, there are no over-shared or inconsistent edges, the longest open edge is at most `max(0.05 mm, 0.6% of bbox diagonal)`, and their total length is at most 7.5% of the bbox diagonal. Report this as `localized_short_open_edges`, never as strict watertightness.
+
+Require one mesh object per printable part and, by default, one top-level assembly build item containing every mesh object. Validate component order, names, mesh counts, color references, grouped Bambu part metadata, and required package entries. Keep `separate-items` only as an explicit compatibility layout. Record recognition provenance, processing mode and evidence, parent/depth, inward-cap method, requested/effective fit settings, and validation result in each object annotation.
+
+Run deterministic multi-view surface validation before package publication. Compare the source painted surface with the assembled split output under common depth maps. Cull back-facing and grazing centroid samples before building the one-pixel source envelope so hidden caps and oblique raster artifacts do not become false intrusion or material-cover failures. Keep raw ratios in the report: generated intrusion above 2% is advisory and above 4% is blocking by default. The local pair check remains a guard for small high-contrast details such as tongues, eyes, and logos, and by default blocks when either its ratio limit or absolute 64-pixel-per-view limit is exceeded. After explicit visual approval, surface-band advisory mode blocks a local material pair only when both its ratio and accumulated absolute-pixel limits are exceeded; a single-limit exceedance remains recorded as an advisory so a tiny source part cannot fail on an inflated percentage alone. This validation must remain offline and must not invoke a slicer UI.
+
+For Bambu-source outputs, reload all three Bambu metadata entries and require the project filament palette and every object extruder to match the resolved source slots before publication.
+
+Before export and after package reload, normalize shared-face winding without moving vertices and require zero inconsistent shared edges. Check the largest closed shell of every part and every shell above the configured micro-defect area threshold with containment-depth orientation: positive outer material, negative cavity, positive nested material. Flip only shells inconsistent with that parity. Smaller disconnected shells at or below the area threshold use the reported advisory (`depth=-1`) policy in [print-tolerance-and-replay.md](references/print-tolerance-and-replay.md); never claim their containment orientation was checked. Setting the area threshold to zero restores checks for every closed shell. Winding failures and orientation failures in checked shells remain blocking. Repeat source-slot color-index checks after reload.
+
+Record measured parent thickness, the 0.05 mm reserve, preferred/effective minimum, safe maximum, required planar maximum, selected cap mode, and generated minimum/maximum inward travel for every part. Read [references/output-3mf.md](references/output-3mf.md) for the package contract.
+
+Use `--debug-recursive-3mf` for requested layer debugging or the recovery retention policy above; retain `--debug-recursive-stl` as a deprecated command-line alias only. Reserve a unique debug root before expensive work; an existing root gets a `_runNNNN` sibling, even when final-output overwrite is enabled. Folders inside that root follow deterministic depth-first recursion order. Export every changed local body, leaf, and pending subassembly as an independent colored `_mm.3mf`. A pending child's file must preserve its internal per-triangle colors and source filament slots, write both standard 3MF triangle material properties and Bambu-compatible per-triangle `paint_color` tokens when the source is a Bambu project, remain in the parent layer where it was born, reload successfully, and become that child's later recursive input. Also export one cumulative `_CUMULATIVE_mm.3mf` after every step for complete-assembly inspection, but never use a cumulative file as a recursive part input. Preserve the last valid standalone input, cumulative audit, and failing candidate when a step fails. Validate every standalone and cumulative 3MF with the selected strict or ratio profile. Use `--diagnostic-preview` only for an explicitly requested non-deliverable failure preview.
+
+In the final response, state the final path, object count, body id, exterior-recognition statistics, excluded paint tokens, every part's processing mode, preserved colors, output layout, assembly mode/strategy, inward-cap and requested/effective clearance settings, topology result, and multi-view visual result. If slicer screenshots are needed, explicitly ask the user to provide them; do not control the slicer.

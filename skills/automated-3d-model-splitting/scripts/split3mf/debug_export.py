@@ -887,9 +887,6 @@ class VerifiedRecursiveArtifactCache:
             self.metrics["verified_recursive_parse_hits"] = int(
                 self.metrics.get("verified_recursive_parse_hits", 0)
             ) + 1
-            self.metrics["verified_recursive_parse_bytes_avoided"] = int(
-                self.metrics.get("verified_recursive_parse_bytes_avoided", 0)
-            ) + int(path.stat().st_size)
             return validate_loaded_recursive_part(
                 [self._loaded[key]], expected_entry, path
             )
@@ -1662,15 +1659,6 @@ def execute_strict_recursive_split(
             step_component_centers = recursive_context["component_centers"]
             step_model_center = recursive_context["model_center"]
             step_interface_retopology = recursive_context["interface_retopology"]
-            from dataclasses import replace
-            source_prefix = target.get('stats', {}).get('source_faces')
-            provenance_known = (isinstance(source_prefix, (int, np.integer))
-                                and 0 <= source_prefix <= len(step_faces))
-            frozen_ids = (np.unique(np.asarray(step_faces)[source_prefix:])
-                          if provenance_known else None)
-            step_interface_retopology = replace(
-                step_interface_retopology, inherited_frozen_vertex_ids=frozen_ids,
-                inherited_surface_provenance_known=provenance_known)
             recursive_geometry_mapping = recursive_context["mapping_records"]
             runtime_log(
                 "递归输入",
@@ -1690,17 +1678,24 @@ def execute_strict_recursive_split(
             raise ValueError("the first strict recursive step must consume the root model")
 
         if boundary_review is not None:
-            from .boundary_review import owners_from_components
+            from .boundary_review import owners_from_components, apply_component_ownership
             stage_owners = owners_from_components(len(step_faces), step_components)
             checked_owners, boundary_record = boundary_review.prepare(
                 step_vertices, step_faces, stage_owners,
                 context=f"step_{step_order:02d}_P{local_body_index:02d}",
             )
             if not np.array_equal(stage_owners, checked_owners):
-                boundary_record["proposed_source_ownership_changes"] = int(
-                    np.count_nonzero(stage_owners != checked_owners)
-                )
-                boundary_record["source_ownership_changes_applied"] = False
+                step_components = apply_component_ownership(
+                    step_vertices, step_faces, step_components, checked_owners)
+                step_boundary_neighbor_lookup = component_boundary_neighbor_lookup(
+                    step_faces, step_components)
+                step_component_centers = {
+                    index: step_components[index - 1].center for index in step_component_centers
+                }
+                # Root helper closures use the original component list: do not reuse
+                # their already-computed child references after a local approval.
+                if recursive_input_path is None:
+                    raise ValueError("Root ownership changed after planning; rerun with input-level boundary approval")
 
         layer_dir = artifact_layers_dir / (
             f"layer_{step_order:02d}_INWARD_P{local_body_index:02d}"
@@ -1738,16 +1733,6 @@ def execute_strict_recursive_split(
                     interface_geometry=interface_geometry,
                 )
             )
-        from .layer_seam_planning import activate_layer_seams
-        step_vertices, step_faces, step_interface_retopology = activate_layer_seams(
-            step_interface_retopology, local_body_index, step_vertices, step_faces)
-        if step_interface_retopology.active_layer_seam is not None:
-            step_model_center = np.asarray(step_vertices).mean(axis=0)
-            step_component_centers = {
-                index: np.asarray(step_vertices)[np.unique(
-                    np.asarray(step_faces)[component.global_faces])].mean(axis=0)
-                for index, component in enumerate(step_components, 1)
-            }
         local_component = step_components[local_body_index - 1]
         local_color = part_color(local_body_index)
         local_role = (
@@ -2602,3 +2587,4 @@ def execute_strict_recursive_split(
         partial_debug_run=bool(allow_partial),
     )
     return layers_dir, stage_records, active_parts, snapshot_records
+

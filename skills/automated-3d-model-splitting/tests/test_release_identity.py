@@ -32,7 +32,7 @@ class ReleaseIdentityTests(unittest.TestCase):
         for filename in (
             "color-map.schema.json",
             "visual-semantics.schema.json",
-            "source-region-review.schema.json",
+            "tiny-component-review.schema.json",
         ):
             schema = json.loads(self.read(f"references/{filename}"))
             self.assertIn(TECHNICAL_ID, schema["$id"])

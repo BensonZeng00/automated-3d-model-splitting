@@ -427,17 +427,6 @@ def fit_affine_cap_inside_parent(
     trace: list[dict] = []
     total_backoff = 0.0
     last_state: tuple[np.ndarray, np.ndarray, np.ndarray, float, dict] | None = None
-    # A backoff changes ray directions but not their origins or maximum finite
-    # length.  Reuse only a conservative direction-independent broad phase;
-    # every attempt still performs its own capsule rejection, exact triangle
-    # intersections, and complete safety-limit policy.
-    probe = getattr(safety_limit, "__self__", None)
-    prepare_candidates = getattr(probe, "prepare_safety_limit_candidates", None)
-    broad_phase_cache = (
-        prepare_candidates(fit_points, float(maximum_depth_mm))
-        if callable(prepare_candidates)
-        else None
-    )
     for attempt in range(1, int(maximum_attempts) + 1):
         boundary = points[boundary_indices]
         displacement = boundary - fit_points
@@ -451,19 +440,11 @@ def fit_affine_cap_inside_parent(
                 f"total_backoff_mm={total_backoff:.6f}"
             )
         directions = displacement / distances[:, None]
-        if broad_phase_cache is None:
-            safe_maximum, thickness_record = safety_limit(
-                fit_points,
-                directions,
-                float(maximum_depth_mm),
-            )
-        else:
-            safe_maximum, thickness_record = probe.safety_limit(
-                fit_points,
-                directions,
-                float(maximum_depth_mm),
-                broad_phase_cache=broad_phase_cache,
-            )
+        safe_maximum, thickness_record = safety_limit(
+            fit_points,
+            directions,
+            float(maximum_depth_mm),
+        )
         maximum_distance = float(distances.max())
         excess = maximum_distance - float(safe_maximum)
         trace.append(

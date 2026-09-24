@@ -47,11 +47,11 @@ class FinalizationCase:
                                    metadata=source_mesh.metadata.copy())
             data.close()
             from .validation import validate_mesh_in_memory
-            mesh.metadata.update(
-                source_preserving_finalization=receipt['audit'],
-                source_topology_diagnostics=validate_mesh_in_memory(mesh),
-                source_geometry_mutation="none",
-            )
+            validation = validate_mesh_in_memory(mesh)
+            if any(validation[k] for k in ('open_edges','over_shared_edges','inconsistent_shared_edges')):
+                return None
+            mesh.metadata.update(source_preserving_finalization=receipt['audit'],
+                                 orientation_repair=receipt['audit']['orientation_repair'])
             print('finalization_cache_hit='+str(self.directory),flush=True)
             return mesh, receipt['audit']
         except (OSError,ValueError,KeyError):

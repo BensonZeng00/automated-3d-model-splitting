@@ -18,54 +18,13 @@ def _cross(left, right):
 
 
 def crossing_pairs(points):
-    """Find strict crossings through a bounded uniform-grid broad phase."""
+    """Find strict segment crossings, excluding adjacent cyclic edges."""
     points = np.asarray(points, dtype=np.float64)
-    if len(points) < 4:
-        return []
     ends = np.roll(points, -1, axis=0)
-    minimum = np.minimum(points, ends)
-    maximum = np.maximum(points, ends)
-    origin = points.min(axis=0)
-    extent = np.maximum(np.ptp(points, axis=0), 1e-12)
-    side = max(1, int(np.ceil(np.sqrt(len(points)))))
-    scale = np.asarray([side, side], dtype=np.float64) / extent
-    lower = np.clip(
-        np.floor((minimum - origin) * scale).astype(np.int64), 0, side - 1
-    )
-    upper = np.clip(
-        np.floor((maximum - origin) * scale).astype(np.int64), 0, side - 1
-    )
-    buckets = {}
-    long_segments = []
-    for index, (start, stop) in enumerate(zip(lower, upper)):
-        if int(np.prod(stop - start + 1)) > 64:
-            long_segments.append(index)
-            continue
-        for x in range(int(start[0]), int(stop[0]) + 1):
-            for y in range(int(start[1]), int(stop[1]) + 1):
-                buckets.setdefault((x, y), []).append(index)
-    candidates = set()
-    for members in buckets.values():
-        for position, left in enumerate(members):
-            candidates.update(
-                (left, right) if left < right else (right, left)
-                for right in members[position + 1 :]
-            )
-    for left in long_segments:
-        candidates.update(
-            (left, right) if left < right else (right, left)
-            for right in range(len(points)) if right != left
-        )
     pairs = []
-    for index, other in sorted(candidates):
-        cyclic_distance = other - index
-        if cyclic_distance <= 1 or cyclic_distance >= len(points) - 1:
-            continue
-        if np.any(maximum[index] < minimum[other]) or np.any(
-            maximum[other] < minimum[index]
-        ):
-            continue
-        starts, stops = points[other], ends[other]
+    for index in range(len(points) - 2):
+        others = np.arange(index + 2, len(points) - (index == 0))
+        starts, stops = points[others], ends[others]
         hit = (
             _cross(ends[index] - points[index], starts - points[index])
             * _cross(ends[index] - points[index], stops - points[index]) < -1e-20
@@ -73,8 +32,7 @@ def crossing_pairs(points):
             _cross(stops - starts, points[index] - starts)
             * _cross(stops - starts, ends[index] - starts) < -1e-20
         )
-        if bool(hit):
-            pairs.append((index, other))
+        pairs.extend((index, int(other)) for other in others[hit])
     return pairs
 
 

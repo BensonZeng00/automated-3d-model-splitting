@@ -7,10 +7,10 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'scripts'))
 from split3mf.common import load_core_dependencies
 load_core_dependencies()
-from split3mf.region_review import strip_evidence, select_region_review_groups
+from split3mf.region_review import strip_evidence, partition_review_groups
 from split3mf.print_tolerance import small_patch_report, tolerance_scope, PrintTolerance
 from split3mf.connector_surface import refine_connector_annulus_heightfield
-from split3mf.recognition import classify_review_groups_semantically
+from split3mf.recognition import classify_tiny_groups_semantically, merge_tiny_groups_with_user_review
 from split3mf.cli import build_parser
 from split3mf.stage_cache import normalized_run_arguments
 
@@ -39,8 +39,8 @@ class PrintPriorityTests(unittest.TestCase):
             evidence = strip_evidence(v, f, np.arange(len(f)))
             self.assertTrue(evidence['long_thin_candidate'])
             self.assertAlmostEqual(evidence['visible_area_mm2'], 20)
-            ordinary, review = select_region_review_groups(v, f, [np.arange(len(f))], 100, 999)
-            self.assertEqual((len(ordinary), len(review)), (0, 1))
+            kept, auto, review = partition_review_groups(v, f, [np.arange(len(f))], 1000, 100)
+            self.assertEqual((len(kept), len(auto), len(review)), (0, 0, 1))
 
     def test_hidden_faces_do_not_inflate_strip_area(self):
         v, f = strip_mesh(4)
@@ -50,6 +50,20 @@ class PrintPriorityTests(unittest.TestCase):
         self.assertFalse(strip_evidence(v, f, np.arange(len(f)), np.zeros(len(f), bool))['long_thin_candidate'])
         v[:, 1] *= 30
         self.assertFalse(strip_evidence(v, f, np.arange(len(f)))['long_thin_candidate'])
+
+    def test_review_decision_preserves_large_strip(self):
+        v, f = strip_mesh(600)
+        groups = [np.arange(len(f))]
+        # A large strip must not remain automatically effective and also be
+        # appended as a preserved review group: source faces belong once.
+        components, _, merged, preserved = merge_tiny_groups_with_user_review(
+            v, f, ['8']*len(f), groups, 1000,
+            {1: dict(preserve=True, semantic_label='stripe', visual_confidence='HIGH')},
+            view_count=2, depth_map_resolution=32)
+        self.assertEqual(len(components), 1)
+        self.assertEqual(components[0].face_count, len(f))
+        self.assertEqual(len(preserved), 1)
+        self.assertEqual(merged, [])
 
     def test_disconnected_patches_keep_single_area_budget(self):
         v = np.array([[0,0,0],[1,0,0],[0,.02,0],[70,0,0],[71,0,0],[70,.02,0]])
@@ -64,7 +78,7 @@ class PrintPriorityTests(unittest.TestCase):
 
     def test_no_candidates_skip_semantic_geometry(self):
         with patch('split3mf.recognition.triangle_areas', side_effect=AssertionError('unnecessary scan')):
-            self.assertEqual(classify_review_groups_semantically(
+            self.assertEqual(classify_tiny_groups_semantically(
                 np.empty((0,3)), np.empty((0,3), int), [], [], [], [], 1000), [])
 
     def test_print_preservation_keeps_audited_geometry_exactly(self):

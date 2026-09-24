@@ -166,24 +166,6 @@ class StrictRecursiveExecutionTests(unittest.TestCase):
             source,
         )
 
-    def test_each_interface_resolves_its_axis_before_depth_planning(self) -> None:
-        source = inspect.getsource(build_layer_child_cut_references)
-        resolution = source.index("interface_inward, surface_direction_record =")
-        depth_planning = source.index("build_reserved_cap_decision(")
-
-        self.assertLess(resolution, depth_planning)
-        self.assertIn("loop,\n                interface_inward,", source)
-        self.assertIn('"inward": interface_inward,', source)
-
-    def test_taper_screening_uses_authoritative_thickness_horizon(self) -> None:
-        source = inspect.getsource(build_layer_child_cut_references)
-        screening_start = source.index("for inset_candidate in inset_candidates:")
-        selection_start = source.index("if valid_candidates:", screening_start)
-        screening = source[screening_start:selection_start]
-
-        self.assertNotIn("safety_ceiling_mm=", screening)
-        self.assertIn("parent_thickness_probe=child_parent_thickness_probe", screening)
-
     def test_retopology_target_is_never_partially_backed_off(self) -> None:
         source = inspect.getsource(build_layer_child_cut_references)
         self.assertIn("large_cap_loop = len(loop) > 512", source)
@@ -195,7 +177,7 @@ class StrictRecursiveExecutionTests(unittest.TestCase):
         self.assertRegex(
             source,
             r"cap_decision_patch_quality_preflight\(\s+"
-            r"cap_decision,\s+active_inward,\s+source_points,",
+            r"cap_decision,\s+inward,\s+source_points,",
         )
         self.assertIn(
             "source_points = planned_vertices[loop_array]",

@@ -2,6 +2,16 @@
 
 This is the sole production boundary policy. `smooth` is the default; the source mode has been removed. First apply the area-based local cleanup and completion-first judgment in [completion-first.md](completion-first.md), then fit the shared seam.
 
+Before the final backing annulus is triangulated, its outer contour is reduced
+with topology-checked closed Douglas--Peucker simplification. The independent
+`--visible-interface-simplification-tolerance` parameter defaults to 0.4 mm,
+roughly a common FDM line width, and may be set to zero to disable this trade-off.
+It is a geometric deviation bound rather than a target vertex count. The result
+must retain winding, remain a simple closed polygon, and still contain the
+compact connector; otherwise the original contour is retained. This explicitly
+allows sub-resolution white/green boundary detail to move while leaving the
+more conservative backing/profile tolerances independent.
+
 For every production split, use `planar-arc-retopology` for each cut boundary. Canonicalize the closed loop by source vertex id, fit a stable local plane with SVD, project to 2-D, and resample at 384 equal physical arc-length positions. Fit those projected samples with a 24-control least-squares periodic cubic B-spline and fit the stable-plane-normal height independently with an 8-control periodic cubic B-spline.
 
 A three-edge closed loop is already the smallest valid polygon and cannot support a cubic spline: preserve that exact micro-loop instead of inventing a fourth control point, and record the exception. Never restore source projected extrema after fitting; record the signed extent deltas instead. Locally regularize source physical edge fractions for up to 8 cyclic passes on loops up to 300 vertices and 2 passes on larger loops, eliminating isolated microscopic rim edges without rotating semantic source ids several millimetres around a deliberately nonuniform loop. Evaluate the fitted splines directly at those regularized source phases and keep child/parent source-id correspondence exact.

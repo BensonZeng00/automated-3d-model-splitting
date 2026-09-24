@@ -53,6 +53,7 @@ def local_connector_spec_for_interface(
     compact_peg_supported: bool = True,
     slope_validation_mode: str = "strict",
     surface_validation_mode: str = "strict",
+    visible_interface_simplification_tolerance: float = 0.0,
     policy: ConnectorDepthPolicy = DEFAULT_DEPTH_POLICY,
 ) -> LocalConnectorSpec:
     """Convert separate rim/backing and compact-footprint budgets to one joint.
@@ -205,6 +206,9 @@ def local_connector_spec_for_interface(
         ),
         slope_validation_mode=str(slope_validation_mode),
         surface_validation_mode=str(surface_validation_mode),
+        visible_interface_simplification_tolerance=float(
+            visible_interface_simplification_tolerance
+        ),
     )
 
 

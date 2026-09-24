@@ -306,6 +306,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--boundary-target-samples", type=int, default=384)
     parser.add_argument("--boundary-smooth-passes", type=int, default=28)
     parser.add_argument(
+        "--visible-interface-simplification-tolerance",
+        type=float,
+        default=0.4,
+        metavar="MM",
+        help=(
+            "Maximum geometric deviation in millimeters when simplifying the "
+            "visible-interface backing contour before annulus triangulation "
+            "(default: 0.4; use 0 to disable)."
+        ),
+    )
+    parser.add_argument(
         "--maximum-boundary-displacement-mm",
         type=float,
         default=10.0,
@@ -432,6 +443,8 @@ def main(argv: list[str] | None = None) -> None:
         parser.error("--boundary-target-samples must be at least 16")
     if args.boundary_smooth_passes < 0:
         parser.error("--boundary-smooth-passes must be non-negative")
+    if args.visible_interface_simplification_tolerance < 0:
+        parser.error("--visible-interface-simplification-tolerance must be non-negative")
     if args.boundary_retopology_band_mm <= 0:
         parser.error("--boundary-retopology-band-mm must be positive")
     if args.maximum_boundary_displacement_mm <= 0:

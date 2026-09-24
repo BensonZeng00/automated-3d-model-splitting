@@ -137,6 +137,7 @@ A hidden generated-backing thin patch no larger than 2 mm² is recorded as a pri
 
 - `--boundary-target-samples 384`
 - `--boundary-smooth-passes 28`
+- `--visible-interface-simplification-tolerance 0.4` (millimeters; `0` disables)
 - `--boundary-retopology-band-mm 3.0`
 - `--connector-slope-validation strict|advisory` (default `advisory`)
 - `--surface-band-validation strict|advisory` (default `strict`)

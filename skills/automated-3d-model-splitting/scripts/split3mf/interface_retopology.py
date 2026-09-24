@@ -1625,7 +1625,31 @@ class InterfaceRetopologyService:
                 maximum_p95_target_offset_mm=policy.p95_displacement_mm,
             )
         except CurveClarityRequired as exc:
-            if context.config.surface_band_validation == "advisory":
+            from .curve_clarity import projected_crossing_separations
+            crossing_separations = projected_crossing_separations(
+                # Curve clarity rejected the reconstructed target, not the
+                # noisy vendor source ring.  Source rings can contain many
+                # microscopic projected folds which are unrelated to the
+                # small set of crossings reported for the fitted boundary.
+                exc.target,
+                exc.basis[0],
+                exc.basis[1],
+                exc.basis[2],
+            )
+            # A projected crossing is only a rendering ambiguity when the two
+            # reconstructed 3-D segment locations are actually distinct.  In
+            # that case applying 2-D loop surgery would delete a real folded
+            # branch, so preserving the source curve is correct in both strict
+            # and advisory modes.  Genuine 3-D intersections still require
+            # review (or the established explicit advisory escape hatch).
+            projection_only_crossings = bool(
+                crossing_separations
+                and min(crossing_separations) > 1e-4
+            )
+            if (
+                projection_only_crossings
+                or context.config.surface_band_validation == "advisory"
+            ):
                 # A projected crossing does not prove that the original 3-D
                 # source seam self-intersects.  Dense painted models often
                 # contain folded/steep seams whose planar fit creates the
@@ -1642,13 +1666,24 @@ class InterfaceRetopologyService:
                     p95_target_offset_mm=0.0,
                     rms_target_offset_mm=0.0,
                     ambiguous_planar_fit_skipped=True,
+                    projected_crossings_are_3d_disjoint=bool(
+                        projection_only_crossings
+                    ),
+                    minimum_projected_crossing_3d_separation_mm=(
+                        float(min(crossing_separations))
+                        if crossing_separations else None
+                    ),
                     topology_change=False,
                     requires_user_confirmation=False,
                 )
                 runtime_log(
                     "planar-arc-retopology",
                     "ambiguous_fit_source_curve_preserved",
-                    "投影拟合产生交叉；advisory 模式保留原始三维边界并继续严格几何审核",
+                    (
+                        "投影交叉在三维中分离；保留原始三维边界并继续严格几何审核"
+                        if projection_only_crossings
+                        else "投影拟合产生交叉；advisory 模式保留原始三维边界并继续严格几何审核"
+                    ),
                     source_vertices=len(loop_points),
                     projected_crossings=proposal_record.get(
                         "projected_crossings_before", 0),

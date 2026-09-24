@@ -597,19 +597,24 @@ class GeneralizedV12Tests(unittest.TestCase):
         self.assertEqual(safe_maximum, 0.0)
         self.assertFalse(record["parent_thickness_isolated_coincident_hits_discarded"])
 
-    def test_parent_thickness_discards_clustered_unpaired_surface_hits_only(self) -> None:
+    def test_parent_thickness_discards_near_origin_surface_hits(self) -> None:
         class ClassifiedStubProbe(ParentThicknessProbe):
-            def __init__(self, thicknesses, preceding_entries):
+            def __init__(self, thicknesses, preceding_entries, exit_distances=None):
                 self.thicknesses = np.asarray(thicknesses, dtype=np.float64)
                 self.preceding_entries = np.asarray(
                     preceding_entries,
                     dtype=bool,
+                )
+                self.exit_distances = np.asarray(
+                    self.thicknesses if exit_distances is None else exit_distances,
+                    dtype=np.float64,
                 )
 
             def first_hit_distances(self, points, directions, search_limit_mm):
                 self.last_hit_had_preceding_entry = (
                     self.preceding_entries.copy()
                 )
+                self.last_selected_exit_distances = self.exit_distances.copy()
                 return self.thicknesses.copy()
 
         points = np.zeros((200, 3), dtype=np.float64)
@@ -638,6 +643,34 @@ class GeneralizedV12Tests(unittest.TestCase):
             0,
         )
 
+        folded_surface_probe = ClassifiedStubProbe(
+            [0.061] + [3.0] * 199,
+            [True] + [False] * 199,
+            [0.14] + [3.0] * 199,
+        )
+        safe_maximum, record = folded_surface_probe.safety_limit(
+            points, directions, 5.0,
+        )
+        self.assertAlmostEqual(safe_maximum, 2.95)
+        self.assertEqual(
+            record["parent_thickness_near_origin_surface_hit_vertices_discarded"],
+            1,
+        )
+
+        near_surface_probe = ClassifiedStubProbe(
+            [0.061] * 25 + [3.0] * 175,
+            [False] * 200,
+        )
+        safe_maximum, record = near_surface_probe.safety_limit(
+            points, directions, 5.0,
+        )
+        self.assertAlmostEqual(safe_maximum, 2.95)
+        self.assertEqual(
+            record["parent_thickness_unpaired_surface_hit_vertices_discarded"],
+            25,
+        )
+        self.assertEqual(record["parent_surface_hit_tolerance_mm"], 0.10)
+
         paired_probe = ClassifiedStubProbe(
             [0.001] * 20 + [3.0] * 180,
             [True] * 20 + [False] * 180,
@@ -647,16 +680,16 @@ class GeneralizedV12Tests(unittest.TestCase):
             directions,
             5.0,
         )
-        self.assertEqual(safe_maximum, 0.0)
+        self.assertAlmostEqual(safe_maximum, 2.95)
         self.assertEqual(
             record[
                 "parent_thickness_unpaired_surface_hit_vertices_discarded"
             ],
-            0,
+            20,
         )
         self.assertEqual(
             record["parent_thickness_remaining_coincident_hit_vertices"],
-            20,
+            0,
         )
 
     def test_parent_thickness_uses_remote_shell_entry_not_shell_interval(self) -> None:

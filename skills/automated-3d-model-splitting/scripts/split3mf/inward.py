@@ -3758,6 +3758,33 @@ class ParentThicknessProbe:
                 preceding_entry_distances[paired_remote_shell_repair]
             )
         raw_minimum = float(thicknesses.min()) if len(thicknesses) else search_limit
+        selected_exit_distances = getattr(
+            self,
+            "last_selected_exit_distances",
+            None,
+        )
+        has_exit_classification = bool(
+            isinstance(selected_exit_distances, np.ndarray)
+            and selected_exit_distances.shape == thicknesses.shape
+        )
+        # A hit belongs to the sampled surface neighbourhood when either its
+        # complete exit or its still-local material interval is within the
+        # origin tolerance.  The second condition matters for a folded seam:
+        # it can produce a paired entry/exit straddling the tolerance even
+        # though the tiny interval is only the local tessellated skin.  A thin
+        # remote shell is repaired to its distant entry above, so it satisfies
+        # neither condition and remains a real obstacle.
+        surface_near = (
+            (thicknesses <= PARENT_SURFACE_HIT_TOLERANCE_MM + 1e-9)
+            | (
+                (
+                    selected_exit_distances
+                    if has_exit_classification
+                    else np.full_like(thicknesses, np.inf)
+                )
+                <= PARENT_SURFACE_HIT_TOLERANCE_MM + 1e-9
+            )
+        )
         coincident = thicknesses <= PARENT_THICKNESS_CLEARANCE_MM + 1e-9
         coincident_count = int(np.count_nonzero(coincident))
         coincident_ratio = float(coincident_count / max(len(thicknesses), 1))
@@ -3770,15 +3797,15 @@ class ParentThicknessProbe:
             isinstance(preceding_entry_mask, np.ndarray)
             and preceding_entry_mask.shape == thicknesses.shape
         )
-        unpaired_coincident = (
-            coincident & ~preceding_entry_mask
+        near_origin_surface_hits = (
+            surface_near
             if has_entry_classification
             else np.zeros_like(coincident)
         )
-        unpaired_coincident_count = int(
-            np.count_nonzero(unpaired_coincident)
+        near_origin_surface_hit_count = int(
+            np.count_nonzero(near_origin_surface_hits)
         )
-        usable_mask = ~unpaired_coincident
+        usable_mask = ~near_origin_surface_hits
         after_unpaired = thicknesses[usable_mask]
         after_unpaired_coincident = (
             after_unpaired
@@ -3900,7 +3927,10 @@ class ParentThicknessProbe:
             "parent_thickness_coincident_hit_vertices": coincident_count,
             "parent_thickness_coincident_hit_ratio": coincident_ratio,
             "parent_thickness_unpaired_surface_hit_vertices_discarded": (
-                unpaired_coincident_count
+                near_origin_surface_hit_count
+            ),
+            "parent_thickness_near_origin_surface_hit_vertices_discarded": (
+                near_origin_surface_hit_count
             ),
             "parent_thickness_remaining_coincident_hit_vertices": (
                 after_unpaired_coincident_count
@@ -3920,6 +3950,9 @@ class ParentThicknessProbe:
                 )
             },
             "parent_thickness_clearance_mm": PARENT_THICKNESS_CLEARANCE_MM,
+            "parent_surface_hit_tolerance_mm": (
+                PARENT_SURFACE_HIT_TOLERANCE_MM
+            ),
             "safe_maximum_inward_depth_mm": safe_maximum,
             "parent_thickness_limiting_probe_vertex_indices": [
                 int(value) for value in limiting_vertex_sample

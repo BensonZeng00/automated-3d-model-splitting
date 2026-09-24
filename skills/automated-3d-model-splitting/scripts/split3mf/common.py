@@ -43,6 +43,12 @@ DEFAULT_EFFECTIVE_MINIMUM_INWARD_DEPTH_MM = 3.0
 MAXIMUM_SAFE_INWARD_DEPTH_MM = 10.0
 DEFAULT_LEAD_IN_SLOPE_DEGREES = 45.0
 PARENT_THICKNESS_CLEARANCE_MM = 0.05
+# Intersections this close to a seam probe origin belong to the sampled
+# exterior surface neighborhood, not to the opposite wall.  Keep this
+# classification tolerance separate from the manufacturing clearance: using
+# the 0.05 mm clearance as both values made 0.050--0.061 mm tessellation hits
+# masquerade as the thickness of an otherwise substantial parent body.
+PARENT_SURFACE_HIT_TOLERANCE_MM = 0.10
 # When the measured parent is thinner than the preferred backing depth, a
 # coherent floor may legitimately have less travel at the high side of a
 # curved source rim.  Keep enough depth beyond the 0.60 mm lead-in for a

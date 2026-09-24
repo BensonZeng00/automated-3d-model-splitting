@@ -70,6 +70,32 @@ class InterfaceRetopologyTests(unittest.TestCase):
         self.assertEqual(record['status'], 'source_curve_preserved')
         self.assertTrue(record['ambiguous_planar_fit_skipped'])
 
+    def test_strict_preserves_3d_disjoint_projected_crossing(self) -> None:
+        # The source itself has a true 3-D crossing, but clarity is reporting
+        # the fitted target.  Classification must therefore use the target,
+        # rather than unrelated source-ring micro-folds.
+        source = np.asarray([[0., 0., 0.], [1., 1., 0.],
+                             [0., 1., 0.], [1., 0., 0.]])
+        target = source.copy()
+        target[2:, 2] = 2.0
+        proposal = type('Proposal', (), {'record': {
+            'projected_crossings_before': 1, 'status': 'proposed'}})()
+        failure = CurveClarityRequired(source, target, proposal,
+                                       (np.zeros(3), np.eye(3)[0],
+                                        np.eye(3)[1], np.eye(3)[2]))
+        context = PlanarArcRetopologyContext(PlanarArcRetopologyConfig())
+        with patch(
+                'split3mf.interface_retopology.build_planar_arc_boundary',
+                side_effect=failure):
+            target, record = InterfaceRetopologyService.retopologize_loop(
+                source, np.arange(4), context)
+
+        np.testing.assert_array_equal(target, source)
+        self.assertEqual(record['status'], 'source_curve_preserved')
+        self.assertTrue(record['projected_crossings_are_3d_disjoint'])
+        self.assertAlmostEqual(
+            record['minimum_projected_crossing_3d_separation_mm'], 2.0)
+
     def test_large_target_preserves_visible_rim_and_reaches_hidden_planner(self) -> None:
         source = np.asarray(
             [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0]],

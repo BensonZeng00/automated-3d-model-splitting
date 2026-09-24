@@ -40,6 +40,29 @@ def crossings(points):
     return found
 
 
+def projected_crossing_separations(points, origin, u, v):
+    """Measure the 3-D separation at every apparent 2-D crossing.
+
+    A plane projection is not an intersection test: two non-adjacent seam
+    segments can occupy the same plane coordinate while remaining separated
+    along the discarded axis.  Reuse the exact projected crossing parameters
+    to reconstruct both 3-D locations rather than trying to infer topology
+    from a drawing.
+    """
+    curve = np.asarray(points, dtype=np.float64)
+    basis = np.column_stack((u, v))
+    projected = (curve - np.asarray(origin, dtype=np.float64)) @ basis
+    edges = np.roll(curve, -1, axis=0) - curve
+    return [
+        float(np.linalg.norm(
+            curve[first] + edges[first] * first_fraction
+            - curve[second] - edges[second] * second_fraction
+        ))
+        for first, second, first_fraction, second_fraction
+        in crossings(projected)
+    ]
+
+
 def _sweep_crossings(points, edges):
     """Conservative segment-AABB sweep followed by the same exact predicate."""
     low = np.minimum(points, np.roll(points, -1, axis=0))

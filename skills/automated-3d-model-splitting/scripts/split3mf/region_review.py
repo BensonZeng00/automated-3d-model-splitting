@@ -44,25 +44,17 @@ def strip_evidence(vertices, faces, group, visible_faces=None,
                 thresholds=policy.__dict__)
 
 
-def select_region_review_groups(vertices, faces, groups, noise_max_faces,
-                                small_region_max_faces, visible_faces=None):
-    """Return source regions requiring semantic review without changing geometry.
-
-    Face-count thresholds classify review candidates only.  Every input group
-    remains source geometry and must continue through the ordinary split path.
-    Long strips require review regardless of tessellation density.
-    """
-    ordinary, review = [], []
+def partition_review_groups(vertices, faces, groups, min_faces,
+                            auto_noise_max_faces, visible_faces=None):
+    """Long strips require review even above the ordinary face-count ceiling."""
+    effective, automatic, review = [], [], []
     for raw in groups:
         group = np.asarray(raw, dtype=np.int64)
         evidence = strip_evidence(vertices, faces, group, visible_faces)
-        if evidence["long_thin_candidate"] or len(group) <= small_region_max_faces:
-            category = (
-                "long_strip_candidate" if evidence["long_thin_candidate"]
-                else "noise_candidate" if len(group) <= noise_max_faces
-                else "small_region_candidate"
-            )
-            review.append((group, category))
+        if evidence["long_thin_candidate"] or auto_noise_max_faces < len(group) < min_faces:
+            review.append(group)
+        elif len(group) < min_faces and len(group) <= auto_noise_max_faces:
+            automatic.append(group)
         else:
-            ordinary.append(group)
-    return ordinary, review
+            effective.append(group)
+    return effective, automatic, review

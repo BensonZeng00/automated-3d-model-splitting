@@ -76,16 +76,46 @@ class SourcePreservingMeshFinalizerTests(unittest.TestCase):
             0,
         )
 
-    def test_open_source_is_reported_without_repair(self) -> None:
+    def test_closes_residual_triangle_without_post_closure_cleanup(self) -> None:
         source = ordinary_closed_tetrahedron()
         open_mesh = trimesh.Trimesh(
-            vertices=np.asarray(source.vertices), faces=np.asarray(source.faces)[1:], process=False)
-        before_faces = np.asarray(open_mesh.faces).copy()
+            vertices=np.asarray(source.vertices),
+            faces=np.asarray(source.faces)[1:],
+            process=False,
+        )
+        self.assertEqual(validate_mesh_in_memory(open_mesh)["open_edges"], 3)
+
         result = SourcePreservingMeshFinalizer.finalize(
-            open_mesh, SourcePreservingFinalizationPolicy(protected_source_face_count=3))
-        np.testing.assert_array_equal(result.mesh.faces, before_faces)
-        self.assertEqual(validate_mesh_in_memory(result.mesh)["open_edges"], 3)
-        self.assertEqual(result.audit["source_geometry_mutation"], "none")
+            open_mesh,
+            SourcePreservingFinalizationPolicy(
+                protected_source_face_count=3,
+                allow_residual_boundary_closure=True,
+                require_watertight=True,
+            ),
+        )
+
+        self.assertEqual(validate_mesh_in_memory(result.mesh)["open_edges"], 0)
+        self.assertEqual(len(result.mesh.faces), 4)
+        self.assertTrue(result.audit["residual_boundary_closure_applied"])
+        self.assertEqual(result.audit["residual_boundary_faces_added"], 1)
+
+    def test_rejects_unclosed_result_when_closure_is_disabled(self) -> None:
+        source = ordinary_closed_tetrahedron()
+        open_mesh = trimesh.Trimesh(
+            vertices=np.asarray(source.vertices),
+            faces=np.asarray(source.faces)[1:],
+            process=False,
+        )
+
+        with self.assertRaisesRegex(ValueError, "strict topology"):
+            SourcePreservingMeshFinalizer.finalize(
+                open_mesh,
+                SourcePreservingFinalizationPolicy(
+                    protected_source_face_count=3,
+                    allow_residual_boundary_closure=False,
+                    require_watertight=True,
+                ),
+            )
 
 
 if __name__ == "__main__":

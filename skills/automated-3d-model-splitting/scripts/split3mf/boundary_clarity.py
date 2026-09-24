@@ -93,7 +93,6 @@ class BoundaryGraph:
         never move. Different edge weights favor length or geometric creases.
         """
         base = np.asarray(owners).astype(str)
-        owner_labels, base_codes = np.unique(base, return_inverse=True)
         a, b = self.adjacency.T
         lengths = np.linalg.norm(self.vertices[self.edges[:, 1]]-self.vertices[self.edges[:, 0]], axis=1)
         tri = self.vertices[self.faces]
@@ -102,45 +101,33 @@ class BoundaryGraph:
         bend = np.clip(np.einsum('ij,ij->i', normals[a], normals[b]), -1, 1)
         proposals, seen = [], set()
         for crease_weight in (0.0, 1.0, 3.0)[:max_candidates]:
-            result_codes = base_codes.copy()
+            result = base.copy()
             weights = np.maximum(lengths, 1e-12) * np.exp(crease_weight*(bend-1))
             graph = csr_matrix((np.r_[weights, weights], (np.r_[a, b], np.r_[b, a])), shape=self.graph.shape)
-            weighted_degree = np.asarray(graph.sum(axis=1)).ravel()
             for _ in range(8):
-                # Sparse matrix voting replaces one Python/np.unique loop per
-                # uncertain face.  Dense storage is only N faces x material
-                # count (four columns for the large reference models).
-                scores = np.column_stack([
-                    np.asarray(graph @ (result_codes == code), dtype=np.float64)
-                    for code in range(len(owner_labels))
-                ])
-                rows = np.arange(len(result_codes))
-                current_support = scores[rows, result_codes] > 0.0
-                scores[rows[current_support], result_codes[current_support]] += (
-                    0.25 * weighted_degree[current_support]
-                )
-                winners = np.argmax(scores, axis=1)
-                winning_scores = scores[rows, winners]
-                unique_winners = np.sum(
-                    np.isclose(scores, winning_scores[:, None], rtol=1e-10, atol=1e-15),
-                    axis=1,
-                ) == 1
-                updated = result_codes.copy()
-                movable = assessment.uncertain_faces[
-                    unique_winners[assessment.uncertain_faces]
-                ]
-                updated[movable] = winners[movable]
-                if np.array_equal(updated, result_codes):
+                updated = result.copy()
+                for face in assessment.uncertain_faces:
+                    start, end = graph.indptr[face:face+2]
+                    neighbors = graph.indices[start:end]
+                    if not len(neighbors):
+                        continue
+                    labels, ids = np.unique(result[neighbors], return_inverse=True)
+                    scores = np.bincount(ids, weights=graph.data[start:end])
+                    current = np.flatnonzero(labels == result[face])
+                    if len(current):
+                        scores[current[0]] += 0.25 * graph.data[start:end].sum()
+                    winner = int(np.argmax(scores))
+                    if np.sum(np.isclose(scores, scores[winner], rtol=1e-10, atol=1e-15)) == 1:
+                        updated[face] = labels[winner]
+                if np.array_equal(updated, result):
                     break
-                result_codes = updated
-            result = owner_labels[result_codes]
+                result = updated
             changed = np.flatnonzero(result != base)
             if not len(changed) or not set(np.unique(base)).issubset(set(np.unique(result))):
                 continue
             # Never propose a new disconnected region or remove a whole part.
             disconnected = False
-            affected_owners = np.unique(np.r_[base[changed], result[changed]])
-            for owner in affected_owners:
+            for owner in np.unique(base):
                 before_ids, after_ids = np.flatnonzero(base == owner), np.flatnonzero(result == owner)
                 before = connected_components(self.graph[before_ids][:, before_ids], directed=False, return_labels=False)
                 after = connected_components(self.graph[after_ids][:, after_ids], directed=False, return_labels=False)

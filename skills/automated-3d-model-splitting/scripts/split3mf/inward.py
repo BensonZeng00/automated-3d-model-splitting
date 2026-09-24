@@ -1,9 +1,5 @@
 from __future__ import annotations
 
-from scipy.ndimage import convolve1d
-from scipy.sparse import coo_matrix
-from scipy.sparse.csgraph import dijkstra
-
 from .cap_template import (
     fit_affine_cap_inside_parent,
     progressive_boundary_deformation,
@@ -35,10 +31,7 @@ def visible_top_edge_clearance(insert_shrink_mm: float) -> float:
     """
     _ = max(float(insert_shrink_mm), 0.0)
     return 0.0
-from .interface_retopology import (
-    InterfaceRetopologyService,
-    generated_geometry_boundary_vertices,
-)
+from .interface_retopology import InterfaceRetopologyService
 from .domain import PlanarArcRetopologyContext, CapDecision
 from .hidden_interface import (
     HIDDEN_INTERFACE_MINIMUM_LOAD_BEARING_DEPTH_MM,
@@ -76,6 +69,7 @@ from .connector_topology import (
 from .connector_surface import refine_connector_annulus_heightfield
 from .mesh_finalization import (
     finalize_source_preserving_mesh,
+    weld_coincident_open_boundary_vertices,
 )
 from .reporting import runtime_log
 
@@ -166,27 +160,73 @@ def finalize_recursive_colored_mesh(
     nondegenerate_mask[:protected_count] = True
     if not np.all(nondegenerate_mask):
         mesh.update_faces(nondegenerate_mask)
-    generated_orientation = {"applied": False, "changed_generated_faces": 0}
-    if protected_count < len(mesh.faces):
-        source_faces = np.asarray(mesh.faces[:protected_count], dtype=np.int64).copy()
-        generated_before = np.asarray(mesh.faces[protected_count:], dtype=np.int64).copy()
-        orient_mesh_faces_consistently(mesh)
-        mesh.faces[:protected_count] = source_faces
-        generated_after = np.asarray(mesh.faces[protected_count:], dtype=np.int64)
-        generated_orientation = {
-            "applied": True,
-            "changed_generated_faces": int(
-                np.count_nonzero(np.any(generated_before != generated_after, axis=1))
-            ),
-            "source_faces_changed": 0,
+    mesh.remove_unreferenced_vertices()
+    mesh, selective_weld_record = weld_coincident_open_boundary_vertices(mesh)
+    if int(validate_mesh_in_memory(mesh)["open_edges"]) > 0:
+        mesh = close_residual_boundaries(mesh, merge_and_clean=False)
+        mesh, post_closure_weld_record = weld_coincident_open_boundary_vertices(mesh)
+    else:
+        post_closure_weld_record = {
+            "attempted": False,
+            "accepted": False,
+            "reason": "no_identity_open_edges_after_selective_weld",
         }
-    # Do not weld, close, orient, or remove disconnected source shells here.
-    # Source topology is diagnostic; interface builders validate their own new
-    # faces before this assembly step.
-    mesh.metadata["source_topology_diagnostics"] = validate_mesh_in_memory(mesh)
+    orientation_record = orient_mesh_faces_consistently(mesh)
+    # Recursive colored children use the same print-scale repair as the root.
+    # Preserve material lookup by geometry; inferred closure colors propagate below.
+    from .print_tolerance import current
+    if current().micro_area_mm2 > 0 and (
+        not mesh.is_watertight or not mesh.is_winding_consistent
+    ):
+        from .mesh_finalization import SourcePreservingMeshFinalizer, SourcePreservingFinalizationPolicy
+        finalized = SourcePreservingMeshFinalizer.finalize(
+            mesh, SourcePreservingFinalizationPolicy(protected_source_face_count=protected_count)
+        )
+        mesh = finalized.mesh
+        orientation_record = finalized.audit['orientation_repair']
+    # A source-preserving close/weld pass can leave a cloud of tiny tetrahedral
+    # repair shells attached to one otherwise valid recursive part.  They are
+    # not recognized sub-parts: the source region entered this function as one
+    # connected component.  Remove only an unambiguous repair-debris pattern,
+    # keeping the dominant closed component and refusing any material split.
+    components = list(mesh.split(only_watertight=False))
+    debris_record = {
+        "applied": False,
+        "component_count": int(len(components)),
+    }
+    if len(components) > 1:
+        components.sort(key=lambda component: len(component.faces), reverse=True)
+        dominant = components[0]
+        residual = components[1:]
+        total_faces = max(int(len(mesh.faces)), 1)
+        residual_faces = int(sum(len(component.faces) for component in residual))
+        maximum_residual_faces = max(
+            (int(len(component.faces)) for component in residual),
+            default=0,
+        )
+        dominant_ratio = float(len(dominant.faces) / total_faces)
+        if (
+            bool(dominant.is_watertight)
+            and dominant_ratio >= 0.95
+            and residual_faces <= int(np.ceil(0.05 * total_faces))
+            and maximum_residual_faces <= 32
+        ):
+            mesh = dominant.copy()
+            debris_record = {
+                "applied": True,
+                "policy": "dominant_closed_component_with_tiny_repair_debris",
+                "component_count_before": int(len(components)),
+                "dominant_faces": int(len(mesh.faces)),
+                "dominant_face_ratio": dominant_ratio,
+                "removed_component_count": int(len(residual)),
+                "removed_faces": residual_faces,
+                "maximum_removed_component_faces": maximum_residual_faces,
+            }
+    mesh.metadata["orientation_repair"] = orientation_record
     mesh.metadata["protected_source_face_count"] = protected_count
-    mesh.metadata["source_geometry_mutation"] = "none"
-    mesh.metadata["generated_interface_orientation"] = generated_orientation
+    mesh.metadata["selective_open_boundary_weld"] = selective_weld_record
+    mesh.metadata["post_closure_selective_open_boundary_weld"] = post_closure_weld_record
+    mesh.metadata["tiny_repair_component_cleanup"] = debris_record
     runtime_log(
         "mesh-finalize",
         "recursive_mesh_finalize_face_counts",
@@ -310,13 +350,26 @@ def mesh_vertex_inward_normals(local_vertices: np.ndarray, local_faces: np.ndarr
     return -accumulated
 
 
-def mesh_vertex_conormal_evidence(
+def boundary_loop_interior_conormals(
     local_vertices: np.ndarray,
     local_faces: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Accumulate face-normal and interior votes once for every mesh vertex."""
+    loop: list[int],
+    reference_axis: np.ndarray | None = None,
+) -> np.ndarray:
+    """Return surface-tangent directions from a cut boundary into its owner.
+
+    The direction is inferred from the actual incident triangles, so concave
+    loops and hole boundaries do not depend on a loop centroid or projected
+    polygon winding.
+    """
     vertices = np.asarray(local_vertices, dtype=np.float64)
     faces = np.asarray(local_faces, dtype=np.int64)
+    loop_ids = np.asarray(loop, dtype=np.int64)
+    if not len(loop_ids):
+        return np.empty((0, 3), dtype=np.float64)
+    incident = np.zeros(len(vertices), dtype=bool)
+    incident[loop_ids] = True
+    faces = faces[np.any(incident[faces], axis=1)]
     triangles = vertices[faces]
     face_cross = np.cross(
         triangles[:, 1] - triangles[:, 0],
@@ -336,36 +389,6 @@ def mesh_vertex_conormal_evidence(
             (face_centroids - vertices[vertex_ids]) * face_weights[:, None],
         )
         np.add.at(accumulated_weight, vertex_ids, face_weights)
-    return accumulated_normal, accumulated_interior, accumulated_weight
-
-
-def boundary_loop_interior_conormals(
-    local_vertices: np.ndarray,
-    local_faces: np.ndarray,
-    loop: list[int],
-    reference_axis: np.ndarray | None = None,
-    vertex_evidence: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None,
-) -> np.ndarray:
-    """Return surface-tangent directions from a cut boundary into its owner.
-
-    The direction is inferred from the actual incident triangles, so concave
-    loops and hole boundaries do not depend on a loop centroid or projected
-    polygon winding.
-    """
-    vertices = np.asarray(local_vertices, dtype=np.float64)
-    faces = np.asarray(local_faces, dtype=np.int64)
-    loop_ids = np.asarray(loop, dtype=np.int64)
-    if not len(loop_ids):
-        return np.empty((0, 3), dtype=np.float64)
-    if vertex_evidence is None:
-        vertex_evidence = mesh_vertex_conormal_evidence(vertices, faces)
-    accumulated_normal, accumulated_interior, accumulated_weight = vertex_evidence
-    if (
-        accumulated_normal.shape != vertices.shape
-        or accumulated_interior.shape != vertices.shape
-        or accumulated_weight.shape != (len(vertices),)
-    ):
-        raise ValueError("vertex conormal evidence does not match local mesh")
 
     points = vertices[loop_ids]
     normals = accumulated_normal[loop_ids]
@@ -778,27 +801,6 @@ def smooth_tapered_sweep_profile(
     }
 
 
-def normalized_circular_convolution(
-    values: np.ndarray,
-    weights: np.ndarray,
-) -> np.ndarray:
-    """Apply a normalized wraparound convolution without Python roll loops.
-
-    The operation is the same closed-loop weighted sum used by the connector
-    direction solver.  ``scipy.ndimage`` performs the physical-radius window
-    in compiled code and avoids allocating one full rolled array per offset.
-    """
-    vectors = np.asarray(values, dtype=np.float64)
-    kernel = np.asarray(weights, dtype=np.float64)
-    if vectors.ndim != 2 or vectors.shape[1] != 3:
-        raise ValueError("circular convolution values must be Nx3 vectors")
-    if kernel.ndim != 1 or not len(kernel) or not np.all(np.isfinite(kernel)):
-        raise ValueError("circular convolution weights must be one finite vector")
-    result = convolve1d(vectors, kernel, axis=0, mode="wrap")
-    result /= np.maximum(np.linalg.norm(result, axis=1)[:, None], 1e-12)
-    return result
-
-
 def safe_boundary_inward_directions(
     vertex_inward_normals: np.ndarray,
     loop: list[int],
@@ -857,7 +859,11 @@ def safe_boundary_inward_directions(
             weights /= weights.sum()
 
             def circular_smooth(values: np.ndarray) -> np.ndarray:
-                return normalized_circular_convolution(values, weights)
+                result = np.zeros_like(values, dtype=np.float64)
+                for offset, weight in zip(offsets, weights):
+                    result += np.roll(values, int(offset), axis=0) * float(weight)
+                result /= np.maximum(np.linalg.norm(result, axis=1)[:, None], 1e-12)
+                return result
 
             smooth_local = circular_smooth(local)
         else:
@@ -880,12 +886,13 @@ def safe_boundary_inward_directions(
     # the abrupt per-vertex normal changes which twist the bottom ring into
     # radial folds while retaining a strictly inward first-order direction.
     minimum_safe_dot = 0.02
-    relaxation_kernel = np.asarray([0.25, 0.50, 0.25], dtype=np.float64)
     for _ in range(max(int(smoothing_iterations), 0)):
-        directions = normalized_circular_convolution(
-            directions,
-            relaxation_kernel,
+        directions = (
+            np.roll(directions, 1, axis=0) * 0.25
+            + directions * 0.50
+            + np.roll(directions, -1, axis=0) * 0.25
         )
+        directions /= np.maximum(np.linalg.norm(directions, axis=1)[:, None], 1e-12)
         current_dot = np.einsum("ij,ij->i", smooth_local, directions)
         unsafe = current_dot < minimum_safe_dot
         if np.any(unsafe):
@@ -1234,18 +1241,11 @@ def build_component_cut_references(
             inward = -average_outward_normal(local_vertices, local_faces, component_center, model_center)
         inward = inward / max(float(np.linalg.norm(inward)), 1e-12)
         vertex_inward_normals = mesh_vertex_inward_normals(local_vertices, local_faces)
-        vertex_conormal_evidence = mesh_vertex_conormal_evidence(
-            local_vertices, local_faces
-        )
         color_info = COLOR_INFO.get(component.color_code, {"name": component.color_code})
         for loop_index, loop in enumerate(loops):
             loop_global = [int(global_vertex_ids[i]) for i in loop]
             loop_conormals = boundary_loop_interior_conormals(
-                local_vertices,
-                local_faces,
-                loop,
-                reference_axis=inward,
-                vertex_evidence=vertex_conormal_evidence,
+                local_vertices, local_faces, loop, reference_axis=inward
             )
             loop_directions, direction_record = safe_boundary_inward_directions(
                 vertex_inward_normals,
@@ -1301,15 +1301,12 @@ def build_subassembly_component(
     global_faces = np.concatenate([components[int(index) - 1].global_faces for index in indices])
     group_faces = faces[global_faces]
     points = vertices[group_faces.reshape(-1)]
-    # Computing every source-triangle area for each recursive subtree made
-    # preparation quadratic in the number of children.  Only selected faces
-    # contribute to this synthetic component.
-    selected_areas = triangle_areas(vertices, group_faces)
+    areas = triangle_areas(vertices, faces)
     return Component(
         color_code=color_code,
         global_faces=global_faces,
         face_count=int(len(global_faces)),
-        area=float(selected_areas.sum()),
+        area=float(areas[global_faces].sum()),
         bbox_min=points.min(axis=0),
         bbox_max=points.max(axis=0),
         center=points.mean(axis=0),
@@ -1368,12 +1365,6 @@ def build_layer_child_cut_references(
     interface_geometry: str = "boundary-extrusion",
 ) -> tuple[list[dict], dict[int, Component], dict[int, list[int]]]:
     context_started_at = time.perf_counter()
-    from .layer_seam_planning import prepare_layer_seams, layer_child_boundary_topology
-    vertices, faces, interface_retopology = prepare_layer_seams(
-        vertices, faces, components, parent_index, direct_child_indices,
-        assembly_children, boundary_neighbor_lookup, interface_retopology)
-    if interface_retopology is not None and interface_retopology.active_layer_seam is not None:
-        model_center = np.asarray(vertices).mean(axis=0)
     fit_clearance_by_part = fit_clearance_by_part or {}
     guided_internal_cuts_by_part = guided_internal_cuts_by_part or {}
     cap_planning_enabled = (
@@ -1465,10 +1456,12 @@ def build_layer_child_cut_references(
         # junction the root patch boundary contains an internal sibling arc;
         # using that arc as part of the parent socket selects different closed
         # loops on the two sides of the interface.
-        local_faces, global_vertex_ids, loops = layer_child_boundary_topology(
-            faces, components, subtree, interface_retopology
+        local_vertices, local_faces, _global_to_local, global_vertex_ids = build_local_mesh(
+            vertices,
+            faces,
+            union_component,
         )
-        local_vertices = np.asarray(vertices)[global_vertex_ids]
+        loops = boundary_loops(local_faces)
         runtime_log(
             "递归预计算",
             "layer_child_boundary_done",
@@ -1494,41 +1487,18 @@ def build_layer_child_cut_references(
             contact = boundary_loop_parent_contact(loop, global_vertex_ids, boundary_neighbor_lookup, parent_index, current_layer_component_set)
             if int(contact["parent_edges"]) < 3:
                 continue
+            loop_global = [int(global_vertex_ids[i]) for i in loop]
+            loop_directions, direction_record = safe_boundary_inward_directions(
+                vertex_inward_normals,
+                loop,
+                inward,
+                loop_points=local_vertices[np.asarray(loop, dtype=np.int64)],
+            )
             selected_loop_records.append(
                 {
                     "loop_index": int(loop_index),
                     "loop": [int(value) for value in loop],
-                    "contact": contact,
-                }
-            )
-
-        from .micro_interfaces import filter_micro_interface_loops
-        selected_loop_records, _micro_loops = filter_micro_interface_loops(
-            local_vertices, selected_loop_records, part_index=child_index)
-        for record in selected_loop_records:
-            loop = record["loop"]
-            loop_global = [int(global_vertex_ids[i]) for i in loop]
-            # A consolidated paint component can cover surfaces with opposite
-            # orientations.  Resolve the sign independently at every source
-            # rim before local normals, thickness probes, or connector geometry
-            # are planned; the late audit remains a hard safety backstop.
-            from .surface_direction import resolve_inward_axis
-            interface_inward, surface_direction_record = resolve_inward_axis(
-                local_vertices,
-                local_faces,
-                loop,
-                inward,
-            )
-            loop_directions, direction_record = safe_boundary_inward_directions(
-                vertex_inward_normals,
-                loop,
-                interface_inward,
-                loop_points=local_vertices[np.asarray(loop, dtype=np.int64)],
-            )
-            record.update(
-                {
                     "global_loop": loop_global,
-                    "interface_inward": interface_inward,
                     "loop_directions": loop_directions,
                     "loop_local_inward_normals": np.asarray(
                         vertex_inward_normals[np.asarray(loop, dtype=np.int64)],
@@ -1539,30 +1509,23 @@ def build_layer_child_cut_references(
                     # rounded feature and collapse the axial chamfer into an
                     # almost straight wall.
                     "lead_in_directions": loop_directions.copy(),
-                    "direction_record": {
-                        **direction_record,
-                        "surface_orientation": surface_direction_record,
-                    },
+                    "direction_record": direction_record,
+                    "contact": contact,
                 }
             )
+
+        from .micro_interfaces import filter_micro_interface_loops
+        selected_loop_records, _micro_loops = filter_micro_interface_loops(
+            local_vertices, selected_loop_records, part_index=child_index)
         planned_vertices = local_vertices
-        _retopology_records = []
         if cap_planning_enabled and selected_loop_records:
             retopology_started_at = time.perf_counter()
-            visible_planned_vertices, _retopology_records = InterfaceRetopologyService.retopologize_local_loops(
+            planned_vertices, _retopology_records = InterfaceRetopologyService.retopologize_local_loops(
                 local_vertices,
                 [record["loop"] for record in selected_loop_records],
                 global_vertex_ids,
                 interface_retopology,
                 local_faces=local_faces,
-            )
-            # The source rim may intentionally stay immutable while a farther
-            # fitted ring is realized by generated walls/caps.  Do not lose
-            # that manufacturing target when preparing the hidden geometry.
-            planned_vertices = generated_geometry_boundary_vertices(
-                visible_planned_vertices,
-                [record["loop"] for record in selected_loop_records],
-                _retopology_records,
             )
             runtime_log(
                 "递归预计算",
@@ -1589,13 +1552,6 @@ def build_layer_child_cut_references(
             float(interface_retopology.config.maximum_safe_target_offset_mm)
             if interface_retopology is not None
             else 0.0,
-            # A large absolute fit can still be a small, already validated
-            # relative change on a large loop (P09 is representative).  The
-            # visible source rim remains immutable; this allowance applies
-            # only to correspondence with the generated hidden ring.
-            max((float(record.get("requested_maximum_target_displacement_mm", 0.0))
-                 for record in _retopology_records), default=0.0)
-            if cap_planning_enabled and selected_loop_records else 0.0,
         )
         insert_shrink_mm, socket_overcut_mm = clearance_offsets(
             clearance_mode,
@@ -1607,11 +1563,8 @@ def build_layer_child_cut_references(
             loop_global = selected["global_loop"]
             loop_directions = selected["loop_directions"]
             lead_in_directions = selected["lead_in_directions"]
-            interface_inward = selected["interface_inward"]
-            active_inward = interface_inward.copy()
             loop_conormals = boundary_loop_interior_conormals(
-                planned_vertices, local_faces, loop,
-                reference_axis=interface_inward,
+                planned_vertices, local_faces, loop, reference_axis=inward
             )
             contact = selected["contact"]
             ref = {
@@ -1632,7 +1585,7 @@ def build_layer_child_cut_references(
                     )
                     for position in range(len(loop_global))
                 },
-                "inward": interface_inward,
+                "inward": inward,
                 "inward_by_global": {
                     int(global_id): direction.copy()
                     for global_id, direction in zip(loop_global, loop_directions)
@@ -1729,13 +1682,18 @@ def build_layer_child_cut_references(
                                 planar_extra_limit_mm=cap_planar_extra_limit_mm,
                                 parent_thickness_probe=child_parent_thickness_probe,
                                 source_points=source_points,
-                                # Screening and final selection must use one
-                                # thickness horizon.  A shorter ray can observe
-                                # an entry without its matching exit (or neither)
-                                # and therefore cannot classify whether the
-                                # origin is inside the parent.  Let the shared
-                                # cap planner apply its ordinary authoritative
-                                # ceiling here as it does in the replay below.
+                                # A moved visible seam may start slightly outside
+                                # the parent and first enter it below the nominal
+                                # surface.  Extend the screening ray by the same
+                                # audited reconciliation allowance; otherwise an
+                                # exit just beyond 3 mm is missed and the fast
+                                # pass falsely certifies a 3 mm wall.  The chosen
+                                # candidate is still replanned below with the
+                                # complete authoritative ceiling.
+                                safety_ceiling_mm=(
+                                    preferred_minimum_depth_mm
+                                    + interface_reconciliation_tolerance_mm
+                                ),
                             )
                         except ValueError as exc:
                             if "No positive inward depth remains" not in str(exc):
@@ -1803,17 +1761,30 @@ def build_layer_child_cut_references(
                             candidate_conormals,
                             effective_insert_shrink_mm,
                         )
-                        # Candidate evaluation above already used the complete
-                        # authoritative thickness horizon.  Replaying the same
-                        # deterministic plan here performed a third identical
-                        # multi-million-candidate ray pass without adding a
-                        # stronger safety check; retain the selected evaluated
-                        # result instead.
-                        candidate_decision = selected["decision"]
-                        authoritative_reserved_distances = np.asarray(
-                            selected["reserved_distances"], dtype=np.float64
-                        ).copy()
-                        reserved_record = dict(selected["reserved_record"])
+                        candidate_decision = plan_cap_decision(
+                            points=selected_fit_points,
+                            source_vertex_ids=loop_global,
+                            fallback_inward=candidate_fallback_inward,
+                            inward_directions=candidate_inward_directions,
+                            fixed_depth_mm=float(max_extension_mm),
+                            flat_clearance_mm=float(flat_clearance_mm),
+                            cap_mode=requested_cap_mode,
+                            planar_extra_limit_mm=cap_planar_extra_limit_mm,
+                            parent_thickness_probe=child_parent_thickness_probe,
+                            source_points=source_points,
+                        )
+                        authoritative_reserved_distances, reserved_record = (
+                            reserve_flat_socket_travel_budget(
+                                child_fit_points=selected_fit_points,
+                                child_distances=candidate_decision.distances,
+                                child_directions=candidate_decision.directions,
+                                socket_top_points=candidate_socket_points,
+                                bottom_clearance_mm=bottom_clearance_mm,
+                                maximum_socket_travel_mm=float(max_extension_mm)
+                                + max(float(planar_extra_limit_mm or 0.0), 0.0),
+                                plane_record=candidate_decision.record,
+                            )
+                        )
                         screening_minimum_depth_mm = float(
                             selected["minimum_depth_mm"]
                         )
@@ -1984,7 +1955,7 @@ def build_layer_child_cut_references(
                     cap_decision = build_reserved_cap_decision(
                         planned_vertices[loop_array],
                         loop_conormals,
-                        active_inward,
+                        inward,
                         loop_directions,
                     )
 
@@ -2060,10 +2031,10 @@ def build_layer_child_cut_references(
                             cap_decision.source_points, dtype=np.float64
                         ).copy(),
                     )
-                    active_inward = guided_internal_cut.entry_direction.copy()
+                    inward = guided_internal_cut.entry_direction.copy()
                     loop_directions = guided_plan.directions.copy()
                     lead_in_directions = guided_plan.directions.copy()
-                    ref["inward"] = active_inward.copy()
+                    ref["inward"] = inward.copy()
                     ref["inward_by_global"] = {
                         int(global_id): direction.copy()
                         for global_id, direction in zip(
@@ -2108,7 +2079,7 @@ def build_layer_child_cut_references(
                     hidden_plan = HiddenInterfacePlanner.plan(
                         points=planned_vertices[loop_array],
                         initial_directions=loop_directions,
-                        fallback_axis=active_inward,
+                        fallback_axis=inward,
                         local_inward_normals=selected[
                             "loop_local_inward_normals"
                         ],
@@ -2196,19 +2167,17 @@ def build_layer_child_cut_references(
                                 ),
                             }
                         )
-                        active_inward = np.asarray(
+                        inward = np.asarray(
                             selected_hidden.axis,
                             dtype=np.float64,
                         ).copy()
-                        active_inward /= max(
-                            float(np.linalg.norm(active_inward)), 1e-12
-                        )
+                        inward /= max(float(np.linalg.norm(inward)), 1e-12)
                         loop_directions = np.asarray(
                             selected_hidden.directions,
                             dtype=np.float64,
                         ).copy()
                         lead_in_directions = loop_directions.copy()
-                        ref["inward"] = active_inward.copy()
+                        ref["inward"] = inward.copy()
                         ref["inward_by_global"] = {
                             int(global_id): direction.copy()
                             for global_id, direction in zip(
@@ -2269,7 +2238,7 @@ def build_layer_child_cut_references(
                             flat_triangles, flat_normal, _flat_record = (
                                 triangulate_ordered_loop_3d(
                                     target_bottom,
-                                    np.asarray(active_inward, dtype=np.float64),
+                                    np.asarray(inward, dtype=np.float64),
                                 )
                             )
                             flat_quality = inward_cap_surface_quality(
@@ -2287,7 +2256,7 @@ def build_layer_child_cut_references(
                             direct_triangles, direct_normal, triangulation = (
                                 triangulate_ordered_loop_3d(
                                     target_bottom,
-                                    np.asarray(active_inward, dtype=np.float64),
+                                    np.asarray(inward, dtype=np.float64),
                                 )
                             )
                             (
@@ -2361,7 +2330,7 @@ def build_layer_child_cut_references(
                             direct_triangles, direct_normal, triangulation = (
                                 triangulate_ordered_loop_3d(
                                     target_bottom,
-                                    np.asarray(active_inward, dtype=np.float64),
+                                    np.asarray(inward, dtype=np.float64),
                                 )
                             )
                             direct_surface_quality = inward_cap_surface_quality(
@@ -2701,7 +2670,7 @@ def build_layer_child_cut_references(
                             cap_decision.source_points,
                             dtype=np.float64,
                         ),
-                        inward=active_inward,
+                        inward=inward,
                         fit_clearance_mm=fit_clearance_mm,
                         bottom_clearance_mm=bottom_clearance_mm,
                         lead_in_mm=lead_in_mm,
@@ -2740,9 +2709,6 @@ def build_layer_child_cut_references(
                         surface_validation_mode=str(
                             interface_retopology.config.connector_surface_validation
                         ),
-                        visible_interface_simplification_tolerance=float(
-                            interface_retopology.config.visible_interface_simplification_tolerance
-                        ),
                     )
                     initial_cap_quality = preflight_local_connector_patch(
                         source_vertices=planned_vertices,
@@ -2752,7 +2718,7 @@ def build_layer_child_cut_references(
                             cap_decision.source_points,
                             dtype=np.float64,
                         ),
-                        inward=active_inward,
+                        inward=inward,
                         inward_directions=np.asarray(
                             cap_decision.directions,
                             dtype=np.float64,
@@ -2774,7 +2740,7 @@ def build_layer_child_cut_references(
                     large_cap_loop = len(loop) > 512
                     initial_cap_quality = cap_decision_patch_quality_preflight(
                         cap_decision,
-                        active_inward,
+                        inward,
                         source_points,
                         lead_in_directions,
                         lead_in_mm,
@@ -3084,57 +3050,6 @@ class ParentThicknessProbe:
     # fallback for genuinely oblique shells.
     minimum_preferred_opposing_face_dot = 0.15
 
-    @dataclass(frozen=True)
-    class BroadPhaseCandidateCache:
-        """Direction-independent conservative candidates for repeated rays.
-
-        Candidate groups contain global triangle ids.  A triangle intersecting
-        any finite ray of ``search_limit_mm`` from an origin has its centroid
-        within that limit plus its bounding radius, irrespective of direction.
-        The normal per-direction capsule filter and exact ray test still run
-        for every measurement.
-        """
-
-        probe_identity: int
-        points: np.ndarray
-        search_limit_mm: float
-        candidate_groups: tuple[tuple[np.ndarray, ...], ...]
-        candidate_count: int
-
-    def prepare_safety_limit_candidates(
-        self,
-        points: np.ndarray,
-        global_ceiling_mm: float,
-    ) -> "ParentThicknessProbe.BroadPhaseCandidateCache":
-        """Build a reusable superset for repeated ``safety_limit`` calls."""
-        origins = np.asarray(points, dtype=np.float64)
-        global_ceiling = min(
-            max(float(global_ceiling_mm), 0.0),
-            MAXIMUM_SAFE_INWARD_DEPTH_MM,
-        )
-        search_limit = global_ceiling + PARENT_THICKNESS_CLEARANCE_MM
-        bucket_groups: list[tuple[np.ndarray, ...]] = []
-        candidate_count = 0
-        for triangle_ids, tree, maximum_radius in self.radius_buckets:
-            local_groups = tree.query_ball_point(
-                origins,
-                search_limit + float(maximum_radius) + 1e-8,
-                workers=-1 if len(origins) >= 64 else 1,
-            )
-            global_groups = tuple(
-                triangle_ids[np.asarray(group, dtype=np.int64)]
-                for group in local_groups
-            )
-            candidate_count += sum(len(group) for group in global_groups)
-            bucket_groups.append(global_groups)
-        return self.BroadPhaseCandidateCache(
-            probe_identity=id(self),
-            points=origins.copy(),
-            search_limit_mm=search_limit,
-            candidate_groups=tuple(bucket_groups),
-            candidate_count=int(candidate_count),
-        )
-
     def __init__(
         self,
         vertices: np.ndarray,
@@ -3142,10 +3057,9 @@ class ParentThicknessProbe:
         triangle_source_face_indices: np.ndarray | None = None,
         triangle_owner_indices: np.ndarray | None = None,
     ) -> None:
-        self.mesh_vertices = np.asarray(vertices, dtype=np.float64)
-        self.mesh_faces = np.asarray(faces, dtype=np.int64)
-        self.triangles = self.mesh_vertices[self.mesh_faces]
-        self._surface_topology_cache: dict = {}
+        self.triangles = np.asarray(vertices, dtype=np.float64)[
+            np.asarray(faces, dtype=np.int64)
+        ]
         triangle_count = int(len(self.triangles))
         self.triangle_source_face_indices = (
             np.arange(triangle_count, dtype=np.int64)
@@ -3233,9 +3147,6 @@ class ParentThicknessProbe:
         active_mask[excluded] = False
         view = object.__new__(type(self))
         for attribute in (
-            "mesh_vertices",
-            "mesh_faces",
-            "_surface_topology_cache",
             "triangles",
             "triangle_source_face_indices",
             "triangle_owner_indices",
@@ -3291,80 +3202,6 @@ class ParentThicknessProbe:
         }
         return view
 
-    def _same_local_surface_hits(
-        self,
-        points: np.ndarray,
-        hit_triangle_ids: np.ndarray,
-        hit_distances: np.ndarray,
-    ) -> np.ndarray:
-        """Recognize short ray hits reachable along the sampled shell.
-
-        Euclidean distance alone cannot distinguish a nearby fold of the
-        source surface from an opposing wall.  A fold is also nearby along the
-        mesh graph, while an actual inner/opposite shell requires a much longer
-        route around the closed solid.  Only the small near-origin candidate
-        band is audited, keeping this exact topological test inexpensive.
-        """
-        result = np.zeros(len(points), dtype=bool)
-        # Audit the whole preferred printable-depth range.  Stopping at a
-        # small Euclidean band merely moved the minimum to the next triangle
-        # on a continuous curved surface (0.13 -> 0.26 mm on the Yoshi seam).
-        # Topology, rather than this horizon, decides whether a hit is local;
-        # the horizon only avoids work on hits that already provide the normal
-        # requested insertion depth.
-        horizon = DEFAULT_EFFECTIVE_MINIMUM_INWARD_DEPTH_MM
-        candidates = np.flatnonzero(
-            (hit_triangle_ids >= 0)
-            & np.isfinite(hit_distances)
-            & (hit_distances <= horizon + 1e-9)
-        )
-        if not len(candidates) or not len(self.mesh_vertices):
-            return result
-        cache = self._surface_topology_cache
-        if "vertex_tree" not in cache:
-            cache["vertex_tree"] = cKDTree(self.mesh_vertices)
-        if "vertex_graph" not in cache:
-            edges = np.vstack(
-                (
-                    self.mesh_faces[:, [0, 1]],
-                    self.mesh_faces[:, [1, 2]],
-                    self.mesh_faces[:, [2, 0]],
-                )
-            )
-            lengths = np.linalg.norm(
-                self.mesh_vertices[edges[:, 0]]
-                - self.mesh_vertices[edges[:, 1]],
-                axis=1,
-            )
-            rows = np.concatenate((edges[:, 0], edges[:, 1]))
-            cols = np.concatenate((edges[:, 1], edges[:, 0]))
-            weights = np.concatenate((lengths, lengths))
-            cache["vertex_graph"] = coo_matrix(
-                (weights, (rows, cols)),
-                shape=(len(self.mesh_vertices), len(self.mesh_vertices)),
-            ).tocsr()
-        _nearest_distances, origin_vertices = cache["vertex_tree"].query(
-            np.asarray(points)[candidates], k=1
-        )
-        for candidate, origin_vertex in zip(candidates, origin_vertices):
-            triangle_id = int(hit_triangle_ids[candidate])
-            if triangle_id >= len(self.mesh_faces):
-                continue
-            chord = float(hit_distances[candidate])
-            # Allow curved/folded paths to be longer than their chord.  The
-            # search remains local and cannot walk around a hollow shell to an
-            # actual opposite wall.
-            geodesic_limit = max(4.0 * chord, horizon)
-            distances = dijkstra(
-                cache["vertex_graph"],
-                directed=False,
-                indices=int(origin_vertex),
-                limit=geodesic_limit,
-            )
-            if np.any(np.isfinite(distances[self.mesh_faces[triangle_id]])):
-                result[candidate] = True
-        return result
-
     def _owner_counts(self, triangle_ids: np.ndarray) -> dict[str, int]:
         triangle_ids = np.asarray(triangle_ids, dtype=np.int64)
         owner_indices = np.asarray(
@@ -3396,7 +3233,6 @@ class ParentThicknessProbe:
         points: np.ndarray,
         directions: np.ndarray,
         search_limit_mm: float,
-        broad_phase_cache: "ParentThicknessProbe.BroadPhaseCandidateCache | None" = None,
     ) -> np.ndarray:
         points = np.asarray(points, dtype=np.float64)
         directions = np.asarray(directions, dtype=np.float64)
@@ -3413,17 +3249,6 @@ class ParentThicknessProbe:
         )
         if not self.radius_buckets or search_limit <= 0.0:
             return hits
-        if broad_phase_cache is not None:
-            if broad_phase_cache.probe_identity != id(self):
-                raise ValueError("parent-thickness candidate cache belongs to another probe")
-            if (
-                broad_phase_cache.points.shape != points.shape
-                or not np.array_equal(broad_phase_cache.points, points)
-                or search_limit > broad_phase_cache.search_limit_mm + 1e-9
-            ):
-                raise ValueError("parent-thickness candidate cache does not cover this query")
-            if len(broad_phase_cache.candidate_groups) != len(self.radius_buckets):
-                raise ValueError("parent-thickness candidate cache bucket mismatch")
 
         query_started_at = time.perf_counter()
         runtime_log(
@@ -3451,11 +3276,11 @@ class ParentThicknessProbe:
         selected_entry_distances = np.full(len(points), np.nan, dtype=np.float64)
         selected_exit_triangle_ids = np.full(len(points), -1, dtype=np.int64)
         selected_entry_triangle_ids = np.full(len(points), -1, dtype=np.int64)
-        for bucket_index, (
+        for (
             bucket_triangle_ids,
             bucket_tree,
             bucket_maximum_radius,
-        ) in enumerate(self.radius_buckets):
+        ) in self.radius_buckets:
             bucket_query_started_at = time.perf_counter()
             # A single sphere around the complete segment has radius L/2+r and
             # is extremely loose for dense small triangles.  Cover the ray by
@@ -3476,12 +3301,7 @@ class ParentThicknessProbe:
                 )
             )
             broad_phase_segment_counts[int(segment_count)] += 1
-            if broad_phase_cache is not None:
-                # The cached groups are a direction-independent superset.
-                # Keep them as global ids; the segment-sphere rejection below
-                # restores the tight per-direction capsule before exact tests.
-                candidate_groups = broad_phase_cache.candidate_groups[bucket_index]
-            elif segment_count == 1:
+            if segment_count == 1:
                 candidate_groups = bucket_tree.query_ball_point(
                     midpoints,
                     search_limit * 0.5 + bucket_maximum_radius + 1e-8,
@@ -3531,13 +3351,11 @@ class ParentThicknessProbe:
             for index, (origin, direction, candidates) in enumerate(
                 zip(points, directions, candidate_groups)
             ):
-                if not len(candidates):
+                if not candidates:
                     continue
-                candidate_ids = (
+                candidate_ids = bucket_triangle_ids[
                     np.asarray(candidates, dtype=np.int64)
-                    if broad_phase_cache is not None
-                    else bucket_triangle_ids[np.asarray(candidates, dtype=np.int64)]
-                )
+                ]
                 candidate_ids = candidate_ids[
                     self.active_triangle_mask[candidate_ids]
                 ]
@@ -3774,94 +3592,31 @@ class ParentThicknessProbe:
         points: np.ndarray,
         directions: np.ndarray,
         global_ceiling_mm: float,
-        broad_phase_cache: "ParentThicknessProbe.BroadPhaseCandidateCache | None" = None,
     ) -> tuple[float, dict]:
         global_ceiling = min(
             max(float(global_ceiling_mm), 0.0),
             MAXIMUM_SAFE_INWARD_DEPTH_MM,
         )
         search_limit = global_ceiling + PARENT_THICKNESS_CLEARANCE_MM
-        if broad_phase_cache is None:
-            # Preserve the overridable three-argument hook used by lightweight
-            # policy probes and downstream integrations.
-            thicknesses = self.first_hit_distances(
-                points,
-                directions,
-                search_limit,
-            )
-        else:
-            thicknesses = self.first_hit_distances(
-                points,
-                directions,
-                search_limit,
-                broad_phase_cache=broad_phase_cache,
-            )
+        thicknesses = self.first_hit_distances(
+            points,
+            directions,
+            search_limit,
+        )
         original_thicknesses = thicknesses.copy()
         preceding_entry_distances = getattr(
             self,
             "last_selected_entry_distances",
             None,
         )
-        selected_entry_triangle_ids = getattr(
-            self,
-            "last_selected_entry_triangle_ids",
-            np.full(len(thicknesses), -1, dtype=np.int64),
-        )
-        parent_part_index = int(
-            getattr(self, "filter_context", {}).get("parent_part_index", 0)
-        )
-        triangle_owner_indices = np.asarray(
-            getattr(self, "triangle_owner_indices", np.empty(0, dtype=np.int32))
-        )
-        entry_owner_indices = np.full(len(thicknesses), 0, dtype=np.int32)
-        valid_entry_triangle_ids = (
-            (selected_entry_triangle_ids >= 0)
-            & (selected_entry_triangle_ids < len(triangle_owner_indices))
-        )
-        entry_owner_indices[valid_entry_triangle_ids] = triangle_owner_indices[
-            selected_entry_triangle_ids[valid_entry_triangle_ids]
-        ]
-        # Re-entering the shell currently being inset is a local surface fold,
-        # even when curvature puts the re-entry farther from the ray origin.
-        # It is not a remote obstacle.  Owner identity supplies the topological
-        # distinction that a distance threshold cannot: genuinely separate
-        # shells retain a different owner and continue to limit travel at
-        # their entry point.
-        paired_parent_reentry = (
-            parent_part_index > 0
-        ) & (entry_owner_indices == parent_part_index)
-        if (
-            hasattr(self, "mesh_vertices")
-            and isinstance(preceding_entry_distances, np.ndarray)
-            and preceding_entry_distances.shape == thicknesses.shape
-        ):
-            # Paint ownership partitions one physical shell into many parts;
-            # it is not a shell-connectivity label.  A differently painted
-            # entry that is reachable locally along the same mesh is still a
-            # folded/re-entered source surface, not a remote obstacle.
-            paired_parent_reentry |= self._same_local_surface_hits(
-                points,
-                selected_entry_triangle_ids,
-                preceding_entry_distances,
-            )
         paired_remote_shell_repair = np.zeros_like(thicknesses, dtype=bool)
         if (
             isinstance(preceding_entry_distances, np.ndarray)
             and preceding_entry_distances.shape == thicknesses.shape
         ):
-            # ``first_hit_distances`` returns the material interval between a
-            # preceding entry and its exit.  That interval is a valid local
-            # wall thickness only when the ray starts on (within numerical
-            # reserve of) that wall.  If the entry is remote, the generated
-            # cap travels through free space first and is limited by the entry
-            # location, regardless of whether the remote shell itself is
-            # hair-thin or substantial.  Restricting this repair to intervals
-            # below the clearance made a bounded screening ray report a safe
-            # target while the longer authoritative ray incorrectly treated a
-            # 0.218 mm remote shell as the available depth.
             paired_remote_shell_repair = (
-                np.isfinite(preceding_entry_distances)
-                & ~paired_parent_reentry
+                (thicknesses <= PARENT_THICKNESS_CLEARANCE_MM + 1e-9)
+                & np.isfinite(preceding_entry_distances)
                 & (
                     preceding_entry_distances
                     > PARENT_THICKNESS_CLEARANCE_MM + 1e-9
@@ -3871,73 +3626,6 @@ class ParentThicknessProbe:
                 preceding_entry_distances[paired_remote_shell_repair]
             )
         raw_minimum = float(thicknesses.min()) if len(thicknesses) else search_limit
-        selected_exit_distances = getattr(
-            self,
-            "last_selected_exit_distances",
-            None,
-        )
-        has_exit_classification = bool(
-            isinstance(selected_exit_distances, np.ndarray)
-            and selected_exit_distances.shape == thicknesses.shape
-        )
-        selected_exit_triangle_ids = getattr(
-            self,
-            "last_selected_exit_triangle_ids",
-            np.full(len(thicknesses), -1, dtype=np.int64),
-        )
-        topologically_local_surface = np.zeros_like(thicknesses, dtype=bool)
-        if (
-            parent_part_index > 0
-            and hasattr(self, "mesh_vertices")
-            and selected_exit_triangle_ids.shape == thicknesses.shape
-        ):
-            exit_owner_indices = np.zeros(len(thicknesses), dtype=np.int32)
-            valid_exit_ids = (
-                (selected_exit_triangle_ids >= 0)
-                & (selected_exit_triangle_ids < len(triangle_owner_indices))
-            )
-            exit_owner_indices[valid_exit_ids] = triangle_owner_indices[
-                selected_exit_triangle_ids[valid_exit_ids]
-            ]
-            topologically_local_surface = self._same_local_surface_hits(
-                points,
-                selected_exit_triangle_ids,
-                np.where(
-                    exit_owner_indices == parent_part_index,
-                    selected_exit_distances,
-                    np.inf,
-                ),
-            )
-        # A hit belongs to the sampled surface neighbourhood when either its
-        # complete exit or its still-local material interval is within the
-        # origin tolerance.  A paired entry inside the manufacturing clearance
-        # is also unconditionally local: it means that the ray started in the
-        # seam uncertainty band, briefly crossed out of the tessellated parent,
-        # then entered it again.  The following exit can be arbitrarily far
-        # from that entry along a folded surface, so classifying the pair by
-        # interval length creates a brittle threshold chase.  Remote paired
-        # shells were replaced by their entry distance above and are excluded
-        # from this local-pair classification.
-        local_paired_surface = (
-            np.isfinite(preceding_entry_distances)
-            & (~paired_remote_shell_repair | paired_parent_reentry)
-            if isinstance(preceding_entry_distances, np.ndarray)
-            and preceding_entry_distances.shape == thicknesses.shape
-            else np.zeros_like(thicknesses, dtype=bool)
-        )
-        surface_near = (
-            (thicknesses <= PARENT_SURFACE_HIT_TOLERANCE_MM + 1e-9)
-            | local_paired_surface
-            | topologically_local_surface
-            | (
-                (
-                    selected_exit_distances
-                    if has_exit_classification
-                    else np.full_like(thicknesses, np.inf)
-                )
-                <= PARENT_SURFACE_HIT_TOLERANCE_MM + 1e-9
-            )
-        )
         coincident = thicknesses <= PARENT_THICKNESS_CLEARANCE_MM + 1e-9
         coincident_count = int(np.count_nonzero(coincident))
         coincident_ratio = float(coincident_count / max(len(thicknesses), 1))
@@ -3950,15 +3638,15 @@ class ParentThicknessProbe:
             isinstance(preceding_entry_mask, np.ndarray)
             and preceding_entry_mask.shape == thicknesses.shape
         )
-        near_origin_surface_hits = (
-            surface_near
+        unpaired_coincident = (
+            coincident & ~preceding_entry_mask
             if has_entry_classification
             else np.zeros_like(coincident)
         )
-        near_origin_surface_hit_count = int(
-            np.count_nonzero(near_origin_surface_hits)
+        unpaired_coincident_count = int(
+            np.count_nonzero(unpaired_coincident)
         )
-        usable_mask = ~near_origin_surface_hits
+        usable_mask = ~unpaired_coincident
         after_unpaired = thicknesses[usable_mask]
         after_unpaired_coincident = (
             after_unpaired
@@ -4006,6 +3694,11 @@ class ParentThicknessProbe:
                 rtol=0.0,
                 atol=1e-9,
             )
+        )
+        selected_exit_triangle_ids = getattr(
+            self,
+            "last_selected_exit_triangle_ids",
+            np.full(len(thicknesses), -1, dtype=np.int64),
         )
         selected_entry_triangle_ids = getattr(
             self,
@@ -4059,12 +3752,6 @@ class ParentThicknessProbe:
         limiting_vertex_sample = [
             int(value) for value in limiting_vertex_indices[:16]
         ]
-        limiting_probe_points = np.asarray(points, dtype=np.float64)[
-            limiting_vertex_indices[:16]
-        ].round(9).tolist()
-        limiting_probe_directions = np.asarray(directions, dtype=np.float64)[
-            limiting_vertex_indices[:16]
-        ].round(9).tolist()
         limiting_exit_source_faces = limiting_exit_source_faces_all[:16]
         limiting_entry_source_faces = limiting_entry_source_faces_all[:16]
         result = {
@@ -4078,19 +3765,10 @@ class ParentThicknessProbe:
             "parent_thickness_remote_shell_interval_hits_repaired": int(
                 np.count_nonzero(paired_remote_shell_repair)
             ),
-            "parent_thickness_parent_reentry_hits_discarded": int(
-                np.count_nonzero(paired_parent_reentry)
-            ),
-            "parent_thickness_topologically_local_hits_discarded": int(
-                np.count_nonzero(topologically_local_surface)
-            ),
             "parent_thickness_coincident_hit_vertices": coincident_count,
             "parent_thickness_coincident_hit_ratio": coincident_ratio,
             "parent_thickness_unpaired_surface_hit_vertices_discarded": (
-                near_origin_surface_hit_count
-            ),
-            "parent_thickness_near_origin_surface_hit_vertices_discarded": (
-                near_origin_surface_hit_count
+                unpaired_coincident_count
             ),
             "parent_thickness_remaining_coincident_hit_vertices": (
                 after_unpaired_coincident_count
@@ -4110,9 +3788,6 @@ class ParentThicknessProbe:
                 )
             },
             "parent_thickness_clearance_mm": PARENT_THICKNESS_CLEARANCE_MM,
-            "parent_surface_hit_tolerance_mm": (
-                PARENT_SURFACE_HIT_TOLERANCE_MM
-            ),
             "safe_maximum_inward_depth_mm": safe_maximum,
             "parent_thickness_limiting_probe_vertex_indices": [
                 int(value) for value in limiting_vertex_sample
@@ -4120,8 +3795,6 @@ class ParentThicknessProbe:
             "parent_thickness_limiting_probe_vertex_count": int(
                 len(limiting_vertex_indices)
             ),
-            "parent_thickness_limiting_probe_points": limiting_probe_points,
-            "parent_thickness_limiting_probe_directions": limiting_probe_directions,
             "parent_thickness_limiting_exit_face_indices": (
                 limiting_exit_source_faces
             ),
@@ -4157,8 +3830,6 @@ class ParentThicknessProbe:
                 int(value) for value in limiting_vertex_sample
             ],
             limiting_probe_vertex_count=int(len(limiting_vertex_indices)),
-            limiting_probe_points=limiting_probe_points,
-            limiting_probe_directions=limiting_probe_directions,
             limiting_exit_face_indices=limiting_exit_source_faces,
             limiting_exit_face_count=int(
                 len(limiting_exit_source_faces_all)
@@ -4237,14 +3908,6 @@ def boundary_cap_distances(
     if best_fit_dot_global >= 0.15:
         candidate_specs.append(("loop_best_fit_normal", best_fit_normal))
 
-    # Every candidate plane uses the same smoothed local ray field.  Thickness
-    # depends on those rays, not on the normal used to place the common bottom
-    # plane, so measuring once is both exact and substantially cheaper on dense
-    # painted seams.  Previously the global and best-fit plane candidates each
-    # repeated the identical broad phase and ray/triangle intersection pass.
-    shared_safe_maximum, shared_thickness_record = measured_limit(
-        local_plane_rays
-    )
     plane_candidates = []
     for orientation, plane_direction in candidate_specs:
         # The cap plane and the travel rays solve different problems.  The
@@ -4257,8 +3920,7 @@ def boundary_cap_distances(
         ray_dot_plane = plane_directions @ plane_direction
         if len(ray_dot_plane) and float(ray_dot_plane.min()) <= 0.05:
             continue
-        safe_maximum = shared_safe_maximum
-        thickness_record = dict(shared_thickness_record)
+        safe_maximum, thickness_record = measured_limit(plane_directions)
         if safe_maximum <= 1e-6:
             effective_minimum = 0.0
         else:
@@ -7188,45 +6850,6 @@ def add_local_male_connector_and_backing(
     heightfield_surface_vertices: set[int] = set()
     for layer_index, ring in enumerate(backing_profile.rings):
         layer_points = np.asarray(ring, dtype=np.float64)
-        if layer_index == len(backing_profile.rings) - 1:
-            tolerance = float(
-                plan.get("visible_interface_simplification_tolerance_mm", 0.0)
-            )
-            original_count = len(layer_points)
-            retained = np.arange(original_count, dtype=np.int64)
-            if tolerance > 0.0 and original_count > 3:
-                from .contour_simplification import simplify_closed_contour
-
-                projected = _project_connector_points(layer_points, plan)
-                retained = simplify_closed_contour(projected, tolerance)
-                candidate = layer_points[retained]
-                candidate_2d = projected[retained]
-                compact_ring = _project_connector_points(
-                    np.asarray(plan["peg_top"], dtype=np.float64), plan
-                )
-                # RDP chords can cut across a deep concavity.  Keep the dense
-                # ring rather than changing annulus/component topology when a
-                # compact connector would cease to be enclosed.
-                if all(
-                    point_in_poly(point, candidate_2d)
-                    or point_on_poly_boundary(point, candidate_2d)
-                    for point in compact_ring
-                ):
-                    layer_points = candidate
-                else:
-                    retained = np.arange(original_count, dtype=np.int64)
-            plan["visible_interface_simplification_source_indices"] = [
-                int(value) for value in retained
-            ]
-            plan["visible_interface_outer_vertices_before_simplification"] = int(
-                original_count
-            )
-            plan["visible_interface_outer_vertices_after_simplification"] = int(
-                len(layer_points)
-            )
-            plan["visible_interface_simplification_applied"] = bool(
-                len(layer_points) < original_count
-            )
         if _rings_coincident(layer_points, previous_points):
             continue
         layer_ids = _append_points(output_vertices, layer_points)
@@ -7240,82 +6863,15 @@ def add_local_male_connector_and_backing(
             stage_elapsed_seconds=round(time.perf_counter() - build_started, 3),
         )
         strip_face_start = len(output_faces)
-        simplification_applied = bool(
-            float(plan.get("visible_interface_simplification_tolerance_mm", 0.0)) > 0.0
-            and len(layer_ids) < len(previous_ids)
+        added, strip_audit, layer_points = _join_connector_rings(
+            output_vertices,
+            output_faces,
+            previous_ids,
+            layer_ids,
+            first_points=previous_points,
+            second_points=layer_points,
+            plan=plan,
         )
-        retained = plan.get("visible_interface_simplification_source_indices")
-        original_outer_count = int(
-            plan.get("visible_interface_outer_vertices_before_simplification", -1)
-        )
-        if (
-            simplification_applied
-            and isinstance(retained, list)
-            and len(retained) == len(layer_ids)
-            and len(previous_ids) == original_outer_count
-        ):
-            count = len(previous_ids)
-            faces: list[tuple[int, int, int]] = []
-            maximum_fanout_seen = 0
-            for inner_index, start_value in enumerate(retained):
-                start = int(start_value)
-                end = int(retained[(inner_index + 1) % len(retained)])
-                run = (end - start) % count
-                maximum_fanout_seen = max(maximum_fanout_seen, run + 1)
-                for step in range(run):
-                    current = (start + step) % count
-                    following = (current + 1) % count
-                    faces.append((
-                        int(previous_ids[current]),
-                        int(previous_ids[following]),
-                        int(layer_ids[inner_index]),
-                    ))
-                faces.append((
-                    int(previous_ids[end]),
-                    int(layer_ids[(inner_index + 1) % len(layer_ids)]),
-                    int(layer_ids[inner_index]),
-                ))
-            point_lookup = {
-                **{int(i): np.asarray(p, dtype=np.float64) for i, p in zip(previous_ids, previous_points)},
-                **{int(i): np.asarray(p, dtype=np.float64) for i, p in zip(layer_ids, layer_points)},
-            }
-            faces = orient_face_patch_consistently(
-                faces, point_lookup, np.asarray(plan["inward"], dtype=np.float64)
-            )
-            triangles = np.asarray(
-                [[point_lookup[value] for value in face] for face in faces],
-                dtype=np.float64,
-            )
-            double_areas = np.linalg.norm(
-                np.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0]),
-                axis=1,
-            )
-            if np.any(double_areas <= 1e-12):
-                raise ValueError("simplified backing transition contains a degenerate face")
-            output_faces.extend([list(face) for face in faces])
-            edge_lengths = np.linalg.norm(
-                triangles[:, [1, 2, 0]] - triangles[:, [0, 1, 2]], axis=2
-            )
-            added = len(faces)
-            strip_audit = {
-                "valid": True,
-                "reason": "",
-                "strategy": "source_indexed_simplified_profile_transition",
-                "maximum_fanout": int(maximum_fanout_seen),
-                "maximum_cross_edge_mm": float(edge_lengths.max(initial=0.0)),
-            }
-            returned_points = layer_points
-        else:
-            added, strip_audit, returned_points = _join_connector_rings(
-                output_vertices,
-                output_faces,
-                previous_ids,
-                layer_ids,
-                first_points=previous_points,
-                second_points=layer_points,
-                plan=plan,
-            )
-        layer_points = returned_points
         if layer_index == 0 and backing_taper_depth > 1e-9:
             refinement_vertex_start = len(output_vertices)
             from .rim_chord_repair import separate_source_chords
@@ -7994,11 +7550,6 @@ def make_part_mesh(
     visible_source_vertices = np.asarray(
         retopology_vertices, dtype=np.float64
     ).copy()
-    hidden_geometry_vertices = generated_geometry_boundary_vertices(
-        visible_source_vertices,
-        loops,
-        interface_retopology_records,
-    )
     boundary_match_vertices = visible_source_vertices.copy()
 
     component_center = visible_source_vertices[local_faces.reshape(-1)].mean(axis=0)
@@ -8082,9 +7633,9 @@ def make_part_mesh(
     for loop_index, loop in enumerate(loops):
         loop_array = np.array(loop, dtype=np.int64)
         source_boundary_points = visible_source_vertices[loop_array]
-        internal_boundary_points = hidden_geometry_vertices[loop_array]
+        internal_boundary_points = retopology_vertices[loop_array]
         loop_interior_conormals = boundary_loop_interior_conormals(
-            hidden_geometry_vertices, local_faces, loop, reference_axis=inward
+            retopology_vertices, local_faces, loop, reference_axis=inward
         )
         internal_boundary_points, sibling_record = sibling_cleared_points(loop, internal_boundary_points)
         loop_global_vertices = set(int(global_vertex_ids[i]) for i in loop)
@@ -8585,6 +8136,8 @@ def make_body_cut_mesh(
         cut_refs,
         preserve_unmatched_source_geometry=preserve_unmatched_source_geometry,
     )
+    if interface_retopology.config.preserve_confirmed_seam:
+        preserve_unmatched_source_geometry = True
     mutable_loop_indices = [
         int(loop_index)
         for loop_index, ref in enumerate(loop_cut_refs)
@@ -8607,11 +8160,6 @@ def make_body_cut_mesh(
         mutable_loop_indices,
     ):
         retopology_record["loop_index"] = int(loop_index)
-    hidden_geometry_vertices = generated_geometry_boundary_vertices(
-        visible_source_vertices,
-        mutable_loops,
-        interface_retopology_records,
-    )
     if immutable_source_loop_records:
         runtime_log(
             "递归几何",
@@ -8703,9 +8251,9 @@ def make_body_cut_mesh(
         u, v = orthonormal_basis(inward)
         loop_array = np.array(loop, dtype=np.int64)
         source_boundary_points = visible_source_vertices[loop_array]
-        internal_socket_points = hidden_geometry_vertices[loop_array]
+        internal_socket_points = retopology_vertices[loop_array]
         loop_interior_conormals = boundary_loop_interior_conormals(
-            hidden_geometry_vertices, local_faces, loop, reference_axis=inward
+            retopology_vertices, local_faces, loop, reference_axis=inward
         )
         effective_socket_overcut_mm = max(
             float(ref.get("socket_overcut_mm", socket_overcut_mm)) if ref else socket_overcut_mm,
@@ -8829,9 +8377,6 @@ def make_body_cut_mesh(
                 ),
                 surface_validation_mode=str(
                     interface_retopology.config.connector_surface_validation
-                ),
-                visible_interface_simplification_tolerance=float(
-                    interface_retopology.config.visible_interface_simplification_tolerance
                 ),
             )
             preview_vertex_checkpoint = len(output_vertices)
@@ -9191,11 +8736,6 @@ def make_layer_child_subassembly_mesh(
     ).copy()
     for retopology_record, selected_record in zip(interface_retopology_records, selected_loop_records):
         retopology_record["loop_index"] = int(selected_record["loop_index"])
-    hidden_geometry_vertices = generated_geometry_boundary_vertices(
-        visible_source_vertices,
-        selected_loops,
-        interface_retopology_records,
-    )
 
     u, v = orthonormal_basis(inward)
 
@@ -9235,9 +8775,9 @@ def make_layer_child_subassembly_mesh(
         loop_array = np.array(loop, dtype=np.int64)
         source_boundary_points = visible_source_vertices[loop_array]
         cap_decision = cap_decisions_by_loop.get(int(record["loop_index"]))
-        internal_boundary_points = hidden_geometry_vertices[loop_array]
+        internal_boundary_points = retopology_vertices[loop_array]
         loop_interior_conormals = boundary_loop_interior_conormals(
-            hidden_geometry_vertices,
+            retopology_vertices,
             local_faces,
             loop,
             reference_axis=inward,
@@ -9333,9 +8873,6 @@ def make_layer_child_subassembly_mesh(
                 ),
                 surface_validation_mode=str(
                     interface_retopology.config.connector_surface_validation
-                ),
-                visible_interface_simplification_tolerance=float(
-                    interface_retopology.config.visible_interface_simplification_tolerance
                 ),
             )
             generated_face_start = len(output_faces)
@@ -9773,3 +9310,5 @@ class PartMeshBuilder:
     build_part = staticmethod(make_part_mesh)
     build_body_cut = staticmethod(make_body_cut_mesh)
     build_layer_subassembly = staticmethod(make_layer_child_subassembly_mesh)
+
+

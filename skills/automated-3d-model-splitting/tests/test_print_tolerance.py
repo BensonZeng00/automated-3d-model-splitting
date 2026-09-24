@@ -13,29 +13,6 @@ from split3mf.surface_preservation import audit_replaced_surface, face_key
 
 
 class PrintToleranceTests(unittest.TestCase):
-    def test_vectorized_loop_metrics_match_per_loop_definition(self):
-        from split3mf.micro_interfaces import loop_area_span_metrics
-        rng = np.random.default_rng(91)
-        lengths = [3, 17, 64, 5]
-        vertices = rng.normal(size=(sum(lengths), 3))
-        records = []
-        start = 0
-        expected = []
-        for index, length in enumerate(lengths):
-            loop = list(range(start, start + length))
-            records.append({"loop_index": index, "loop": loop})
-            points = vertices[loop]
-            center = points.mean(axis=0)
-            area = np.linalg.norm(
-                np.cross(points - center, np.roll(points, -1, axis=0) - center),
-                axis=1,
-            ).sum() * 0.5
-            expected.append((area, np.linalg.norm(np.ptp(points, axis=0))))
-            start += length
-        areas, spans = loop_area_span_metrics(vertices, records)
-        np.testing.assert_allclose(areas, np.asarray(expected)[:, 0], rtol=1e-12)
-        np.testing.assert_allclose(spans, np.asarray(expected)[:, 1], rtol=1e-12)
-
     def test_secondary_micro_loop_does_not_become_connector(self):
         from split3mf.micro_interfaces import filter_micro_interface_loops
         vertices=np.asarray([[0,0,0],[10,0,0],[10,10,0],[0,10,0],[1,1,0],[1.2,1,0],[1.2,1.2,0],[1,1.2,0]])

@@ -7,10 +7,9 @@ from unittest.mock import patch
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
-from split3mf.curve_clarity import propose_clear_curve, crossings, resample_approved_curve
+from split3mf.curve_clarity import propose_clear_curve, crossings
 from split3mf.planar_arc import CurveClarityRequired, fit_stable_plane
-from split3mf.boundary_review import (BoundaryDecisionError, BoundaryReviewService,
-                                     BoundaryReviewRequired)
+from split3mf.boundary_review import BoundaryReviewService, BoundaryReviewRequired
 from split3mf.domain import PlanarArcRetopologyConfig, PlanarArcRetopologyContext
 from split3mf.interface_retopology import InterfaceRetopologyService
 
@@ -102,49 +101,6 @@ class CurveClarityTests(unittest.TestCase):
             self.assertFalse(raised.exception.report['previous_ownership_approval_reused'])
             self.assertTrue((raised.exception.directory/'clear_curve.npz').exists())
             self.assertTrue((raised.exception.directory/'clear_curve_comparison.png').exists())
-
-    def test_approved_candidate_is_resampled_without_using_candidate_rows_as_ids(self):
-        points = lobe()
-        proposal = propose_clear_curve(points, *BASIS)
-        target = resample_approved_curve(proposal, points)
-        self.assertEqual(target.shape, points.shape)
-        self.assertEqual(crossings(target[:, :2]), [])
-        self.assertFalse(np.shares_memory(target, proposal.points))
-
-    def test_fingerprint_bound_curve_approval_continues_retopology(self):
-        import hashlib, json
-        points = lobe(); proposal = propose_clear_curve(points, *BASIS)
-        fingerprint = hashlib.sha256(points.astype('<f8').tobytes() * 2).hexdigest()
-        failure = CurveClarityRequired(points, points, proposal, BASIS)
-        with tempfile.TemporaryDirectory() as directory:
-            decision = Path(directory) / 'decision.json'
-            decision.write_text(json.dumps(dict(
-                fingerprint=fingerprint, user_confirmed=True,
-                action='apply_clear_curve',
-                candidate_fingerprint=proposal.record['candidate_sha256'])))
-            service = BoundaryReviewService(Path(directory), decision)
-            context = PlanarArcRetopologyContext(PlanarArcRetopologyConfig(),
-                                                  curve_review_sink=service.review_curve)
-            with patch('split3mf.interface_retopology.build_planar_arc_boundary',
-                       side_effect=failure):
-                target, record = InterfaceRetopologyService.retopologize_loop(
-                    points, np.arange(len(points)), context)
-            self.assertEqual(target.shape, points.shape)
-            self.assertEqual(record['status'], 'user_confirmed_clear_curve')
-            self.assertTrue(record['approval_fingerprint_applied'])
-
-    def test_curve_approval_rejects_stale_candidate_fingerprint(self):
-        import hashlib, json
-        points = lobe(); proposal = propose_clear_curve(points, *BASIS)
-        fingerprint = hashlib.sha256(points.astype('<f8').tobytes() * 2).hexdigest()
-        failure = CurveClarityRequired(points, points, proposal, BASIS)
-        with tempfile.TemporaryDirectory() as directory:
-            decision = Path(directory) / 'decision.json'
-            decision.write_text(json.dumps(dict(
-                fingerprint=fingerprint, user_confirmed=True,
-                action='apply_clear_curve', candidate_fingerprint='stale')))
-            with self.assertRaisesRegex(BoundaryDecisionError, 'fingerprint mismatch'):
-                BoundaryReviewService(Path(directory), decision).review_curve(failure)
 
 
 if __name__ == '__main__':

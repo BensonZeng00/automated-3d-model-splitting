@@ -1,24 +1,26 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:openai:skill:automated-3d-model-splitting:region-review:2.2.0",
-  "title": "User-confirmed source-region semantic review",
+  "$id": "urn:openai:skill:automated-3d-model-splitting:tiny-component-review:1.6.0",
+  "title": "User-confirmed small-component image review",
   "type": "object",
   "required": [
     "schema_version",
     "source",
     "source_face_count",
-    "noise_max_faces",
-    "small_region_max_faces",
+    "min_faces",
+    "auto_noise_max_faces",
     "user_confirmed",
+    "merge_unselected",
     "items"
   ],
   "properties": {
-    "schema_version": {"const": 2},
+    "schema_version": {"const": 1},
     "source": {"type": "string", "minLength": 1},
     "source_face_count": {"type": "integer", "minimum": 1},
-    "noise_max_faces": {"type": "integer", "minimum": 0},
-    "small_region_max_faces": {"type": "integer", "minimum": 0},
+    "min_faces": {"type": "integer", "minimum": 1},
+    "auto_noise_max_faces": {"type": "integer", "minimum": 0},
     "user_confirmed": {"const": true},
+    "merge_unselected": {"const": true},
     "items": {
       "type": "array",
       "items": {
@@ -28,7 +30,7 @@
           "source_min_face_index",
           "semantic_label",
           "visual_confidence",
-          "classification"
+          "preserve"
         ],
         "properties": {
           "fragment_id": {"type": "integer", "minimum": 1},
@@ -40,7 +42,7 @@
               {"enum": ["VERYLOW", "LOW", "MED", "MEDIUM", "HIGH", "UNKNOWN"]}
             ]
           },
-          "classification": {"enum": ["noise", "part", "uncertain"]}
+          "preserve": {"type": "boolean"}
         },
         "additionalProperties": true
       }

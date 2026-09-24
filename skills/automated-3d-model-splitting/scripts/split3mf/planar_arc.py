@@ -222,7 +222,6 @@ def build_planar_arc_boundary(
     planar_control_points: int = 24,
     height_control_points: int = 8,
     maximum_target_offset_mm: float | None = None,
-    maximum_p95_target_offset_mm: float | None = None,
 ) -> PlanarArcBoundary:
     original = np.asarray(points, dtype=np.float64)
     source_ids = np.asarray(source_vertex_ids, dtype=np.int64)
@@ -270,7 +269,6 @@ def build_planar_arc_boundary(
                 "target_samples": int(target_samples),
                 "smooth_passes": 0,
                 "maximum_target_offset_mm": 0.0,
-                "p95_target_offset_mm": 0.0,
                 "rms_target_offset_mm": 0.0,
                 "projected_ripple_before_mm": _ripple_rms(equal),
                 "projected_ripple_after_mm": _ripple_rms(equal),
@@ -355,7 +353,6 @@ def build_planar_arc_boundary(
         raise CurveClarityRequired(original, target, clarity, (origin, u, v, normal))
     displacement = np.linalg.norm(target - original, axis=1)
     maximum_displacement = float(displacement.max(initial=0.0))
-    p95_displacement = float(np.percentile(displacement, 95)) if len(displacement) else 0.0
     if (
         maximum_target_offset_mm is not None
         and maximum_displacement > float(maximum_target_offset_mm) + 1e-9
@@ -364,15 +361,6 @@ def build_planar_arc_boundary(
             "planar-arc target leaves its retopology band: "
             f"required={maximum_displacement:.3f} mm, "
             f"allowed={float(maximum_target_offset_mm):.3f} mm"
-        )
-    if (
-        maximum_p95_target_offset_mm is not None
-        and p95_displacement > float(maximum_p95_target_offset_mm) + 1e-9
-    ):
-        raise PlanarArcError(
-            "planar-arc target has excessive distributed displacement: "
-            f"p95={p95_displacement:.3f} mm, "
-            f"allowed={float(maximum_p95_target_offset_mm):.3f} mm"
         )
     guide_3d = (
         origin[None, :]
@@ -396,7 +384,6 @@ def build_planar_arc_boundary(
             "target_samples": int(target_samples),
             "smooth_passes": int(smooth_passes),
             "maximum_target_offset_mm": maximum_displacement,
-            "p95_target_offset_mm": p95_displacement,
             "rms_target_offset_mm": float(np.sqrt(np.mean(displacement * displacement))),
             "projected_ripple_before_mm": _ripple_rms(equal),
             "projected_ripple_after_mm": _ripple_rms(guide_2d),

@@ -41,11 +41,7 @@ successful siblings do not reset the failing stage's counter. Dependency or
 permission errors and exit-code-4 user-review pauses are not geometry failures.
 Each retry must have a reasoned change; do not repeat deterministic failures
 unchanged merely to reach three. Stop earlier if authority or a user choice is
-needed. After three failures, stop repeating that unchanged local strategy.
-Apply completion-first.md: a supported local discard, merge, or materially different
-repair may continue without user handoff when it preserves usable parts and assembly.
-Attempt count alone does not require manual editing; hand off only when meaningful
-bounded repairs are exhausted or the remaining tradeoff needs the user's choice.
+needed. Never launch a fourth automatic attempt after three failures.
 
 On handoff, report in plain language:
 

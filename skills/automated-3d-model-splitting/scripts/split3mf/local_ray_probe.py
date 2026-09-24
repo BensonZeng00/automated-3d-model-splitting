@@ -29,21 +29,9 @@ class LocalRayProbe:
         distances = np.full(len(points), np.nan)
         faces = np.full(len(points), -1, dtype=np.int64)
         for i, (point, axis) in enumerate(zip(points, directions)):
-            candidates = []
-            for tree, bucket_ids, radius in self.buckets:
-                # Cover the entire finite ray with short enclosing spheres.
-                # Every intersected triangle's centroid lies within its own
-                # enclosing radius of one segment; no intersection is culled.
-                count = max(1, int(np.ceil(maximum_mm / max(2., 2.*radius))))
-                length = maximum_mm / count
-                centers = point + ((np.arange(count) + .5) * length)[:, None] * axis
-                groups = tree.query_ball_point(centers, length/2 + radius + 1e-9)
-                populated = [group for group in groups if len(group)]
-                if populated:
-                    local_ids = np.unique(np.concatenate(populated)).astype(np.int64)
-                    candidates.append(bucket_ids[local_ids])
-            if not candidates:
-                continue
+            center = point+axis*maximum_mm/2
+            candidates = [ids[tree.query_ball_point(center, maximum_mm/2+radius+1e-9)]
+                          for tree, ids, radius in self.buckets]
             ids = np.concatenate(candidates)
             triangles = self.triangles[ids]
             a = triangles[:, 0]

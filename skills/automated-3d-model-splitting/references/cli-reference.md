@@ -1,5 +1,7 @@
 # CLI Reference
 
+Resolve every command below relative to the directory containing the loaded `SKILL.md`. From another working directory, invoke the absolute path to that skill's `scripts/split_painted_3mf.py` with the selected Python interpreter. Pass absolute model and output paths to avoid changing their meaning when switching directories.
+
 ## Assembly validation and manual handoff
 
 `--assembly-fit-validation manual|strict` defaults to `manual`. After normal
@@ -88,7 +90,7 @@ Whole-tree preflight plans every recursive interface before the first expensive 
 
 `exterior-visible` reassigns occluded paint to the recognition base color before connected-region grouping. It never edits the source mesh.
 
-Before either recognition profile runs, vendor composite `paint_color` streams are decoded into their actual recursively split leaf faces. The parser conforms T-joints along internal and neighboring source-triangle edges, then reports source faces, decoded leaves, conformed faces, leaf states, and parse failures. Review face thresholds apply to restored leaf-face connectivity, never to raw composite token strings.
+Before either recognition profile runs, vendor composite `paint_color` streams are decoded into their actual recursively split leaf faces. The parser conforms T-joints along internal and neighboring source-triangle edges, then reports source faces, decoded leaves, conformed faces, leaf states, and parse failures. `--min-faces` applies to restored leaf-face connectivity, never to raw composite token strings.
 
 ## Processing Mode
 
@@ -102,13 +104,25 @@ Automatic body selection records normal coherence, opposite-normal balance, domi
 
 ## Components and Colors
 
-- `--noise-review-max-faces 100`
-- `--small-region-review-max-faces 999`
-- `--region-review-json PATH`
-- `--region-review-dir PATH`
-- `--region-review-resolution 320`
+- `--min-faces N`
+- `--tiny-component-policy semantic|merge|ignore` (default `semantic`)
+- `--tiny-component-auto-noise-max-faces 100`
+- `--tiny-component-review-json PATH`
+- `--tiny-component-review-dir PATH`
+- `--tiny-component-review-resolution 320`
 
-The face thresholds select mandatory semantic-review candidates only. Regions through 100 faces are noise candidates, regions from 101 through 999 faces are small-region candidates, and long strips require review at every face count. Confirm every candidate as `noise`, `part`, or `uncertain`. All classifications remain unchanged source geometry and follow the same normal interface-planning path. No classification merges, deletes, recolors, repairs, or filters a region. The former `--min-faces` and `--tiny-component-*` interface is intentionally unsupported.
+After the <=2 mm micro-region merge, long-strip candidates require review regardless of face count; see [SKILL.md](../SKILL.md#protect-the-source) for their physical screening criteria. Under the default policy, remaining non-strip connected regions with at most `--tiny-component-auto-noise-max-faces` faces are classified as noise and merged directly, without image rendering or user review. The default is inclusive `<=100`. `--min-faces` is the upper image-review threshold: regions above the auto-noise threshold and below `--min-faces` join the long-strip review candidates. When such candidates exist and no confirmed review JSON is supplied, the script writes one PNG per candidate with six whole-model context views above six local zoom views, plus `manifest.json` and `user_decisions.json`, then exits with code `4`. The Codex skill inspects every PNG, proposes what the region visually represents, and asks the user which candidates to preserve. The confirmed JSON must cover every rendered candidate, use the same source and thresholds, set `user_confirmed=true`, and contain a nonempty label plus Boolean `preserve` value for every item. Only user-selected candidates remain independent; all unselected candidates merge. `merge` unconditionally merges every sub-threshold region without review, while `ignore` retains legacy filtering.
+- `--body-strategy auto-score|largest|none`
+- `--body-color CODE`
+- `--body-index N`
+- `--merge-body-parts P14+P04`: merge recognized parts into one multi-material
+  body before assembly inference. Part ids are evaluated in the pre-merge
+  recognition inventory; the first id is the body/color anchor. Source per-face
+  filament assignments remain intact. This option is mutually exclusive with
+  `--body-index` and `--body-color`.
+- `--color-map-json PATH`
+- `--visual-semantics-json PATH`
+- `--visual-semantic-min-confidence LOW|MED|HIGH|0..1`
 
 High-confidence part semantics may include `force_inward_vector: [x,y,z]`, `force_parent_direction: true`, or a `guided_internal_cut` object. A guided cut supplies `entry_direction`, `target_plane_normal`, `target_plane_point_mm`, optional `minimum_depth_mm`, `maximum_depth_mm`, `entry_inset_mm`, and `maximum_parallel_shift_mm`. The entry vector is the front internal transition; the plane is the deeper shared cut. The planner keeps the visible rim locked, localizes the entry inset to measured thin arcs, searches bounded parent-interior variants, reuses one source-id fit ring on both parts, and blocks poor side-wall triangulation. These are audited geometry constraints, not model-axis defaults.
 
@@ -129,21 +143,16 @@ radial overcut, or translated clearance cutter is available. See [uniform-fit.md
 
 ## Boundary shape and planar arc retopology
 
-`--boundary-shape smooth` is the sole supported value and default. Shared seams use the spline and surface-band behavior below; see [boundary-smoothing.md](boundary-smoothing.md). Source ownership is never changed by seam smoothing.
-
-`--seam-smoothing-profile source-conservative|print-balanced|print-smooth` selects one coherent topology and shape-quality budget; `print-balanced` is the default. `--maximum-boundary-displacement-mm` independently sets both the maximum and P95 seam-motion limit and defaults to 10 mm. `print-balanced` permits at most 1% of source area, at most `min(5000, 5% of part vertices)` collateral vertices, at most 8 topology layers, edge stretch up to 16x, and introduced sparse normal reversals up to 0.10% when every connected cluster has at most 32 faces, every result angle is at least 0.01 degree, including isolated seam-adjacent faces created while smoothing a pitted boundary. Existing source defects are diagnostic and do not consume the introduced-defect budget. Open edges, over-shared edges, inconsistent directed topology, degenerate faces, over-budget seam-contact reversals and larger folded clusters remain blocking. `source-conservative` tightens these budgets; `print-smooth` expands them for explicitly print-first smoothing.
-
-A hidden generated-backing thin patch no larger than 2 mm² is recorded as a print-scale advisory and does not block or trigger source reconstruction. Larger generated-backing failures still require the explicit `--repair-thin-backing` workflow; this exception never authorizes changing source faces.
+Default `--boundary-shape source` preserves visible source seams. The spline and surface-band behavior below applies to explicitly requested `--boundary-shape smooth`; see [boundary-smoothing.md](boundary-smoothing.md). Connector slope checks apply in both modes.
 
 - `--boundary-target-samples 384`
 - `--boundary-smooth-passes 28`
-- `--visible-interface-simplification-tolerance 0.4` (millimeters; `0` disables)
 - `--boundary-retopology-band-mm 3.0`
 - `--connector-slope-validation strict|advisory` (default `advisory`)
 - `--surface-band-validation strict|advisory` (default `strict`)
 - `--connector-surface-validation strict|advisory` (default `strict`)
 
-`--surface-band-validation advisory` is reserved for a surface band the user has visually reviewed. It reports source-relative normal changes instead of treating them as geometric inversion, allows the target to use up to 60% of the requested real band, and replaces area/vertex coverage limits with the actual displacement envelope only when both maximum and P95 displacement remain within the selected smoothing profile (0.5 mm for `print-balanced`). It locks isolated shared-loop junction vertices to their original source positions, lowers the minimum result-angle floor for an otherwise eligible sparse isolated inversion from 3 degrees to 0.01 degree, raises the bounded edge-stretch ceiling from 8x to 128x, reuses a source-ID-matched prevalidated hidden fit ring when a later equivalent surface-band pass changes only its local conormals within the reviewed band offset, permits up to `0.00005 mm³` numerical volume drift when removing already accepted redundant Boolean micro-shells, and permits at most `0.005 mm³` kernel-to-export volume roundoff only when the audited Boolean is watertight, winding-consistent, has zero boundary/over-shared edges, and has zero degenerate faces. Its final local material-pair raster check blocks only when both the per-source-part ratio and accumulated absolute-pixel budgets are exceeded; a one-budget exceedance is recorded as a user-reviewed advisory so tiny parts are not rejected by an inflated percentage alone. Watertightness, winding, edge topology, collapsed-face ratio, exact boundary match, substantive Boolean validation, and assembly validation remain blocking. Every exercised advisory is recorded in the quality report.
+`--surface-band-validation advisory` is reserved for a surface band the user has visually reviewed. It reports source-relative normal changes instead of treating them as geometric inversion, allows the target to use up to 60% of the requested real band, locks isolated shared-loop junction vertices to their original source positions, lowers the minimum result-angle floor for an otherwise eligible sparse isolated inversion from 3 degrees to 1 degree, raises the bounded edge-stretch ceiling from 8x to 128x, reuses a source-ID-matched prevalidated hidden fit ring when a later equivalent surface-band pass changes only its local conormals within the reviewed band offset, permits up to `0.00005 mm³` numerical volume drift when removing already accepted redundant Boolean micro-shells, and permits at most `0.005 mm³` kernel-to-export volume roundoff only when the audited Boolean is watertight, winding-consistent, has zero boundary/over-shared edges, and has zero degenerate faces. Its final local material-pair raster check blocks only when both the per-source-part ratio and accumulated absolute-pixel budgets are exceeded; a one-budget exceedance is recorded as a user-reviewed advisory so tiny parts are not rejected by an inflated percentage alone. Watertightness, winding, edge topology, collapsed-face ratio, exact boundary match, substantive Boolean validation, and assembly validation remain blocking. Every exercised advisory is recorded in the quality report.
 
 `--connector-surface-validation advisory` is reserved for user-reviewed geometry. It retains an already topology-audited hidden connector annulus without optional flat-shading subdivision and records the measured internal-edge resolution. Together with connector-slope advisory, it may retain the intrinsic high-aspect side triangles of a peg-free minimal closure, whether produced by the constant-offset or axial-fallback branch, only when the rim has at most four vertices, depth is at most `0.05 mm`, strip topology is present and valid, no bridge leaves the annulus, fanout is at most 64, and reported needle edges are at most `8 mm`. Degeneracy, topology, winding, thickness, cutter, Boolean, and assembly checks remain blocking.
 
@@ -151,7 +160,7 @@ The generated interface target is 45 degrees. By default, only a strictly greate
 
 `advisory` is the general default and keeps slope measurements in the report without making departures fatal. Degenerate, inverted, non-manifold, Boolean, and assembly checks remain blocking.
 
-In `smooth` mode, the implementation fits one stable local SVD plane, resamples the projected closed loop by equal physical arc length, fits a 24-control periodic cubic B-spline in-plane plus an independent 8-control height spline, and evaluates them at locally regularized source physical-arc phases. It does not restore projected source extrema. Source-id canonicalization makes reversed child and parent winding deterministic. A fitted target within 45% of the configured band width (60% in user-reviewed advisory mode) becomes the visible shared seam and diffuses through the topology-connected surface band. A farther target that still satisfies `--maximum-boundary-displacement-mm` preserves the visible source rim and is consumed only by generated inward walls and caps; this avoids expanding the band and rebuilding an unnecessarily large parent patch. Targets beyond the configured displacement limit remain blocking, and the algorithm never falls back to a rougher curve.
+In `smooth` mode, the implementation fits one stable local SVD plane, resamples the projected closed loop by equal physical arc length, fits a 24-control periodic cubic B-spline in-plane plus an independent 8-control height spline, and evaluates them at locally regularized source physical-arc phases. It does not restore projected source extrema. Source-id canonicalization makes reversed child and parent winding deterministic. The visible shared seam is the fitted target and its displacement diffuses through the topology-connected surface band. A target requiring more than 45% of the configured band width is rejected, and the algorithm never falls back to a rougher curve.
 
 A three-edge closed micro-loop is preserved exactly and recorded as `exact-minimal-loop`: a periodic cubic spline cannot be defined without inventing geometry. The surrounding topology, cap, Boolean, and assembly audits still run normally.
 
@@ -182,7 +191,7 @@ Keep `--max-topology-defect-ratio` at or below `0.001` for publication. Do not i
 
 ## Print tolerance and stage replay
 
-- `--boundary-shape smooth`: sole supported mode, enabled by default; `source` is rejected.
+- `--boundary-shape source|smooth`: default source preserves visible seams.
 - `--micro-defect-area-mm2 1.0`: whole affected surface patch threshold.
 - `--print-surface-tolerance-mm 0.05`: sampled local source-surface distance limit.
 - `--recovery-dir PATH`: persistent finalization input/candidate snapshots and local validated results.

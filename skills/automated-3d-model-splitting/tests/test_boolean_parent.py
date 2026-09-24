@@ -19,7 +19,7 @@ class CompleteBooleanParentTests(unittest.TestCase):
         return build_complete_boolean_parent(
             mesh.vertices, mesh.faces, part_id='parent', cut_refs=[],
             interface_retopology=PlanarArcRetopologyContext(
-                PlanarArcRetopologyConfig()),
+                PlanarArcRetopologyConfig(preserve_confirmed_seam=True)),
         )
 
     def test_recessed_patch_survives_until_exact_subtraction(self):

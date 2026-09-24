@@ -9,7 +9,7 @@ from .print_tolerance import current
 from .reporting import runtime_log
 
 
-PRINTABLE_THIN_BACKING_ADVISORY_AREA_MM2 = 2.0
+RECOVERY_TAPER_SLOPE = float(np.tan(np.deg2rad(60.)))
 
 
 def audit_matching_socket(patch, child, parent, scale_factor):
@@ -52,27 +52,12 @@ def ensure_backing(patch, mesh, parent, source_codes, inward, *, part_id):
                 '正在核验生成后实际局部厚度', part_id=part_id, **before)
     if before['valid']:
         return mesh, record, None
-    if (
-        float(before.get('thin_interior_area_mm2', float('inf')))
-        <= PRINTABLE_THIN_BACKING_ADVISORY_AREA_MM2 + 1e-12
-    ):
-        record.update(
-            accepted_without_repair=True,
-            acceptance='bounded_hidden_thin_backing_patch',
-            advisory_area_limit_mm2=PRINTABLE_THIN_BACKING_ADVISORY_AREA_MM2,
-        )
-        runtime_log(
-            '背衬验收', 'thin_backing_patch_accepted',
-            '隐藏背衬薄区不超过打印尺度面积预算；保留原生成几何并继续',
-            part_id=part_id, **record,
-        )
-        return mesh, record, None
     candidate = None
     try:
         if not policy.repair_thin_backing:
             raise ValueError('Actual backing is too thin; explicit --repair-thin-backing required')
         candidate, geometry = build(patch, parent, inward, direction_mode='local-normal',
-                                    taper_slope=None)
+                                    taper_slope=RECOVERY_TAPER_SLOPE)
         owners = geometry.pop('back_face_source_indices')
         record['construction'] = geometry
         np.testing.assert_array_equal(candidate.triangles[:len(patch.faces)], patch.triangles)

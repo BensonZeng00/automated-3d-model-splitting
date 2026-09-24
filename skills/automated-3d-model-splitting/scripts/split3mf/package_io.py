@@ -187,8 +187,6 @@ def load_colored_mesh_objects_3mf(path: Path) -> list[dict]:
             raise ValueError(
                 f"{path}: object {object_element.attrib.get('name')} has invalid pindex"
             ) from exc
-        if not 0 <= default_color_index < len(palette):
-            raise ValueError(f"{path}: object default color is outside the palette")
         face_color_indices: list[int] = []
         face_paint_color_tokens: list[str | None] = []
         for triangle in triangle_elements:
@@ -249,11 +247,6 @@ def load_colored_mesh_objects_3mf(path: Path) -> list[dict]:
                 "annotation": annotation,
                 "palette": palette,
                 "object_color_index": default_color_index,
-                "color_hex": palette[default_color_index],
-                "filament_slot_index": default_color_index,
-                "color_resolution_status": "source_metadata",
-                "color_code": annotation.get("color_code", ""),
-                "color_name": annotation.get("color_name", ""),
                 "face_color_indices": face_color_indices,
                 "face_color_hexes": [
                     palette[index] for index in face_color_indices
@@ -452,20 +445,6 @@ def bambu_slice_info_bytes(source_application: str) -> bytes:
 
 
 def export_colored_parts_3mf(
-    path: Path, parts: list[dict], title: str,
-    source_application: str | None = None,
-    source_filament_colors: list[str] | None = None,
-    source_project_settings: dict | None = None,
-    output_layout: str = "assembly",
-) -> dict:
-    from .package_stream import MeshPayloadStore
-    with MeshPayloadStore() as payloads:
-        return _export_colored_parts_3mf(
-            path, parts, title, source_application, source_filament_colors,
-            source_project_settings, output_layout, _payloads=payloads)
-
-
-def _export_colored_parts_3mf(
     path: Path,
     parts: list[dict],
     title: str,
@@ -473,7 +452,6 @@ def _export_colored_parts_3mf(
     source_filament_colors: list[str] | None = None,
     source_project_settings: dict | None = None,
     output_layout: str = "assembly",
-    *, _payloads,
 ) -> dict:
     """Write printable meshes as one assembly or legacy parallel build items."""
     if output_layout not in {"assembly", "separate-items"}:
@@ -551,6 +529,15 @@ def _export_colored_parts_3mf(
             {"name": "automated-3d-model-splitting:annotation"},
         )
         object_metadata.text = json.dumps(annotation, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        mesh_element = ET.SubElement(object_element, CORE_NS + "mesh")
+        vertices_element = ET.SubElement(mesh_element, CORE_NS + "vertices")
+        for vertex in np.asarray(mesh.vertices, dtype=np.float64):
+            ET.SubElement(
+                vertices_element,
+                CORE_NS + "vertex",
+                {"x": format_3mf_float(vertex[0]), "y": format_3mf_float(vertex[1]), "z": format_3mf_float(vertex[2])},
+            )
+        triangles_element = ET.SubElement(mesh_element, CORE_NS + "triangles")
         per_face_indices = face_color_indices[part_offset]
         raw_paint_tokens = part.get("face_paint_color_tokens")
         if raw_paint_tokens is None:
@@ -574,9 +561,29 @@ def _export_colored_parts_3mf(
                 )
             if present_paint_tokens:
                 paint_tokens = [str(value) for value in raw_paint_tokens]
-        payload_index = _payloads.add_mesh(
-            mesh, per_face_indices, color_group_id, paint_tokens, format_3mf_float)
-        ET.SubElement(object_element, "_split3mf_payload", {"index": str(payload_index)})
+        for face_offset, face in enumerate(np.asarray(mesh.faces, dtype=np.int64)):
+            attributes = {
+                "v1": str(int(face[0])),
+                "v2": str(int(face[1])),
+                "v3": str(int(face[2])),
+            }
+            if per_face_indices is not None:
+                color_index = int(per_face_indices[face_offset])
+                attributes.update(
+                    {
+                        "pid": str(color_group_id),
+                        "p1": str(color_index),
+                        "p2": str(color_index),
+                        "p3": str(color_index),
+                    }
+                )
+            if paint_tokens is not None:
+                attributes["paint_color"] = paint_tokens[face_offset]
+            ET.SubElement(
+                triangles_element,
+                CORE_NS + "triangle",
+                attributes,
+            )
         build_records.append(
             {
                 "object_id": offset,
@@ -647,7 +654,7 @@ def _export_colored_parts_3mf(
     with zipfile.ZipFile(path, "w") as archive:
         write_deterministic_zip_member(archive, "[Content_Types].xml", content_types)
         write_deterministic_zip_member(archive, "_rels/.rels", relationships)
-        _payloads.write_model(archive, xml_document_bytes(model))
+        write_deterministic_zip_member(archive, "3D/3dmodel.model", xml_document_bytes(model))
         if bambu_project_compatible and project_settings_payload is not None:
             write_deterministic_zip_member(archive, "Metadata/project_settings.config", project_settings_payload)
             write_deterministic_zip_member(

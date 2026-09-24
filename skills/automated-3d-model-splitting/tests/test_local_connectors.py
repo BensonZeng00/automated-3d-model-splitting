@@ -1156,7 +1156,7 @@ class LocalConnectorTests(unittest.TestCase):
         self.assertLess(plan["socket_mouth_chamfer_mm"], 0.80)
         self.assertAlmostEqual(plan["mouth_slope_degrees"], 45.0, places=6)
 
-    def test_full_depth_backing_drops_optional_peg_before_backing(self) -> None:
+    def test_full_depth_backing_rejects_vertical_skirt_fallback(self) -> None:
         width = 5.5
         boundary = np.asarray(
             [
@@ -1173,14 +1173,12 @@ class LocalConnectorTests(unittest.TestCase):
             safe_engagement_depth_mm=5.0,
         )
 
-        plan = plan_local_connector(
-            boundary,
-            np.asarray([0.0, 0.0, -1.0]),
-            spec,
-        )
-        self.assertFalse(plan["compact_peg_enabled"])
-        self.assertEqual(plan["peg_width_mm"], 0.0)
-        self.assertGreater(plan["full_boundary_backing_depth_mm"], 0.0)
+        with self.assertRaisesRegex(ValueError, "continuous full-depth 45-degree"):
+            plan_local_connector(
+                boundary,
+                np.asarray([0.0, 0.0, -1.0]),
+                spec,
+            )
 
     def test_nonplanar_backing_records_measured_taper_angle_range(self) -> None:
         angles = np.linspace(0.0, 2.0 * np.pi, 128, endpoint=False)
@@ -3502,63 +3500,6 @@ class LocalConnectorTests(unittest.TestCase):
         self.assertAlmostEqual(spec.full_boundary_backing_depth_mm, 2.82)
         self.assertAlmostEqual(spec.engagement_depth_mm, 0.0)
         self.assertFalse(spec.compact_peg_enabled)
-        self.assertEqual(
-            safety["local_connector_backing_limiting_constraint"],
-            "lateral_interface_clearance",
-        )
-        self.assertFalse(
-            safety[
-                "local_connector_interface_is_wide_enough_for_nominal_45_degree_backing"
-            ]
-        )
-        self.assertFalse(
-            safety[
-                "local_connector_parent_is_axially_thick_enough_for_nominal_backing"
-            ]
-        )
-
-    def test_backing_diagnostic_distinguishes_thick_parent_from_narrow_interface(self) -> None:
-        class Probe:
-            def safety_limit(self, points, directions, maximum):
-                del points, directions, maximum
-                return 8.0, {"safe_maximum_inward_depth_mm": 8.0}
-
-        boundary = np.asarray(
-            [
-                [-6.0, -2.0, 0.0],
-                [6.0, -2.0, 0.0],
-                [6.0, 2.0, 0.0],
-                [-6.0, 2.0, 0.0],
-            ],
-            dtype=np.float64,
-        )
-        safety = local_connector_safe_depth_at_footprint(
-            boundary_points=boundary,
-            inward=np.asarray([0.0, 0.0, -1.0]),
-            fit_clearance_mm=0.50,
-            bottom_clearance_mm=0.0,
-            lead_in_mm=0.60,
-            boundary_distances=np.full(len(boundary), 8.0),
-            parent_thickness_probe=Probe(),
-        )
-
-        self.assertTrue(
-            safety[
-                "local_connector_parent_is_axially_thick_enough_for_nominal_backing"
-            ]
-        )
-        self.assertFalse(
-            safety[
-                "local_connector_interface_is_wide_enough_for_nominal_45_degree_backing"
-            ]
-        )
-        self.assertEqual(
-            safety["local_connector_backing_limiting_constraint"],
-            "lateral_interface_clearance",
-        )
-        self.assertAlmostEqual(
-            safety["local_connector_backing_safety_limit_mm"], 2.0
-        )
 
     def test_production_backing_is_outer_large_inner_small_at_45_degrees(self) -> None:
         samples = 64

@@ -193,7 +193,6 @@ def load_visual_semantics(path: Path | None) -> dict:
             "parts": {},
             "parent_relations": [],
             "interface_retreats": [],
-            "physical_partitions": [],
         }
     raw = json.loads(path.read_text(encoding="utf-8"))
     parts: dict[int, dict] = {}
@@ -226,26 +225,6 @@ def load_visual_semantics(path: Path | None) -> dict:
         }
 
     raw_relations = raw.get("parent_relations") or raw.get("relations") or []
-
-    physical_partitions = []
-    for item in raw.get("physical_partitions", []):
-        if not isinstance(item, dict):
-            continue
-        part_index = parse_part_index(item.get("part") or item.get("part_index"))
-        plane = item.get("plane", item)
-        if part_index is None or not isinstance(plane, dict):
-            continue
-        confidence = item.get("confidence", "UNKNOWN")
-        physical_partitions.append({
-            "part_index": int(part_index),
-            "label": str(item.get("label") or item.get("semantic_boundary") or ""),
-            "origin": plane.get("origin"),
-            "normal": plane.get("normal"),
-            "confidence": confidence,
-            "confidence_score": confidence_score(confidence),
-            "user_confirmed": bool(item.get("user_confirmed", False)),
-            "source_views": item.get("source_views", []),
-        })
     parent_relations = []
     for item in raw_relations:
         if not isinstance(item, dict):
@@ -310,7 +289,6 @@ def load_visual_semantics(path: Path | None) -> dict:
         "parts": parts,
         "parent_relations": parent_relations,
         "interface_retreats": interface_retreats,
-        "physical_partitions": physical_partitions,
         "raw": raw,
     }
 

@@ -509,89 +509,48 @@ def topology_safe_planar_inset_ring(
     )
     if abs(float(signed_area(projected))) <= 1e-9:
         return None
-    positive = projected if signed_area(projected) > 0.0 else projected[::-1].copy()
-    try:
-        import manifold3d
-
-        simplify_tolerance = max(
-            1e-7,
-            min(0.005, distance * 0.0015),
-        )
-        from .print_tolerance import current as current_print_tolerance
-        input_simplify_tolerance = min(
-            simplify_tolerance,
-            max(
-                1e-7,
-                float(current_print_tolerance().surface_distance_mm) * 0.001,
-            ),
-        )
-        # The visible source rim remains immutable and is still used by the
-        # outer annulus.  The hidden planar cross-section, however, often has
-        # tens of thousands of nearly collinear paint-expanded samples.  Feed
-        # Clipper its tolerance-equivalent contour before offsetting; otherwise
-        # every binary-search probe repeats the same oversized polygon solve
-        # only to simplify the result afterwards.
-        section_cache_key = "_backing_inset_simplified_section"
-        section = plan.get(section_cache_key)
-        if section is None:
-            section = manifold3d.CrossSection(
-                [positive],
-                manifold3d.FillRule.Positive,
-            ).simplify(input_simplify_tolerance)
-            plan[section_cache_key] = section
-            plan["backing_inset_section_cache_builds"] = 1
-            plan["backing_inset_section_cache_hits"] = 0
-        else:
-            plan["backing_inset_section_cache_hits"] = int(
-                plan.get("backing_inset_section_cache_hits", 0)
-            ) + 1
-        plan["backing_inset_input_vertices"] = int(len(positive))
-        plan["backing_inset_input_simplify_tolerance_mm"] = float(
-            input_simplify_tolerance
-        )
-        simplified_polygons = section.to_polygons()
-        plan["backing_inset_simplified_input_vertices"] = int(
-            sum(len(polygon) for polygon in simplified_polygons)
-        )
-        inset = section.offset(
-            -distance,
-            manifold3d.JoinType.Miter,
-            4.0,
-        ).simplify(simplify_tolerance)
-        plan["backing_inset_simplify_tolerance_mm"] = float(
-            simplify_tolerance
-        )
-        if inset.is_empty():
-            return None
-        contours = [np.asarray(value, dtype=np.float64) for value in inset.to_polygons()]
-    except Exception:
-        return None
-    candidates = [
-        contour
-        for contour in contours
-        if len(contour) >= 3
-        and (
-            point_in_poly(np.zeros(2, dtype=np.float64), contour)
-            or point_on_poly_boundary(np.zeros(2, dtype=np.float64), contour)
-        )
-    ]
-    if not candidates:
-        return None
-    candidates.sort(key=lambda contour: abs(float(signed_area(contour))), reverse=True)
-    inset_2d = candidates[0]
-    if float(signed_area(inset_2d)) * float(signed_area(projected)) < 0.0:
-        inset_2d = inset_2d[::-1].copy()
-    seam = int(np.argmin(np.linalg.norm(inset_2d - projected[0], axis=1)))
-    inset_2d = np.roll(inset_2d, -seam, axis=0)
-    source_plane = center + axis * float(np.mean(axial))
-    return (
-        source_plane[None, :]
-        + inset_2d[:, 0, None] * u[None, :]
-        + inset_2d[:, 1, None] * v[None, :]
-        + axis[None, :] * distance
+    # Simplify the outer design contour first, then derive the inner contour
+    # by uniform scaling.  These are the blue/red rings of the backing: their
+    # cardinality and cyclic order are identical by construction.  Do not
+    # independently simplify an offset result; that was the root cause of
+    # 28k-to-dozens bridges, projection folds, and very long cross-ring edges.
+    from .contour_simplification import corresponding_scaled_contours
+    # Hidden manufacturing rings need a useful reduction even when callers
+    # elect not to move the visible seam.  Bound the automatic tolerance by
+    # the backing depth; the configured interface tolerance may request a
+    # stronger (still error-bounded) simplification.
+    correspondence_tolerance = max(
+        float(plan.get("visible_interface_simplification_tolerance_mm", 0.0)),
+        min(1.0, 0.25 * distance),
     )
-
-
+    try:
+        simplified_outer, inset_2d, retained, scale = corresponding_scaled_contours(
+            projected,
+            correspondence_tolerance,
+            distance,
+            center=np.zeros(2, dtype=np.float64),
+        )
+        plan["backing_ring_correspondence"] = "homothetic_one_to_one"
+        plan["backing_ring_outer_vertices"] = int(len(simplified_outer))
+        plan["backing_ring_inner_vertices"] = int(len(inset_2d))
+        plan["backing_ring_source_indices"] = [int(value) for value in retained]
+        plan["backing_ring_scale"] = float(scale)
+        plan["backing_inset_simplified_input_vertices"] = int(len(simplified_outer))
+        plan["backing_inset_input_vertices"] = int(len(projected))
+        plan["backing_inset_method"] = "simplified_homothetic_correspondence"
+        source_plane = center + axis * float(np.mean(axial))
+        return (
+            source_plane[None, :]
+            + inset_2d[:, 0, None] * u[None, :]
+            + inset_2d[:, 1, None] * v[None, :]
+            + axis[None, :] * distance
+        )
+    except ValueError:
+        # A homothetic inset is only valid for a star-shaped boundary around
+        # the measured interior center.  Signal infeasibility so the existing
+        # depth search can reduce the backing or omit the optional peg.  An
+        # unequal-ring Clipper fallback would reintroduce the topology defect.
+        return None
 
 def printable_backing_rings(
     boundary_points: np.ndarray,
@@ -764,7 +723,6 @@ def printable_backing_rings(
             topology_limited_lead is not None
             and abs(float(depth) - float(taper_depth)) <= 1e-9
         ):
-            plan["backing_inset_method"] = "clipper2_trimmed_constant_offset"
             return np.asarray(topology_limited_lead, dtype=np.float64).copy()
         topology_safe = topology_safe_planar_inset_ring(
             boundary,
@@ -772,7 +730,6 @@ def printable_backing_rings(
             depth,
         )
         if topology_safe is not None:
-            plan["backing_inset_method"] = "clipper2_trimmed_constant_offset"
             return topology_safe
         inset_displacements = line_preserving_inset_displacements(
             boundary,

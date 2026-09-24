@@ -119,3 +119,81 @@ def simplify_closed_contour(points: np.ndarray, tolerance: float) -> np.ndarray:
     ):
         return np.arange(len(contour), dtype=np.int64)
     return indices
+
+
+def corresponding_scaled_contours(
+    points: np.ndarray,
+    tolerance: float,
+    inset_distance: float,
+    *,
+    center: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
+    """Build simplified, one-to-one outer/inner manufacturing contours.
+
+    The inner contour is a homothetic copy, rather than an independently
+    offset and independently simplified polygon.  Consequently every outer
+    vertex has exactly one inner partner and a straight ruled wall cannot
+    acquire a crossing merely from unequal ring topology.
+
+    ``inset_distance`` selects the scale by the nearest retained vertex.  It
+    is therefore a conservative radial inset, not a constant normal offset.
+    Non-star-shaped contours for which scaling leaves the source polygon are
+    rejected; callers may reduce depth or omit an optional connector, but
+    must not fall back to an unequal-count bridge.
+    """
+    contour = np.asarray(points, dtype=np.float64)
+    if contour.ndim != 2 or contour.shape[1] != 2 or len(contour) < 3:
+        raise ValueError("scaled contour needs at least three 2-D points")
+    distance = float(inset_distance)
+    if not np.isfinite(distance) or distance < 0.0:
+        raise ValueError("scaled contour inset must be finite and nonnegative")
+    retained = simplify_closed_contour(contour, float(tolerance))
+    outer = contour[retained]
+    origin = (
+        np.asarray(center, dtype=np.float64)
+        if center is not None
+        else np.mean(outer, axis=0)
+    )
+    if origin.shape != (2,) or not np.all(np.isfinite(origin)):
+        raise ValueError("scaled contour center must be a finite 2-D point")
+    radii = np.linalg.norm(outer - origin[None, :], axis=1)
+    minimum_radius = float(radii.min(initial=np.inf))
+    if minimum_radius <= 1e-9 or distance >= minimum_radius - 1e-9:
+        raise ValueError("requested inset collapses the scaled contour")
+    scale = 1.0 - distance / minimum_radius
+    inner = origin[None, :] + scale * (outer - origin[None, :])
+    if (
+        abs(_signed_area(inner)) <= 1e-15
+        or _signed_area(inner) * _signed_area(outer) <= 0.0
+        or _has_self_intersection(inner)
+        or not all(_point_in_polygon(point, contour) for point in inner)
+    ):
+        raise ValueError("scaled contour is not contained by the source boundary")
+    return outer, inner, retained, float(scale)
+
+
+def _point_in_polygon(point: np.ndarray, polygon: np.ndarray) -> bool:
+    """Boundary-inclusive even/odd containment for policy validation."""
+    p = np.asarray(point, dtype=np.float64)
+    ring = np.asarray(polygon, dtype=np.float64)
+    following = np.roll(ring, -1, axis=0)
+    edges = following - ring
+    relative = p[None, :] - ring
+    cross = edges[:, 0] * relative[:, 1] - edges[:, 1] * relative[:, 0]
+    epsilon = 1e-12 * np.maximum(np.linalg.norm(edges, axis=1), 1.0)
+    on_boundary = (
+        (np.abs(cross) <= epsilon)
+        & np.all(p[None, :] >= np.minimum(ring, following) - epsilon[:, None], axis=1)
+        & np.all(p[None, :] <= np.maximum(ring, following) + epsilon[:, None], axis=1)
+    )
+    if bool(np.any(on_boundary)):
+        return True
+    crosses_y = (ring[:, 1] > p[1]) != (following[:, 1] > p[1])
+    candidates = np.flatnonzero(crosses_y)
+    crossing_x = (
+        ring[candidates, 0]
+        + (p[1] - ring[candidates, 1])
+        * edges[candidates, 0]
+        / edges[candidates, 1]
+    )
+    return bool(np.count_nonzero(crossing_x > p[0]) % 2)

@@ -6,7 +6,10 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
-from split3mf.contour_simplification import simplify_closed_contour
+from split3mf.contour_simplification import (
+    corresponding_scaled_contours,
+    simplify_closed_contour,
+)
 
 
 class ClosedContourSimplificationTests(unittest.TestCase):
@@ -37,6 +40,34 @@ class ClosedContourSimplificationTests(unittest.TestCase):
         np.testing.assert_array_equal(
             simplify_closed_contour(contour, 0.0), np.arange(4)
         )
+
+    def test_scaled_inner_ring_has_exact_one_to_one_correspondence(self):
+        angles = np.linspace(0.0, 2.0 * np.pi, 20_000, endpoint=False)
+        contour = np.column_stack((20.0 * np.cos(angles), 12.0 * np.sin(angles)))
+
+        outer, inner, retained, scale = corresponding_scaled_contours(
+            contour, tolerance=1.0, inset_distance=3.0, center=np.zeros(2)
+        )
+
+        self.assertLess(len(outer), 100)
+        self.assertEqual(len(outer), len(inner))
+        self.assertEqual(len(retained), len(inner))
+        np.testing.assert_allclose(inner, outer * scale, atol=1e-12)
+        cross = np.cross(
+            np.pad(outer, ((0, 0), (0, 1))),
+            np.pad(inner, ((0, 0), (0, 1))),
+        )
+        np.testing.assert_allclose(cross[:, 2], 0.0, atol=1e-12)
+
+    def test_scaled_ring_rejects_non_star_shaped_correspondence(self):
+        contour = np.array([
+            [-4., -4.], [4., -4.], [4., 4.], [1., 4.],
+            [1., -1.], [-1., -1.], [-1., 4.], [-4., 4.],
+        ])
+        with self.assertRaisesRegex(ValueError, "not contained"):
+            corresponding_scaled_contours(
+                contour, tolerance=0.0, inset_distance=0.5, center=np.zeros(2)
+            )
 
 
 if __name__ == "__main__":

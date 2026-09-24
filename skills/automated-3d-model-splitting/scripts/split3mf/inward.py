@@ -2740,6 +2740,9 @@ def build_layer_child_cut_references(
                         surface_validation_mode=str(
                             interface_retopology.config.connector_surface_validation
                         ),
+                        visible_interface_simplification_tolerance=float(
+                            interface_retopology.config.visible_interface_simplification_tolerance
+                        ),
                     )
                     initial_cap_quality = preflight_local_connector_patch(
                         source_vertices=planned_vertices,
@@ -7185,6 +7188,39 @@ def add_local_male_connector_and_backing(
     heightfield_surface_vertices: set[int] = set()
     for layer_index, ring in enumerate(backing_profile.rings):
         layer_points = np.asarray(ring, dtype=np.float64)
+        if layer_index == len(backing_profile.rings) - 1:
+            tolerance = float(
+                plan.get("visible_interface_simplification_tolerance_mm", 0.0)
+            )
+            original_count = len(layer_points)
+            if tolerance > 0.0 and original_count > 3:
+                from .contour_simplification import simplify_closed_contour
+
+                projected = _project_connector_points(layer_points, plan)
+                retained = simplify_closed_contour(projected, tolerance)
+                candidate = layer_points[retained]
+                candidate_2d = projected[retained]
+                compact_ring = _project_connector_points(
+                    np.asarray(plan["peg_top"], dtype=np.float64), plan
+                )
+                # RDP chords can cut across a deep concavity.  Keep the dense
+                # ring rather than changing annulus/component topology when a
+                # compact connector would cease to be enclosed.
+                if all(
+                    point_in_poly(point, candidate_2d)
+                    or point_on_poly_boundary(point, candidate_2d)
+                    for point in compact_ring
+                ):
+                    layer_points = candidate
+            plan["visible_interface_outer_vertices_before_simplification"] = int(
+                original_count
+            )
+            plan["visible_interface_outer_vertices_after_simplification"] = int(
+                len(layer_points)
+            )
+            plan["visible_interface_simplification_applied"] = bool(
+                len(layer_points) < original_count
+            )
         if _rings_coincident(layer_points, previous_points):
             continue
         layer_ids = _append_points(output_vertices, layer_points)
@@ -8721,6 +8757,9 @@ def make_body_cut_mesh(
                 surface_validation_mode=str(
                     interface_retopology.config.connector_surface_validation
                 ),
+                visible_interface_simplification_tolerance=float(
+                    interface_retopology.config.visible_interface_simplification_tolerance
+                ),
             )
             preview_vertex_checkpoint = len(output_vertices)
             preview_face_checkpoint = len(output_faces)
@@ -9221,6 +9260,9 @@ def make_layer_child_subassembly_mesh(
                 ),
                 surface_validation_mode=str(
                     interface_retopology.config.connector_surface_validation
+                ),
+                visible_interface_simplification_tolerance=float(
+                    interface_retopology.config.visible_interface_simplification_tolerance
                 ),
             )
             generated_face_start = len(output_faces)

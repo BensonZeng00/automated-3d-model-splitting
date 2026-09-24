@@ -1081,6 +1081,9 @@ class SplitPipeline:
             "interface_retopology_mode": "planar-arc-retopology",
             "boundary_target_samples": args.boundary_target_samples,
             "boundary_smooth_passes": args.boundary_smooth_passes,
+            "visible_interface_simplification_tolerance_mm": float(
+                args.visible_interface_simplification_tolerance
+            ),
             "boundary_retopology_band_mm": args.boundary_retopology_band_mm,
             "boundary_target_slope_deg": interface_retopology.config.target_slope_degrees,
             "boundary_min_slope_deg": interface_retopology.config.minimum_slope_degrees,
@@ -1565,6 +1568,9 @@ class SplitPipeline:
                         "interface_retopology_mode": "planar-arc-retopology",
                         "boundary_target_samples": int(args.boundary_target_samples),
                         "boundary_smooth_passes": int(args.boundary_smooth_passes),
+                        "visible_interface_simplification_tolerance_mm": float(
+                            args.visible_interface_simplification_tolerance
+                        ),
                         "boundary_retopology_band_mm": float(args.boundary_retopology_band_mm),
                         "boundary_target_slope_deg": float(interface_retopology.config.target_slope_degrees),
                         "boundary_min_slope_deg": float(interface_retopology.config.minimum_slope_degrees),

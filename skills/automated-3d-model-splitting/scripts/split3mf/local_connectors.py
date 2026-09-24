@@ -649,6 +649,7 @@ class LocalConnectorSpec:
     compact_peg_enabled: bool = True
     slope_validation_mode: str = "strict"
     surface_validation_mode: str = "strict"
+    visible_interface_simplification_tolerance: float = 0.0
 
     def __post_init__(self) -> None:
         positive = {
@@ -678,6 +679,9 @@ class LocalConnectorSpec:
             "nominal_engagement_depth_mm": self.nominal_engagement_depth_mm,
             "backing_safety_limit_mm": self.backing_safety_limit_mm,
             "total_safety_limit_mm": self.total_safety_limit_mm,
+            "visible_interface_simplification_tolerance": (
+                self.visible_interface_simplification_tolerance
+            ),
         }
         for name, value in nonnegative.items():
             if float(value) < 0.0:
@@ -1122,6 +1126,9 @@ def plan_local_connector(
         "compact_peg_enabled": bool(compact_peg_enabled),
         "backing_slope_validation_mode": str(spec.slope_validation_mode),
         "backing_surface_validation_mode": str(spec.surface_validation_mode),
+        "visible_interface_simplification_tolerance_mm": float(
+            spec.visible_interface_simplification_tolerance
+        ),
         "full_backing_taper_reserved": bool(full_backing_taper_reserved),
         "peg_top": ring(peg_width, peg_length, corner_radius, 0.0),
         "peg_straight": ring(

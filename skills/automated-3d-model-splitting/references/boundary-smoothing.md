@@ -4,8 +4,8 @@ This is the sole production boundary policy. `smooth` is the default; the source
 
 Before the final backing annulus is triangulated, its outer contour is reduced
 with topology-checked closed Douglas--Peucker simplification. The independent
-`--visible-interface-simplification-tolerance` parameter defaults to 0.4 mm,
-roughly a common FDM line width, and may be set to zero to disable this trade-off.
+`--visible-interface-simplification-tolerance` parameter defaults to 1.0 mm and
+may be set to zero to disable this trade-off.
 It is a geometric deviation bound rather than a target vertex count. The result
 must retain winding, remain a simple closed polygon, and still contain the
 compact connector; otherwise the original contour is retained. This explicitly
@@ -26,4 +26,4 @@ If the target exceeds the configured displacement limit or the remaining hard ch
 
 ## Printable smoothing profiles
 
-Production defaults to `print-balanced`, which evaluates the displacement distribution and only counts defects introduced by smoothing. The CLI accepts P95 and maximum boundary motion through 10 mm by default, at most 1% of source area, at most `min(5000, 5% of part vertices)` collateral vertices, at most 8 topology layers, edge stretch through 16x, and sparse introduced normal reversals through 0.10%. Each reversed cluster is limited to 32 faces, every result minimum angle must remain at least 0.01 degree, and may include isolated seam-adjacent faces. Open, over-shared, inconsistent or degenerate topology remains blocking. `source-conservative` tightens the reversal and stretch limits; `print-smooth` expands those limits for an explicitly print-first result. None of the profiles authorizes changes to source ownership or unrelated source geometry.
+Production defaults to `print-balanced`, which evaluates the displacement distribution and only counts defects introduced by smoothing. The CLI accepts P95 and maximum boundary motion through 10 mm by default. Coverage budgets are distribution-aware: each affected source triangle may account for at most 2% of source area while all affected triangles together may account for at most 15%; collateral vertices are similarly capped at 15% (and 5000 vertices), with at most 8 topology layers. Introduced source-normal reversals may occupy at most 15% of the audited band in total and no edge-connected cluster may exceed 2%, so many separate small triangles are not mistaken for one large defect. Every result minimum angle must remain at least 0.01 degree, and isolated seam-adjacent faces are permitted. Edge stretch through 16x is allowed. Open, over-shared, inconsistent or degenerate topology remains blocking. `source-conservative` rejects introduced reversals and tightens the stretch limit; `print-smooth` expands the stretch limit for an explicitly print-first result. None of the profiles authorizes changes to source ownership or unrelated source geometry.

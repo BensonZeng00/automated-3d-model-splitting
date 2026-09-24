@@ -1316,6 +1316,9 @@ def _surface_band_deformation(
             ),
             maximum_ratio=policy.maximum_introduced_reversed_ratio,
             maximum_edge_connected_cluster=policy.maximum_reversed_cluster_faces,
+            maximum_edge_connected_cluster_ratio=(
+                policy.maximum_reversed_cluster_ratio
+            ),
         )
         boundary_set = set(int(value) for value in boundary)
         inverted_face_ids = np.flatnonzero(locally_inverted)
@@ -1438,6 +1441,9 @@ def _surface_band_deformation(
             ),
             maximum_ratio=policy.maximum_introduced_reversed_ratio,
             maximum_edge_connected_cluster=policy.maximum_reversed_cluster_faces,
+            maximum_edge_connected_cluster_ratio=(
+                policy.maximum_reversed_cluster_ratio
+            ),
         )
         inverted_faces_touching_boundary = 0
 
@@ -1455,9 +1461,23 @@ def _surface_band_deformation(
         source_triangle_double_areas[affected_face_mask].sum()
         / max(float(source_triangle_double_areas.sum()), 1e-24)
     )
+    affected_face_area_ratios = (
+        source_triangle_double_areas[affected_face_mask]
+        / max(float(source_triangle_double_areas.sum()), 1e-24)
+    )
+    maximum_affected_face_ratio = float(
+        affected_face_area_ratios.max(initial=0.0)
+    )
+    affected_face_area_within_budget = bool(
+        maximum_affected_face_ratio
+        <= policy.maximum_affected_face_ratio + 1e-12
+    )
     affected_area_within_budget = bool(
         len(faces) < 1000
-        or affected_area_ratio <= policy.maximum_affected_area_ratio + 1e-12
+        or (
+            affected_face_area_within_budget
+            and affected_area_ratio <= policy.maximum_affected_area_ratio + 1e-12
+        )
     )
     displacement = np.linalg.norm(result - points, axis=1)
     # Coverage is not visual severity: a smooth sub-nozzle displacement can
@@ -1509,6 +1529,9 @@ def _surface_band_deformation(
         "surface_band_validation_mode": str(validation_mode),
         "seam_smoothing_profile": policy.profile,
         "surface_band_affected_area_ratio": affected_area_ratio,
+        "surface_band_maximum_affected_face_area_ratio": maximum_affected_face_ratio,
+        "maximum_affected_face_area_ratio": policy.maximum_affected_face_ratio,
+        "affected_face_area_within_budget": affected_face_area_within_budget,
         "maximum_affected_area_ratio": policy.maximum_affected_area_ratio,
         "affected_area_within_budget": affected_area_within_budget,
         "visual_extent_advisory_accepted": visual_extent_advisory_accepted,

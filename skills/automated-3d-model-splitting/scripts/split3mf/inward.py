@@ -7194,7 +7194,16 @@ def add_local_male_connector_and_backing(
             )
             original_count = len(layer_points)
             retained = np.arange(original_count, dtype=np.int64)
-            if tolerance > 0.0 and original_count > 3:
+            simplification_skip_reason = None
+            # Source-indexed transition faces are the only safe way to join a
+            # heavily reduced backing contour to a dense visible rim.  If an
+            # earlier profile stage has already changed the ring cardinality,
+            # there is no longer a one-to-one source-index correspondence.
+            # Keep that ring intact instead of feeding a three-point RDP result
+            # into the generic annulus solver, where it would be expanded with
+            # straight chords that erase real concavities.
+            source_index_correspondence = original_count == len(previous_ids)
+            if tolerance > 0.0 and original_count > 3 and source_index_correspondence:
                 from .contour_simplification import simplify_closed_contour
 
                 projected = _project_connector_points(layer_points, plan)
@@ -7215,6 +7224,9 @@ def add_local_male_connector_and_backing(
                     layer_points = candidate
                 else:
                     retained = np.arange(original_count, dtype=np.int64)
+                    simplification_skip_reason = "compact_connector_not_enclosed"
+            elif tolerance > 0.0 and original_count > 3:
+                simplification_skip_reason = "source_index_correspondence_unavailable"
             plan["visible_interface_simplification_source_indices"] = [
                 int(value) for value in retained
             ]
@@ -7226,6 +7238,9 @@ def add_local_male_connector_and_backing(
             )
             plan["visible_interface_simplification_applied"] = bool(
                 len(layer_points) < original_count
+            )
+            plan["visible_interface_simplification_skip_reason"] = (
+                simplification_skip_reason
             )
         if _rings_coincident(layer_points, previous_points):
             continue

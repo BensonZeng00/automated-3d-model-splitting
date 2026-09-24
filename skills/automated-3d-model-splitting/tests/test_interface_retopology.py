@@ -218,6 +218,27 @@ class InterfaceRetopologyTests(unittest.TestCase):
         self.assertTrue(audit["accepted"])
         self.assertEqual(audit["maximum_edge_connected_cluster"], 1)
 
+    def test_many_distributed_reversals_use_total_and_cluster_budgets(self) -> None:
+        face_count = 40_000
+        reversed_count = 2_321
+        faces = np.arange(face_count * 3, dtype=np.int64).reshape((-1, 3))
+        mask = np.zeros(face_count, dtype=bool)
+        mask[np.linspace(0, face_count - 1, reversed_count, dtype=np.int64)] = True
+
+        audit = sparse_local_inversion_audit(
+            faces,
+            mask,
+            audited_face_count=face_count,
+            result_minimum_angles_degrees=np.full(reversed_count, 5.0),
+            maximum_ratio=0.15,
+            maximum_edge_connected_cluster_ratio=0.02,
+        )
+
+        self.assertTrue(audit["accepted"])
+        self.assertAlmostEqual(audit["ratio"], reversed_count / face_count)
+        self.assertEqual(audit["maximum_edge_connected_cluster"], 1)
+        self.assertLessEqual(audit["maximum_edge_connected_cluster_ratio"], 0.02)
+
     def test_small_mesh_keeps_single_local_inversion_blocking(self) -> None:
         faces = np.asarray([[0, 1, 2], [2, 1, 3]], dtype=np.int64)
         mask = np.asarray([True, False])
@@ -462,9 +483,13 @@ class InterfaceRetopologyTests(unittest.TestCase):
         self.assertEqual(config.smoothing_policy.profile, "print-balanced")
         self.assertEqual(config.smoothing_policy.maximum_displacement_mm, 10.0)
         self.assertEqual(config.smoothing_policy.p95_displacement_mm, 10.0)
-        self.assertEqual(config.smoothing_policy.maximum_affected_area_ratio, 0.01)
+        self.assertEqual(config.visible_interface_simplification_tolerance, 1.0)
+        self.assertEqual(config.smoothing_policy.maximum_affected_face_ratio, 0.02)
+        self.assertEqual(config.smoothing_policy.maximum_affected_area_ratio, 0.15)
+        self.assertEqual(config.smoothing_policy.maximum_affected_vertex_ratio, 0.15)
         self.assertEqual(config.smoothing_policy.maximum_topology_layers, 8)
-        self.assertEqual(config.smoothing_policy.maximum_introduced_reversed_ratio, 0.001)
+        self.assertEqual(config.smoothing_policy.maximum_introduced_reversed_ratio, 0.15)
+        self.assertEqual(config.smoothing_policy.maximum_reversed_cluster_ratio, 0.02)
 
         custom = PlanarArcRetopologyConfig.from_namespace(parser.parse_args([
             "--input", "placeholder.3mf",

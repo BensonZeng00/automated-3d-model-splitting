@@ -292,7 +292,9 @@ retain every source face and the original material on both sides.  They run befo
 and assembly planning, so the two semantic regions become normal independent components and reduce
 later recursive boolean complexity without adding a model-name special case.
 
-The reviewed Yoshi configuration is stored in `example/yoshi-visual-semantics.json`.  Its P08 plane
+The reviewed Yoshi configuration is stored in `example/yoshi-visual-semantics.json`, and the
+confirmed long white head/body separating strip classification is stored in
+`example/yoshi-region-review.json`.  Its P08 plane
 at Z=21.0 mm follows the visually confirmed head/body boundary.  A real `--recognize-only` run
 accepted the partition with 98 interface edges, preserved all 137,721 source faces and the white
 material, and produced sides of 76,077 and 61,644 faces.  Recognition consequently increased from

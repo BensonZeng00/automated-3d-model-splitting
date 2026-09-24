@@ -487,31 +487,49 @@ def _audit_ring_strip(
             projected_first * (1.0 - ratio) + projected_second * ratio
             for ratio in (0.25, 0.50, 0.75)
         )
-    if bridge_samples:
+    excluded = {tuple(sorted(face)) for face in restored_source_ears}
+    projected_faces = [face for face in faces if tuple(sorted(face)) not in excluded]
+    projection = audit_projection(
+        projected_faces, projected_by_id,
+        projection_core_outer_ids if projection_core_outer_ids is not None else outer_ids,
+        inner_ids)
+    projection_blocks = bool(
+        not projection.valid and not allow_projection_bridge_passthrough
+    )
+    # A strict projection failure already rejects this candidate.  Avoid an
+    # O(cross_edges * polygon_edges) containment scan that cannot change that
+    # decision; the caller may still repair the small projected ears and audit
+    # the restored candidate on its next pass.
+    skip_bridge_containment = bool(
+        projection_blocks
+        and max(len(outer_ids), len(inner_ids))
+        >= LARGE_ANNULUS_FAST_PATH_VERTICES
+    )
+    if bridge_samples and not skip_bridge_containment:
         samples = np.asarray(bridge_samples, dtype=np.float64)
 
         def points_inside_polygon(query: np.ndarray, polygon: np.ndarray) -> np.ndarray:
-            """Vectorized even/odd containment in bounded memory chunks."""
+            """Use Matplotlib's compiled path scan for dense contour audits.
 
-            result = np.zeros(len(query), dtype=bool)
-            left = np.asarray(polygon, dtype=np.float64)
-            right = np.roll(left, -1, axis=0)
-            for start in range(0, len(query), 512):
-                block = query[start : start + 512]
-                y = block[:, 1, None]
-                x = block[:, 0, None]
-                denominator = right[:, 1] - left[:, 1]
-                safe = np.where(np.abs(denominator) <= 1e-15, 1.0, denominator)
-                crosses = (left[:, 1][None, :] > y) != (right[:, 1][None, :] > y)
-                crossing_x = left[:, 0][None, :] + (
-                    (y - left[:, 1][None, :])
-                    * (right[:, 0] - left[:, 0])[None, :]
-                    / safe[None, :]
-                )
-                result[start : start + len(block)] = np.logical_xor.reduce(
-                    crosses & (x < crossing_x), axis=1
-                )
-            return result
+            Material-expanded boundaries can contain tens of thousands of
+            segments and produce three samples for every cross-ring edge.  A
+            NumPy query-by-segment matrix is bounded in memory but still does
+            O(query * segment) Python-level chunk dispatch and took minutes on
+            the reviewed Yoshi interface.  ``Path.contains_points`` performs
+            the same even/odd scan in compiled code without building that
+            matrix.
+            """
+
+            from matplotlib.path import Path
+
+            contour = np.asarray(polygon, dtype=np.float64)
+            closed = np.vstack((contour, contour[0]))
+            return np.asarray(
+                Path(closed, closed=True).contains_points(
+                    np.asarray(query, dtype=np.float64)
+                ),
+                dtype=bool,
+            )
 
         def points_on_polygon_boundary(
             query: np.ndarray,
@@ -519,53 +537,16 @@ def _audit_ring_strip(
             *,
             tolerance: float = 1e-8,
         ) -> np.ndarray:
-            """Return boundary ownership without relaxing the annulus itself."""
+            """Return boundary ownership without an all-points/all-edges matrix."""
 
-            result = np.zeros(len(query), dtype=bool)
-            left = np.asarray(polygon, dtype=np.float64)
-            right = np.roll(left, -1, axis=0)
-            edge = right - left
-            length_squared = np.einsum("ij,ij->i", edge, edge)
-            edge_length = np.sqrt(length_squared)
-            tolerance_value = float(tolerance)
-            minimum = np.minimum(left, right) - tolerance_value
-            maximum = np.maximum(left, right) + tolerance_value
-            for start in range(0, len(query), 512):
-                block = query[start : start + 512]
-                x = block[:, 0, None]
-                y = block[:, 1, None]
-                within_box = (
-                    (x >= minimum[:, 0][None, :])
-                    & (x <= maximum[:, 0][None, :])
-                    & (y >= minimum[:, 1][None, :])
-                    & (y <= maximum[:, 1][None, :])
-                )
-                cross = (
-                    (x - left[:, 0][None, :]) * edge[:, 1][None, :]
-                    - (y - left[:, 1][None, :]) * edge[:, 0][None, :]
-                )
-                on_nonzero = (
-                    within_box
-                    & (length_squared[None, :] > 1e-24)
-                    & (
-                        np.abs(cross)
-                        <= tolerance_value * edge_length[None, :]
-                    )
-                )
-                zero_edges = length_squared <= 1e-24
-                if np.any(zero_edges):
-                    dx = x[:, zero_edges] - left[zero_edges, 0][None, :]
-                    dy = y[:, zero_edges] - left[zero_edges, 1][None, :]
-                    on_zero = np.any(
-                        dx * dx + dy * dy <= tolerance_value * tolerance_value,
-                        axis=1,
-                    )
-                else:
-                    on_zero = np.zeros(len(block), dtype=bool)
-                result[start : start + len(block)] = (
-                    np.any(on_nonzero, axis=1) | on_zero
-                )
-            return result
+            from matplotlib.path import Path
+
+            contour = np.asarray(polygon, dtype=np.float64)
+            closed = Path(np.vstack((contour, contour[0])), closed=True)
+            values = np.asarray(query, dtype=np.float64)
+            expanded = closed.contains_points(values, radius=2.0 * float(tolerance))
+            contracted = closed.contains_points(values, radius=-2.0 * float(tolerance))
+            return np.asarray(expanded != contracted, dtype=bool)
 
         inside_outer = points_inside_polygon(samples, outer_polygon)
         inside_inner = points_inside_polygon(samples, inner_polygon)
@@ -653,7 +634,7 @@ def _audit_ring_strip(
         invalid_bridge_count=invalid_bridges,
     )
     planar_transition_long_bridge_accepted = False
-    if excessive_cross and invalid_bridges == 0:
+    if excessive_cross and invalid_bridges == 0 and not skip_bridge_containment:
         long_threshold = max(5.0, 10.0 * max(median_cross, 1e-12))
         long_edges = [
             edge
@@ -748,12 +729,6 @@ def _audit_ring_strip(
                     )
                 ),
             )
-    excluded = {tuple(sorted(face)) for face in restored_source_ears}
-    projected_faces = [face for face in faces if tuple(sorted(face)) not in excluded]
-    projection = audit_projection(
-        projected_faces, projected_by_id,
-        projection_core_outer_ids if projection_core_outer_ids is not None else outer_ids,
-        inner_ids)
     if not projection.valid and not allow_projection_bridge_passthrough:
         reasons.append(projection.reason)
     projection_record = asdict(projection)

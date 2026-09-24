@@ -16,6 +16,7 @@ def sparse_local_inversion_audit(
     result_minimum_angles_degrees: np.ndarray,
     maximum_ratio: float = 0.0005,
     maximum_edge_connected_cluster: int = 2,
+    maximum_edge_connected_cluster_ratio: float | None = None,
     minimum_audited_faces: int = 1000,
     minimum_result_angle_degrees: float = 3.0,
 ) -> dict:
@@ -62,13 +63,20 @@ def sparse_local_inversion_audit(
                     stack.append(neighbor)
         maximum_cluster = max(maximum_cluster, cluster_count)
 
+    cluster_ratio = float(maximum_cluster / max(population, 1))
+    cluster_within_budget = bool(
+        cluster_ratio <= float(maximum_edge_connected_cluster_ratio) + 1e-12
+        if maximum_edge_connected_cluster_ratio is not None
+        else maximum_cluster <= int(maximum_edge_connected_cluster)
+    )
+
     angles = np.asarray(result_minimum_angles_degrees, dtype=np.float64)
     minimum_angle = float(angles.min()) if len(angles) else None
     accepted = bool(
         count > 0
         and population >= int(minimum_audited_faces)
         and count <= allowed_count
-        and maximum_cluster <= int(maximum_edge_connected_cluster)
+        and cluster_within_budget
         and minimum_angle is not None
         and minimum_angle >= float(minimum_result_angle_degrees) - 1e-9
     )
@@ -80,8 +88,14 @@ def sparse_local_inversion_audit(
         "maximum_ratio": float(maximum_ratio),
         "maximum_allowed_count": allowed_count,
         "maximum_edge_connected_cluster": int(maximum_cluster),
+        "maximum_edge_connected_cluster_ratio": cluster_ratio,
         "maximum_allowed_edge_connected_cluster": int(
             maximum_edge_connected_cluster
+        ),
+        "maximum_allowed_edge_connected_cluster_ratio": (
+            None
+            if maximum_edge_connected_cluster_ratio is None
+            else float(maximum_edge_connected_cluster_ratio)
         ),
         "minimum_result_angle_degrees": minimum_angle,
         "required_minimum_result_angle_degrees": float(

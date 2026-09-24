@@ -308,12 +308,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--visible-interface-simplification-tolerance",
         type=float,
-        default=0.4,
+        default=1.0,
         metavar="MM",
         help=(
             "Maximum geometric deviation in millimeters when simplifying the "
             "visible-interface backing contour before annulus triangulation "
-            "(default: 0.4; use 0 to disable)."
+            "(default: 1.0; use 0 to disable)."
         ),
     )
     parser.add_argument(
@@ -330,8 +330,9 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["source-conservative", "print-balanced", "print-smooth"],
         default="print-balanced",
         help=(
-            "Printable seam quality budget. print-balanced tolerates sparse, "
-            "isolated source-normal outliers while preserving hard topology gates."
+            "Printable seam quality budget. print-balanced allows each affected "
+            "face or connected reversal cluster through 2%% and their aggregate "
+            "through 15%%, while preserving hard topology gates."
         ),
     )
     parser.add_argument(
@@ -357,10 +358,11 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Whether a user-reviewed surface band may report source-normal "
             "changes and bounded edge stretch up to 128x as visual advisories, "
-            "replace area/vertex coverage limits with the 0.5 mm maximum and "
+            "replace area/vertex coverage limits with the configured maximum and "
             "P95 displacement envelope when both are satisfied, "
             "allow the target to use up to 60%% of the requested real surface "
-            "band, and accept eligible sparse isolated inversions down to a 1 degree "
+            "band, and accept eligible sparse isolated inversions down to the "
+            "profile's result-angle floor "
             "result angle. Degeneracy, topology, and Boolean checks remain "
             "blocking."
         ),

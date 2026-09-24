@@ -599,7 +599,13 @@ class GeneralizedV12Tests(unittest.TestCase):
 
     def test_parent_thickness_discards_near_origin_surface_hits(self) -> None:
         class ClassifiedStubProbe(ParentThicknessProbe):
-            def __init__(self, thicknesses, preceding_entries, exit_distances=None):
+            def __init__(
+                self,
+                thicknesses,
+                preceding_entries,
+                exit_distances=None,
+                entry_distances=None,
+            ):
                 self.thicknesses = np.asarray(thicknesses, dtype=np.float64)
                 self.preceding_entries = np.asarray(
                     preceding_entries,
@@ -609,12 +615,19 @@ class GeneralizedV12Tests(unittest.TestCase):
                     self.thicknesses if exit_distances is None else exit_distances,
                     dtype=np.float64,
                 )
+                self.entry_distances = np.asarray(
+                    np.full(len(self.thicknesses), np.inf)
+                    if entry_distances is None
+                    else entry_distances,
+                    dtype=np.float64,
+                )
 
             def first_hit_distances(self, points, directions, search_limit_mm):
                 self.last_hit_had_preceding_entry = (
                     self.preceding_entries.copy()
                 )
                 self.last_selected_exit_distances = self.exit_distances.copy()
+                self.last_selected_entry_distances = self.entry_distances.copy()
                 return self.thicknesses.copy()
 
         points = np.zeros((200, 3), dtype=np.float64)
@@ -644,9 +657,10 @@ class GeneralizedV12Tests(unittest.TestCase):
         )
 
         folded_surface_probe = ClassifiedStubProbe(
-            [0.061] + [3.0] * 199,
+            [0.201] + [3.0] * 199,
             [True] + [False] * 199,
-            [0.14] + [3.0] * 199,
+            [0.24] + [3.0] * 199,
+            [0.02] + [np.inf] * 199,
         )
         safe_maximum, record = folded_surface_probe.safety_limit(
             points, directions, 5.0,
@@ -669,7 +683,21 @@ class GeneralizedV12Tests(unittest.TestCase):
             record["parent_thickness_unpaired_surface_hit_vertices_discarded"],
             25,
         )
-        self.assertEqual(record["parent_surface_hit_tolerance_mm"], 0.10)
+        self.assertAlmostEqual(record["parent_surface_hit_tolerance_mm"], 0.13)
+
+        beyond_surface_band_probe = ClassifiedStubProbe(
+            [0.151] + [3.0] * 199,
+            [False] * 200,
+            [0.151] + [3.0] * 199,
+        )
+        safe_maximum, record = beyond_surface_band_probe.safety_limit(
+            points, directions, 5.0,
+        )
+        self.assertAlmostEqual(safe_maximum, 0.101)
+        self.assertEqual(
+            record["parent_thickness_near_origin_surface_hit_vertices_discarded"],
+            0,
+        )
 
         paired_probe = ClassifiedStubProbe(
             [0.001] * 20 + [3.0] * 180,
@@ -730,6 +758,65 @@ class GeneralizedV12Tests(unittest.TestCase):
             record["parent_thickness_interval_raw_min_mm"],
             0.01,
         )
+
+    def test_parent_thickness_discards_distant_reentry_into_parent_shell(self) -> None:
+        class ParentReentryStubProbe(ParentThicknessProbe):
+            def __init__(self):
+                self.filter_context = {"parent_part_index": 1}
+                self.triangle_owner_indices = np.asarray([1, 2], dtype=np.int32)
+
+            def first_hit_distances(self, points, directions, search_limit_mm):
+                self.last_hit_had_preceding_entry = np.asarray(
+                    [True, True, False], dtype=bool
+                )
+                self.last_selected_entry_distances = np.asarray(
+                    [0.13, 2.0, np.inf], dtype=np.float64
+                )
+                self.last_selected_entry_triangle_ids = np.asarray(
+                    [0, 1, -1], dtype=np.int64
+                )
+                self.last_selected_exit_triangle_ids = np.asarray(
+                    [1, 1, 0], dtype=np.int64
+                )
+                return np.asarray([0.25, 0.10, 3.0], dtype=np.float64)
+
+        points = np.zeros((3, 3), dtype=np.float64)
+        directions = np.tile(np.asarray([0.0, 0.0, 1.0]), (3, 1))
+        safe_maximum, record = ParentReentryStubProbe().safety_limit(
+            points, directions, 5.0
+        )
+
+        # The first ray left and re-entered the same parent shell and must not
+        # define its wall thickness.  The different-owner remote shell still
+        # limits travel at its 2 mm entry.
+        self.assertAlmostEqual(safe_maximum, 1.95)
+        self.assertEqual(record["parent_thickness_parent_reentry_hits_discarded"], 1)
+        self.assertEqual(
+            record["parent_thickness_remote_shell_interval_hits_repaired"], 1
+        )
+
+    def test_parent_thickness_uses_surface_topology_for_short_direct_hits(self) -> None:
+        # The first two faces are connected along the sampled outer surface;
+        # the third is a geometrically close but topologically separate wall.
+        vertices = np.asarray(
+            [
+                [0.0, 0.0, 0.0], [0.1, 0.0, 0.0], [0.0, 0.1, 0.0],
+                [0.1, 0.1, 0.02],
+                [0.0, 0.0, 0.15], [0.1, 0.0, 0.15], [0.0, 0.1, 0.15],
+            ],
+            dtype=np.float64,
+        )
+        faces = np.asarray([[0, 1, 2], [1, 3, 2], [4, 5, 6]], dtype=np.int64)
+        probe = ParentThicknessProbe(
+            vertices, faces, triangle_owner_indices=np.ones(3, dtype=np.int32)
+        )
+        points = np.asarray([[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]])
+        local = probe._same_local_surface_hits(
+            points,
+            np.asarray([1, 2], dtype=np.int64),
+            np.asarray([0.14, 0.15], dtype=np.float64),
+        )
+        self.assertEqual(local.tolist(), [True, False])
 
     def test_localized_short_open_edges_are_ratio_accepted_but_not_other_defects(self) -> None:
         finding = {

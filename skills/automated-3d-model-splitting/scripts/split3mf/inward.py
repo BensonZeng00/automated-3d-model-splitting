@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from scipy.ndimage import convolve1d
+from scipy.sparse import coo_matrix
+from scipy.sparse.csgraph import dijkstra
 
 from .cap_template import (
     fit_affine_cap_inside_parent,
@@ -1801,30 +1803,17 @@ def build_layer_child_cut_references(
                             candidate_conormals,
                             effective_insert_shrink_mm,
                         )
-                        candidate_decision = plan_cap_decision(
-                            points=selected_fit_points,
-                            source_vertex_ids=loop_global,
-                            fallback_inward=candidate_fallback_inward,
-                            inward_directions=candidate_inward_directions,
-                            fixed_depth_mm=float(max_extension_mm),
-                            flat_clearance_mm=float(flat_clearance_mm),
-                            cap_mode=requested_cap_mode,
-                            planar_extra_limit_mm=cap_planar_extra_limit_mm,
-                            parent_thickness_probe=child_parent_thickness_probe,
-                            source_points=source_points,
-                        )
-                        authoritative_reserved_distances, reserved_record = (
-                            reserve_flat_socket_travel_budget(
-                                child_fit_points=selected_fit_points,
-                                child_distances=candidate_decision.distances,
-                                child_directions=candidate_decision.directions,
-                                socket_top_points=candidate_socket_points,
-                                bottom_clearance_mm=bottom_clearance_mm,
-                                maximum_socket_travel_mm=float(max_extension_mm)
-                                + max(float(planar_extra_limit_mm or 0.0), 0.0),
-                                plane_record=candidate_decision.record,
-                            )
-                        )
+                        # Candidate evaluation above already used the complete
+                        # authoritative thickness horizon.  Replaying the same
+                        # deterministic plan here performed a third identical
+                        # multi-million-candidate ray pass without adding a
+                        # stronger safety check; retain the selected evaluated
+                        # result instead.
+                        candidate_decision = selected["decision"]
+                        authoritative_reserved_distances = np.asarray(
+                            selected["reserved_distances"], dtype=np.float64
+                        ).copy()
+                        reserved_record = dict(selected["reserved_record"])
                         screening_minimum_depth_mm = float(
                             selected["minimum_depth_mm"]
                         )
@@ -3150,9 +3139,10 @@ class ParentThicknessProbe:
         triangle_source_face_indices: np.ndarray | None = None,
         triangle_owner_indices: np.ndarray | None = None,
     ) -> None:
-        self.triangles = np.asarray(vertices, dtype=np.float64)[
-            np.asarray(faces, dtype=np.int64)
-        ]
+        self.mesh_vertices = np.asarray(vertices, dtype=np.float64)
+        self.mesh_faces = np.asarray(faces, dtype=np.int64)
+        self.triangles = self.mesh_vertices[self.mesh_faces]
+        self._surface_topology_cache: dict = {}
         triangle_count = int(len(self.triangles))
         self.triangle_source_face_indices = (
             np.arange(triangle_count, dtype=np.int64)
@@ -3240,6 +3230,9 @@ class ParentThicknessProbe:
         active_mask[excluded] = False
         view = object.__new__(type(self))
         for attribute in (
+            "mesh_vertices",
+            "mesh_faces",
+            "_surface_topology_cache",
             "triangles",
             "triangle_source_face_indices",
             "triangle_owner_indices",
@@ -3294,6 +3287,80 @@ class ParentThicknessProbe:
             "excluded_owner_indices": excluded_owner_indices,
         }
         return view
+
+    def _same_local_surface_hits(
+        self,
+        points: np.ndarray,
+        hit_triangle_ids: np.ndarray,
+        hit_distances: np.ndarray,
+    ) -> np.ndarray:
+        """Recognize short ray hits reachable along the sampled shell.
+
+        Euclidean distance alone cannot distinguish a nearby fold of the
+        source surface from an opposing wall.  A fold is also nearby along the
+        mesh graph, while an actual inner/opposite shell requires a much longer
+        route around the closed solid.  Only the small near-origin candidate
+        band is audited, keeping this exact topological test inexpensive.
+        """
+        result = np.zeros(len(points), dtype=bool)
+        # Audit the whole preferred printable-depth range.  Stopping at a
+        # small Euclidean band merely moved the minimum to the next triangle
+        # on a continuous curved surface (0.13 -> 0.26 mm on the Yoshi seam).
+        # Topology, rather than this horizon, decides whether a hit is local;
+        # the horizon only avoids work on hits that already provide the normal
+        # requested insertion depth.
+        horizon = DEFAULT_EFFECTIVE_MINIMUM_INWARD_DEPTH_MM
+        candidates = np.flatnonzero(
+            (hit_triangle_ids >= 0)
+            & np.isfinite(hit_distances)
+            & (hit_distances <= horizon + 1e-9)
+        )
+        if not len(candidates) or not len(self.mesh_vertices):
+            return result
+        cache = self._surface_topology_cache
+        if "vertex_tree" not in cache:
+            cache["vertex_tree"] = cKDTree(self.mesh_vertices)
+        if "vertex_graph" not in cache:
+            edges = np.vstack(
+                (
+                    self.mesh_faces[:, [0, 1]],
+                    self.mesh_faces[:, [1, 2]],
+                    self.mesh_faces[:, [2, 0]],
+                )
+            )
+            lengths = np.linalg.norm(
+                self.mesh_vertices[edges[:, 0]]
+                - self.mesh_vertices[edges[:, 1]],
+                axis=1,
+            )
+            rows = np.concatenate((edges[:, 0], edges[:, 1]))
+            cols = np.concatenate((edges[:, 1], edges[:, 0]))
+            weights = np.concatenate((lengths, lengths))
+            cache["vertex_graph"] = coo_matrix(
+                (weights, (rows, cols)),
+                shape=(len(self.mesh_vertices), len(self.mesh_vertices)),
+            ).tocsr()
+        _nearest_distances, origin_vertices = cache["vertex_tree"].query(
+            np.asarray(points)[candidates], k=1
+        )
+        for candidate, origin_vertex in zip(candidates, origin_vertices):
+            triangle_id = int(hit_triangle_ids[candidate])
+            if triangle_id >= len(self.mesh_faces):
+                continue
+            chord = float(hit_distances[candidate])
+            # Allow curved/folded paths to be longer than their chord.  The
+            # search remains local and cannot walk around a hollow shell to an
+            # actual opposite wall.
+            geodesic_limit = max(4.0 * chord, horizon)
+            distances = dijkstra(
+                cache["vertex_graph"],
+                directed=False,
+                indices=int(origin_vertex),
+                limit=geodesic_limit,
+            )
+            if np.any(np.isfinite(distances[self.mesh_faces[triangle_id]])):
+                result[candidate] = True
+        return result
 
     def _owner_counts(self, triangle_ids: np.ndarray) -> dict[str, int]:
         triangle_ids = np.asarray(triangle_ids, dtype=np.int64)
@@ -3732,6 +3799,48 @@ class ParentThicknessProbe:
             "last_selected_entry_distances",
             None,
         )
+        selected_entry_triangle_ids = getattr(
+            self,
+            "last_selected_entry_triangle_ids",
+            np.full(len(thicknesses), -1, dtype=np.int64),
+        )
+        parent_part_index = int(
+            getattr(self, "filter_context", {}).get("parent_part_index", 0)
+        )
+        triangle_owner_indices = np.asarray(
+            getattr(self, "triangle_owner_indices", np.empty(0, dtype=np.int32))
+        )
+        entry_owner_indices = np.full(len(thicknesses), 0, dtype=np.int32)
+        valid_entry_triangle_ids = (
+            (selected_entry_triangle_ids >= 0)
+            & (selected_entry_triangle_ids < len(triangle_owner_indices))
+        )
+        entry_owner_indices[valid_entry_triangle_ids] = triangle_owner_indices[
+            selected_entry_triangle_ids[valid_entry_triangle_ids]
+        ]
+        # Re-entering the shell currently being inset is a local surface fold,
+        # even when curvature puts the re-entry farther from the ray origin.
+        # It is not a remote obstacle.  Owner identity supplies the topological
+        # distinction that a distance threshold cannot: genuinely separate
+        # shells retain a different owner and continue to limit travel at
+        # their entry point.
+        paired_parent_reentry = (
+            parent_part_index > 0
+        ) & (entry_owner_indices == parent_part_index)
+        if (
+            hasattr(self, "mesh_vertices")
+            and isinstance(preceding_entry_distances, np.ndarray)
+            and preceding_entry_distances.shape == thicknesses.shape
+        ):
+            # Paint ownership partitions one physical shell into many parts;
+            # it is not a shell-connectivity label.  A differently painted
+            # entry that is reachable locally along the same mesh is still a
+            # folded/re-entered source surface, not a remote obstacle.
+            paired_parent_reentry |= self._same_local_surface_hits(
+                points,
+                selected_entry_triangle_ids,
+                preceding_entry_distances,
+            )
         paired_remote_shell_repair = np.zeros_like(thicknesses, dtype=bool)
         if (
             isinstance(preceding_entry_distances, np.ndarray)
@@ -3749,6 +3858,7 @@ class ParentThicknessProbe:
             # 0.218 mm remote shell as the available depth.
             paired_remote_shell_repair = (
                 np.isfinite(preceding_entry_distances)
+                & ~paired_parent_reentry
                 & (
                     preceding_entry_distances
                     > PARENT_THICKNESS_CLEARANCE_MM + 1e-9
@@ -3767,15 +3877,55 @@ class ParentThicknessProbe:
             isinstance(selected_exit_distances, np.ndarray)
             and selected_exit_distances.shape == thicknesses.shape
         )
+        selected_exit_triangle_ids = getattr(
+            self,
+            "last_selected_exit_triangle_ids",
+            np.full(len(thicknesses), -1, dtype=np.int64),
+        )
+        topologically_local_surface = np.zeros_like(thicknesses, dtype=bool)
+        if (
+            parent_part_index > 0
+            and hasattr(self, "mesh_vertices")
+            and selected_exit_triangle_ids.shape == thicknesses.shape
+        ):
+            exit_owner_indices = np.zeros(len(thicknesses), dtype=np.int32)
+            valid_exit_ids = (
+                (selected_exit_triangle_ids >= 0)
+                & (selected_exit_triangle_ids < len(triangle_owner_indices))
+            )
+            exit_owner_indices[valid_exit_ids] = triangle_owner_indices[
+                selected_exit_triangle_ids[valid_exit_ids]
+            ]
+            topologically_local_surface = self._same_local_surface_hits(
+                points,
+                selected_exit_triangle_ids,
+                np.where(
+                    exit_owner_indices == parent_part_index,
+                    selected_exit_distances,
+                    np.inf,
+                ),
+            )
         # A hit belongs to the sampled surface neighbourhood when either its
         # complete exit or its still-local material interval is within the
-        # origin tolerance.  The second condition matters for a folded seam:
-        # it can produce a paired entry/exit straddling the tolerance even
-        # though the tiny interval is only the local tessellated skin.  A thin
-        # remote shell is repaired to its distant entry above, so it satisfies
-        # neither condition and remains a real obstacle.
+        # origin tolerance.  A paired entry inside the manufacturing clearance
+        # is also unconditionally local: it means that the ray started in the
+        # seam uncertainty band, briefly crossed out of the tessellated parent,
+        # then entered it again.  The following exit can be arbitrarily far
+        # from that entry along a folded surface, so classifying the pair by
+        # interval length creates a brittle threshold chase.  Remote paired
+        # shells were replaced by their entry distance above and are excluded
+        # from this local-pair classification.
+        local_paired_surface = (
+            np.isfinite(preceding_entry_distances)
+            & (~paired_remote_shell_repair | paired_parent_reentry)
+            if isinstance(preceding_entry_distances, np.ndarray)
+            and preceding_entry_distances.shape == thicknesses.shape
+            else np.zeros_like(thicknesses, dtype=bool)
+        )
         surface_near = (
             (thicknesses <= PARENT_SURFACE_HIT_TOLERANCE_MM + 1e-9)
+            | local_paired_surface
+            | topologically_local_surface
             | (
                 (
                     selected_exit_distances
@@ -3854,11 +4004,6 @@ class ParentThicknessProbe:
                 atol=1e-9,
             )
         )
-        selected_exit_triangle_ids = getattr(
-            self,
-            "last_selected_exit_triangle_ids",
-            np.full(len(thicknesses), -1, dtype=np.int64),
-        )
         selected_entry_triangle_ids = getattr(
             self,
             "last_selected_entry_triangle_ids",
@@ -3911,6 +4056,12 @@ class ParentThicknessProbe:
         limiting_vertex_sample = [
             int(value) for value in limiting_vertex_indices[:16]
         ]
+        limiting_probe_points = np.asarray(points, dtype=np.float64)[
+            limiting_vertex_indices[:16]
+        ].round(9).tolist()
+        limiting_probe_directions = np.asarray(directions, dtype=np.float64)[
+            limiting_vertex_indices[:16]
+        ].round(9).tolist()
         limiting_exit_source_faces = limiting_exit_source_faces_all[:16]
         limiting_entry_source_faces = limiting_entry_source_faces_all[:16]
         result = {
@@ -3923,6 +4074,12 @@ class ParentThicknessProbe:
             ),
             "parent_thickness_remote_shell_interval_hits_repaired": int(
                 np.count_nonzero(paired_remote_shell_repair)
+            ),
+            "parent_thickness_parent_reentry_hits_discarded": int(
+                np.count_nonzero(paired_parent_reentry)
+            ),
+            "parent_thickness_topologically_local_hits_discarded": int(
+                np.count_nonzero(topologically_local_surface)
             ),
             "parent_thickness_coincident_hit_vertices": coincident_count,
             "parent_thickness_coincident_hit_ratio": coincident_ratio,
@@ -3960,6 +4117,8 @@ class ParentThicknessProbe:
             "parent_thickness_limiting_probe_vertex_count": int(
                 len(limiting_vertex_indices)
             ),
+            "parent_thickness_limiting_probe_points": limiting_probe_points,
+            "parent_thickness_limiting_probe_directions": limiting_probe_directions,
             "parent_thickness_limiting_exit_face_indices": (
                 limiting_exit_source_faces
             ),
@@ -3995,6 +4154,8 @@ class ParentThicknessProbe:
                 int(value) for value in limiting_vertex_sample
             ],
             limiting_probe_vertex_count=int(len(limiting_vertex_indices)),
+            limiting_probe_points=limiting_probe_points,
+            limiting_probe_directions=limiting_probe_directions,
             limiting_exit_face_indices=limiting_exit_source_faces,
             limiting_exit_face_count=int(
                 len(limiting_exit_source_faces_all)
@@ -4073,6 +4234,14 @@ def boundary_cap_distances(
     if best_fit_dot_global >= 0.15:
         candidate_specs.append(("loop_best_fit_normal", best_fit_normal))
 
+    # Every candidate plane uses the same smoothed local ray field.  Thickness
+    # depends on those rays, not on the normal used to place the common bottom
+    # plane, so measuring once is both exact and substantially cheaper on dense
+    # painted seams.  Previously the global and best-fit plane candidates each
+    # repeated the identical broad phase and ray/triangle intersection pass.
+    shared_safe_maximum, shared_thickness_record = measured_limit(
+        local_plane_rays
+    )
     plane_candidates = []
     for orientation, plane_direction in candidate_specs:
         # The cap plane and the travel rays solve different problems.  The
@@ -4085,7 +4254,8 @@ def boundary_cap_distances(
         ray_dot_plane = plane_directions @ plane_direction
         if len(ray_dot_plane) and float(ray_dot_plane.min()) <= 0.05:
             continue
-        safe_maximum, thickness_record = measured_limit(plane_directions)
+        safe_maximum = shared_safe_maximum
+        thickness_record = dict(shared_thickness_record)
         if safe_maximum <= 1e-6:
             effective_minimum = 0.0
         else:

@@ -43,17 +43,21 @@ DEFAULT_EFFECTIVE_MINIMUM_INWARD_DEPTH_MM = 3.0
 MAXIMUM_SAFE_INWARD_DEPTH_MM = 10.0
 DEFAULT_LEAD_IN_SLOPE_DEGREES = 45.0
 PARENT_THICKNESS_CLEARANCE_MM = 0.05
-# Intersections this close to a seam probe origin belong to the sampled
-# exterior surface neighborhood, not to the opposite wall.  Keep this
-# classification tolerance separate from the manufacturing clearance: using
-# the 0.05 mm clearance as both values made 0.050--0.061 mm tessellation hits
-# masquerade as the thickness of an otherwise substantial parent body.
-PARENT_SURFACE_HIT_TOLERANCE_MM = 0.10
 # When the measured parent is thinner than the preferred backing depth, a
 # coherent floor may legitimately have less travel at the high side of a
 # curved source rim.  Keep enough depth beyond the 0.60 mm lead-in for a
 # continuous printable skin instead of forcing a folded local-offset cap.
 MINIMUM_COHERENT_PLANAR_FLOOR_DEPTH_MM = 0.08
+# Intersections this close to a seam probe origin belong to the sampled
+# exterior surface neighborhood, not to the opposite wall.  Keep this
+# classification tolerance tied to the geometry policy: a hit that cannot
+# leave both the required clearance and the minimum coherent floor is still
+# inside the unusable local seam band.  This avoids an independent magic
+# threshold while keeping farther opposing walls as real obstacles.
+PARENT_SURFACE_HIT_TOLERANCE_MM = (
+    PARENT_THICKNESS_CLEARANCE_MM
+    + MINIMUM_COHERENT_PLANAR_FLOOR_DEPTH_MM
+)
 MAXIMUM_INWARD_CAP_PLANARITY_ERROR_MM = 0.05
 MINIMUM_INWARD_CAP_NORMAL_COSINE = 0.90
 # Compatibility alias for older call sites and reports. Geometry may go below

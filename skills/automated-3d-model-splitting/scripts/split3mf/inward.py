@@ -6526,6 +6526,16 @@ def _connector_record(plan: dict, role: str, backing_faces: int, side_faces: int
         "backing_inset_method": str(
             plan.get("backing_inset_method", "source_vertex_miter_offset")
         ),
+        "backing_ring_correspondence": str(
+            plan.get("backing_ring_correspondence", "unrecorded")
+        ),
+        "backing_ring_outer_vertices": int(
+            plan.get("backing_ring_outer_vertices", 0)
+        ),
+        "backing_ring_inner_vertices": int(
+            plan.get("backing_ring_inner_vertices", 0)
+        ),
+        "backing_ring_scale": float(plan.get("backing_ring_scale", 1.0)),
         "backing_source_ring_vertices": int(
             plan.get("backing_source_ring_vertices", 0)
         ),

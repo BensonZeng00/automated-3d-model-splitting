@@ -227,10 +227,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max-planar-travel-mm",
         type=float,
-        default=10.0,
+        default=50.0,
         help=(
-            "Global inward safety ceiling. The actual ceiling is min(this value, 10 mm, "
-            "measured parent thickness - 0.05 mm)."
+            "Absolute inward search ceiling; the measured active-parent bounds and the "
+            "0.05 mm reserve set the effective safe depth. Defaults to 50 mm so hollow "
+            "parts can use centimetre-scale paths."
         ),
     )
     parser.add_argument(

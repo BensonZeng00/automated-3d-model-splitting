@@ -1,0 +1,24 @@
+{
+  "schema_version": 2,
+  "source": "D:\\3Dmodel\\yoshisittingonledge.3mf",
+  "source_face_count": 460075,
+  "noise_max_faces": 100,
+  "small_region_max_faces": 999,
+  "user_confirmed": true,
+  "items": [
+    {
+      "fragment_id": 1,
+      "source_min_face_index": 515,
+      "semantic_label": "候选1长细区域",
+      "visual_confidence": "HIGH",
+      "classification": "part"
+    },
+    {
+      "fragment_id": 2,
+      "source_min_face_index": 2564,
+      "semantic_label": "候选2长细区域",
+      "visual_confidence": "HIGH",
+      "classification": "part"
+    }
+  ]
+}

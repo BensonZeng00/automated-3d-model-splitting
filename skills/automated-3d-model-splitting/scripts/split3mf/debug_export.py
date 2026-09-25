@@ -364,14 +364,14 @@ def validate_shared_child_cap_decisions(
                     planned_connector_budget,
                 )
             )
-            footprint_probe_applied = bool(
-                extension.get("local_connector_footprint_probe_applied", False)
+            boundary_probe_applied = bool(
+                extension.get("local_connector_boundary_probe_applied", False)
             )
             connector_budget_valid = (
                 0.0
                 < actual_connector_budget
                 <= float(DEFAULT_DEPTH_POLICY.maximum_total_depth_mm) + 1e-9
-                if footprint_probe_applied
+                if boundary_probe_applied
                 else np.isclose(
                     actual_connector_budget,
                     planned_connector_budget,
@@ -415,7 +415,7 @@ def validate_shared_child_cap_decisions(
                     "planned_safe_minimum_mm": planned_minimum,
                     "planned_local_connector_budget_mm": planned_connector_budget,
                     "actual_local_connector_budget_mm": actual_connector_budget,
-                    "footprint_probe_applied": footprint_probe_applied,
+                    "boundary_depth_probe_applied": boundary_probe_applied,
                     "printable_backing_depth_mm": backing_depth,
                     "elastic_shrink_applied": elastic_shrink_applied,
                     "elastic_backing_scale": float(

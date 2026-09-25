@@ -12,6 +12,14 @@ from typing import Protocol
 
 import numpy as np
 
+from .common import (
+    MAXIMUM_SAFE_INWARD_DEPTH_MM,
+    PARENT_THICKNESS_CLEARANCE_MM,
+)
+from .hidden_interface import (
+    MAX_BOUNDARY_THICKNESS_PROBES,
+    boundary_screening_indices,
+)
 from .local_connectors import LocalConnectorSpec, plan_local_connector
 
 
@@ -24,6 +32,104 @@ class ThicknessProbe(Protocol):
         directions: np.ndarray,
         requested_depth_mm: float,
     ) -> tuple[float, dict]: ...
+
+    def first_hit_distances(
+        self,
+        points: np.ndarray,
+        directions: np.ndarray,
+        search_limit_mm: float,
+    ) -> np.ndarray: ...
+
+
+def measure_boundary_depth_angle_fan(
+    *,
+    boundary_points: np.ndarray,
+    planar_center: np.ndarray,
+    inward_normal: np.ndarray,
+    parent_thickness_probe: ThicknessProbe,
+    search_limit_mm: float,
+    angles_degrees: np.ndarray | None = None,
+) -> tuple[float, dict]:
+    """Measure clearance along inward rays aimed at the loop center.
+
+    Each ray direction lies between the inward normal and projected direction
+    to the planar center. The fan angle is measured from the inward normal.
+    A ray with no parent-shell hit within the finite search distance is safe
+    through that complete requested distance.
+    """
+
+    points = np.asarray(boundary_points, dtype=np.float64)
+    center = np.asarray(planar_center, dtype=np.float64)
+    normal = np.asarray(inward_normal, dtype=np.float64).copy()
+    if points.ndim != 2 or points.shape[1] != 3 or len(points) < 3:
+        raise ValueError("angular depth search requires at least three boundary samples")
+    if center.shape != (3,) or normal.shape != (3,):
+        raise ValueError("angular depth search center and normal must be 3-D vectors")
+    normal /= max(float(np.linalg.norm(normal)), 1e-12)
+    angles = np.asarray(
+        np.linspace(30.0, 75.0, 10)
+        if angles_degrees is None
+        else angles_degrees,
+        dtype=np.float64,
+    ).reshape(-1)
+    if not len(angles) or np.any((angles < 30.0) | (angles > 75.0)):
+        raise ValueError("angular depth search angles must remain in 30-75 degrees")
+    centerward = center[None, :] - points
+    centerward -= (centerward @ normal)[:, None] * normal[None, :]
+    lengths = np.linalg.norm(centerward, axis=1)
+    if np.any(lengths <= 1e-9):
+        raise ValueError("some boundary samples have no planar direction toward the center")
+    centerward /= lengths[:, None]
+    radians = np.deg2rad(angles)
+    directions = (
+        np.cos(radians)[None, :, None] * normal[None, None, :]
+        + np.sin(radians)[None, :, None] * centerward[:, None, :]
+    )
+    origins = np.repeat(points[:, None, :], len(angles), axis=1)
+    ray_points = origins.reshape((-1, 3))
+    ray_directions = directions.reshape((-1, 3))
+    ceiling = max(float(search_limit_mm), 0.0)
+    hits = np.asarray(
+        parent_thickness_probe.first_hit_distances(
+            ray_points,
+            ray_directions,
+            ceiling,
+        ),
+        dtype=np.float64,
+    ).reshape((len(points), len(angles)))
+    hit_mask = hits < ceiling + PARENT_THICKNESS_CLEARANCE_MM - 1e-9
+    safe_depths = np.where(
+        hit_mask,
+        np.maximum(0.0, hits - PARENT_THICKNESS_CLEARANCE_MM),
+        ceiling,
+    )
+    best_angle_indices = np.argmax(safe_depths, axis=1)
+    row_indices = np.arange(len(points))
+    best_depths = safe_depths[row_indices, best_angle_indices]
+    best_hit = hit_mask[row_indices, best_angle_indices]
+    minimum_depth = float(best_depths.min(initial=ceiling))
+    return minimum_depth, {
+        "boundary_depth_search_policy": "equal_arc_boundary_centerward_inward_normal_angle_fan",
+        "boundary_depth_search_sample_count": int(len(points)),
+        "boundary_depth_search_angles_degrees": [float(value) for value in angles],
+        "boundary_depth_search_reference": "angle_between_ray_and_local_inward_normal",
+        "boundary_depth_search_center_direction": "projected_toward_planar_loop_center",
+        "boundary_depth_search_distance_limit_mm": float(ceiling),
+        "boundary_depth_search_unhit_is_safe_to_limit": True,
+        "boundary_depth_search_ray_count": int(len(ray_points)),
+        "boundary_depth_search_hit_ray_count": int(np.count_nonzero(hit_mask)),
+        "boundary_depth_search_miss_ray_count": int(np.count_nonzero(~hit_mask)),
+        "boundary_depth_search_selected_hit_count": int(np.count_nonzero(best_hit)),
+        "boundary_depth_search_selected_miss_count": int(np.count_nonzero(~best_hit)),
+        "boundary_depth_search_minimum_best_depth_mm": minimum_depth,
+        "boundary_depth_search_selected_angles_degrees": [
+            float(angles[index]) for index in best_angle_indices
+        ],
+        "boundary_depth_search_selected_depths_mm": [
+            float(value) for value in best_depths
+        ],
+        "boundary_depth_search_selected_hit_mask": [bool(value) for value in best_hit],
+    }
 
 
 @dataclass(frozen=True)
@@ -68,10 +174,12 @@ def local_connector_spec_for_interface(
     """
 
     nominal_backing_depth_mm = float(policy.printable_backing_depth_mm)
-    total_safe_depth_mm = min(
-        float(safe_engagement_depth_mm),
-        float(policy.maximum_total_depth_mm),
-    )
+    total_safe_depth_mm = max(float(safe_engagement_depth_mm), 0.0)
+    if compact_peg_supported:
+        total_safe_depth_mm = min(
+            total_safe_depth_mm,
+            float(policy.maximum_total_depth_mm),
+        )
     # A tiny interface can still carry a printable full-boundary backing even
     # when no protected compact peg footprint fits.  With no peg there is no
     # socket bottom, so reserving its clearance would only steal useful
@@ -93,9 +201,10 @@ def local_connector_spec_for_interface(
             else safe_backing_depth_mm
         ),
     )
-    backing_depth_mm = min(
-        nominal_backing_depth_mm,
-        backing_safety_limit_mm,
+    backing_depth_mm = (
+        min(nominal_backing_depth_mm, backing_safety_limit_mm)
+        if compact_peg_supported
+        else backing_safety_limit_mm
     )
     backing_elastic_shrink_applied = bool(
         backing_depth_mm < nominal_backing_depth_mm - 1e-9
@@ -241,7 +350,7 @@ def local_connector_safe_depth_from_field(
     }
 
 
-def local_connector_safe_depth_at_footprint(
+def local_connector_safe_depth_at_boundary(
     *,
     boundary_points: np.ndarray,
     inward: np.ndarray,
@@ -252,26 +361,37 @@ def local_connector_safe_depth_at_footprint(
     parent_thickness_probe: ThicknessProbe | None,
     policy: ConnectorDepthPolicy = DEFAULT_DEPTH_POLICY,
 ) -> dict:
-    """Measure axial and lateral connector safety away from a grazing rim.
+    """Measure axial depth on boundary samples and lateral clearance separately.
 
     ``boundary_distances`` remains useful evidence for the ordinary cap, but a
     single concave rim ray may hit a nearby side wall long before the true
-    opposing parent shell.  It must therefore not globally collapse a
-    continuous local-connector backing.  Probe the compact interior footprint
-    along the stable assembly axis and combine that axial result with the
-    projected polygon's largest interior clearance.  The allocator can then
-    preserve as much of the preferred backing as both independent constraints
-    permit while shrinking engagement first.
+    opposing parent shell. Probe equal-arc samples of the actual interface
+    boundary along the stable assembly axis to measure the orange surface-to-
+    interface depth. Keep projected polygon clearance as the independent
+    lateral constraint; connector footprint points are not thickness origins.
     """
 
+    boundary = np.asarray(boundary_points, dtype=np.float64)
+    boundary_sample_indices = boundary_screening_indices(
+        boundary,
+        MAX_BOUNDARY_THICKNESS_PROBES,
+    )
+    sampled_boundary_distances = np.asarray(boundary_distances, dtype=np.float64)
+    if len(sampled_boundary_distances) == len(boundary):
+        sampled_boundary_distances = sampled_boundary_distances[boundary_sample_indices]
+    elif len(sampled_boundary_distances) != len(boundary_sample_indices):
+        raise ValueError(
+            "boundary thickness field must align with either the source loop "
+            "or its equal-arc sample points"
+        )
     boundary_safety = local_connector_safe_depth_from_field(
-        boundary_distances,
+        sampled_boundary_distances,
         policy=policy,
     )
     if parent_thickness_probe is None:
         return {
             **boundary_safety,
-            "local_connector_footprint_probe_applied": False,
+            "local_connector_boundary_probe_applied": False,
             "local_connector_compact_peg_supported": True,
         }
     provisional = local_connector_spec_for_interface(
@@ -289,7 +409,7 @@ def local_connector_safe_depth_at_footprint(
     )
     try:
         plan = plan_local_connector(
-            boundary_points,
+            boundary[boundary_sample_indices],
             inward,
             provisional,
             samples=32,
@@ -308,7 +428,7 @@ def local_connector_safe_depth_at_footprint(
             compact_peg_enabled=False,
         )
         plan = plan_local_connector(
-            boundary_points,
+            boundary[boundary_sample_indices],
             inward,
             measurement_spec,
             samples=32,
@@ -316,34 +436,45 @@ def local_connector_safe_depth_at_footprint(
         footprint_plan_fallback = True
     axis = np.asarray(plan["inward"], dtype=np.float64)
     axis /= max(float(np.linalg.norm(axis)), 1e-12)
-    backing_depth = float(plan["full_boundary_backing_depth_mm"])
-    footprint = np.asarray(plan["socket_mouth"], dtype=np.float64) - (
-        axis[None, :] * backing_depth
+    sampled_boundary = boundary[boundary_sample_indices]
+    depth_ceiling = min(
+        MAXIMUM_SAFE_INWARD_DEPTH_MM,
+        max(
+            float(policy.maximum_total_depth_mm),
+            float(
+                getattr(
+                    parent_thickness_probe,
+                    "maximum_probe_distance_mm",
+                    policy.maximum_total_depth_mm,
+                )
+            ),
+        ),
     )
-    surface_center = np.asarray(plan["center"], dtype=np.float64) - (
-        axis * backing_depth
+    boundary_axis_safe, boundary_axis_record = measure_boundary_depth_angle_fan(
+        boundary_points=sampled_boundary,
+        planar_center=np.asarray(plan["center"], dtype=np.float64),
+        inward_normal=axis,
+        parent_thickness_probe=parent_thickness_probe,
+        search_limit_mm=depth_ceiling,
     )
-    if bool(plan.get("compact_peg_enabled", False)):
-        probe_points = np.vstack((surface_center[None, :], footprint))
-    else:
-        probe_points = surface_center[None, :]
-    probe_directions = np.tile(axis, (len(probe_points), 1))
-    footprint_safe, footprint_record = parent_thickness_probe.safety_limit(
-        probe_points,
-        probe_directions,
-        float(policy.maximum_total_depth_mm),
-    )
-    selected = min(float(policy.maximum_total_depth_mm), float(footprint_safe))
+    selected = min(depth_ceiling, float(boundary_axis_safe))
     lateral_backing_limit = max(float(plan.get("edge_clearance_mm", 0.0)), 0.0)
-    backing_safety_limit = min(selected, lateral_backing_limit)
+    # Axial depth and lateral inset are different legs of the green sidewall.
+    # Keep both limits independent; their jointly feasible slope is selected
+    # later from the 30–75 degree boundary-sampled profile audit.
+    backing_safety_limit = selected
     nominal_backing_depth = float(policy.printable_backing_depth_mm)
     limiting_tolerance = 1e-9
     if backing_safety_limit >= nominal_backing_depth - limiting_tolerance:
         backing_limiting_constraint = "nominal_printable_depth"
-    elif selected <= lateral_backing_limit + limiting_tolerance:
-        backing_limiting_constraint = "axial_parent_thickness"
+    elif selected <= 0.0:
+        backing_limiting_constraint = "axial_boundary_depth"
     else:
-        backing_limiting_constraint = "lateral_interface_clearance"
+        backing_limiting_constraint = "joint_slope_depth_profile"
+    boundary_axis_record["connector_depth_origin"] = "ordered_interface_boundary"
+    boundary_axis_record["connector_depth_path"] = (
+        "interface_boundary_to_opposing_surface_along_shared_connector_axis"
+    )
     return {
         **boundary_safety,
         "local_connector_safety_budget_mm": selected,
@@ -359,18 +490,22 @@ def local_connector_safe_depth_at_footprint(
             lateral_backing_limit >= nominal_backing_depth - limiting_tolerance
         ),
         "local_connector_backing_safety_policy": (
-            "min(interior_axial_opposing_shell, projected_interior_clearance)"
+            "sampled_interface_boundary_axis_depth_with_independent_lateral_clearance"
         ),
         "thin_boundary_override_applied": bool(
             backing_safety_limit
             > float(boundary_safety["boundary_safety_minimum_mm"]) + 1e-9
         ),
-        "local_connector_footprint_probe_applied": True,
+        "local_connector_boundary_probe_applied": True,
         "local_connector_footprint_plan_fallback": footprint_plan_fallback,
         "local_connector_compact_peg_supported": not footprint_plan_fallback,
-        "local_connector_footprint_probe_point_count": int(len(probe_points)),
-        "local_connector_footprint_safe_depth_mm": selected,
-        "local_connector_footprint_thickness_record": footprint_record,
+        "local_connector_boundary_probe_input_point_count": int(len(boundary)),
+        "local_connector_boundary_probe_sampled_point_count": int(
+            boundary_axis_record.get("parent_thickness_boundary_sampled_vertices", len(boundary))
+        ),
+        "local_connector_boundary_safe_depth_mm": selected,
+        "local_connector_boundary_depth_ceiling_mm": depth_ceiling,
+        "local_connector_boundary_thickness_record": boundary_axis_record,
     }
 
 
@@ -379,4 +514,4 @@ class LocalConnectorPlanningService:
 
     spec_for_interface = staticmethod(local_connector_spec_for_interface)
     safe_depth_from_field = staticmethod(local_connector_safe_depth_from_field)
-    safe_depth_at_footprint = staticmethod(local_connector_safe_depth_at_footprint)
+    safe_depth_at_boundary = staticmethod(local_connector_safe_depth_at_boundary)

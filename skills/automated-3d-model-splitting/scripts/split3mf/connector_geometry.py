@@ -1,4 +1,4 @@
-"""Reusable geometry policy for 45-degree printable connector backings.
+"""Reusable geometry policy for printable connector backings.
 
 This module is intentionally independent of the recursive splitter.  It turns
 one source boundary plus a connector plan into deterministic lead/floor rings;
@@ -13,6 +13,10 @@ from dataclasses import dataclass
 import numpy as np
 
 from .mesh import point_in_poly, point_on_poly_boundary, signed_area
+from .hidden_interface import (
+    MAX_BOUNDARY_THICKNESS_PROBES,
+    boundary_screening_indices,
+)
 
 
 @dataclass(frozen=True)
@@ -26,6 +30,66 @@ class BackingProfile:
     rings: tuple[np.ndarray, ...]
     depths_mm: tuple[float, ...]
     taper_depth_mm: float
+
+
+def _sample_ordered_boundary(points: np.ndarray) -> np.ndarray:
+    """Use deterministic equal-arc source vertices for boundary evaluation."""
+
+    ring = np.asarray(points, dtype=np.float64)
+    indices = boundary_screening_indices(ring, MAX_BOUNDARY_THICKNESS_PROBES)
+    return ring[indices]
+
+
+def _sample_boundary_with_directions(
+    points: np.ndarray,
+    directions: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Keep a loop and its per-vertex field aligned on equal-arc samples."""
+
+    ring = np.asarray(points, dtype=np.float64)
+    field = np.asarray(directions, dtype=np.float64)
+    if field.shape != ring.shape:
+        raise ValueError("boundary direction field must match the source loop")
+    indices = boundary_screening_indices(ring, MAX_BOUNDARY_THICKNESS_PROBES)
+    return ring[indices], field[indices], indices
+
+
+def _project_points_to_closed_ring(
+    query_points: np.ndarray,
+    ring: np.ndarray,
+    *,
+    block_size: int = 128,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Project a batch of points to a closed ring with bounded vector work."""
+
+    query = np.asarray(query_points, dtype=np.float64)
+    source = np.asarray(ring, dtype=np.float64)
+    following = np.roll(source, -1, axis=0)
+    edge = following - source
+    length_squared = np.einsum("ij,ij->i", edge, edge)
+    distances = np.empty(len(query), dtype=np.float64)
+    segments = np.empty(len(query), dtype=np.int64)
+    parameters = np.empty(len(query), dtype=np.float64)
+    for start in range(0, len(query), max(1, int(block_size))):
+        stop = min(start + max(1, int(block_size)), len(query))
+        block = query[start:stop]
+        relative = block[:, None, :] - source[None, :, :]
+        local_parameter = np.divide(
+            np.einsum("bij,ij->bi", relative, edge),
+            length_squared[None, :],
+            out=np.zeros((len(block), len(source)), dtype=np.float64),
+            where=length_squared[None, :] > 1e-24,
+        )
+        np.clip(local_parameter, 0.0, 1.0, out=local_parameter)
+        closest = source[None, :, :] + local_parameter[:, :, None] * edge[None, :, :]
+        delta = block[:, None, :] - closest
+        distance_squared = np.einsum("bij,bij->bi", delta, delta)
+        selected = np.argmin(distance_squared, axis=1)
+        rows = np.arange(len(block))
+        distances[start:stop] = np.sqrt(distance_squared[rows, selected])
+        segments[start:stop] = selected
+        parameters[start:stop] = local_parameter[rows, selected]
+    return distances, segments, parameters
 
 
 def _user_reviewed_shallow_minimal_closure_is_eligible(
@@ -152,8 +216,8 @@ def backing_taper_angle_samples(
 ) -> np.ndarray:
     """Return every finite local taper sample used by the backing audit."""
 
-    source = np.asarray(source_points, dtype=np.float64)
-    floor = np.asarray(floor_points, dtype=np.float64)
+    source = _sample_ordered_boundary(source_points)
+    floor = _sample_ordered_boundary(floor_points)
     source_2d = project_connector_points(source, plan)
     floor_2d = project_connector_points(floor, plan)
     axis = np.asarray(plan["inward"], dtype=np.float64)
@@ -161,22 +225,16 @@ def backing_taper_angle_samples(
     center = np.asarray(plan["center"], dtype=np.float64)
     source_axial = (source - center[None, :]) @ axis
     floor_axial = (floor - center[None, :]) @ axis
-    lateral: list[float] = []
-    axial: list[float] = []
-    for point, target_axial in zip(floor_2d, floor_axial):
-        distance, segment_index, parameter = _point_to_closed_ring_projection(
-            point,
-            source_2d,
-        )
-        following = (segment_index + 1) % len(source_axial)
-        matched_source_axial = (
-            source_axial[segment_index] * (1.0 - parameter)
-            + source_axial[following] * parameter
-        )
-        lateral.append(distance)
-        axial.append(abs(float(target_axial) - float(matched_source_axial)))
-    lateral = np.asarray(lateral, dtype=np.float64)
-    axial = np.asarray(axial, dtype=np.float64)
+    lateral, segment_indices, parameters = _project_points_to_closed_ring(
+        floor_2d,
+        source_2d,
+    )
+    following = (segment_indices + 1) % len(source_axial)
+    matched_source_axial = (
+        source_axial[segment_indices] * (1.0 - parameters)
+        + source_axial[following] * parameters
+    )
+    axial = np.abs(floor_axial - matched_source_axial)
     valid = np.isfinite(axial) & np.isfinite(lateral) & (lateral > 1e-9)
     if not np.any(valid):
         return np.empty(0, dtype=np.float64)
@@ -477,17 +535,24 @@ def topology_safe_planar_inset_ring(
     boundary_points: np.ndarray,
     plan: dict,
     distance_mm: float,
+    *,
+    axial_depth_mm: float | None = None,
 ) -> np.ndarray | None:
-    """Return a trimmed constant-distance inset for one nearly planar loop.
+    """Return a trimmed planar inset with independently selected lateral/axial travel.
 
     Local miter vectors preserve the input vertex count, but a deep inset of a
     concave V inevitably makes those miters cross.  Clipper2, exposed by the
     already-required manifold3d backend, removes the collapsed loops and gives
     the actual inward offset contour.  Preserve that contour's real topology:
     forcing it back to the dense source sample count creates hundreds of
-    collinear duplicates and needle triangles in the 45-degree wall.
+    collinear duplicates and needle triangles in the backing wall.
     """
     distance = max(float(distance_mm), 0.0)
+    axial_depth = (
+        distance
+        if axial_depth_mm is None
+        else max(float(axial_depth_mm), 0.0)
+    )
     boundary = np.asarray(boundary_points, dtype=np.float64)
     if distance <= 1e-9:
         return boundary.copy()
@@ -543,7 +608,7 @@ def topology_safe_planar_inset_ring(
             source_plane[None, :]
             + inset_2d[:, 0, None] * u[None, :]
             + inset_2d[:, 1, None] * v[None, :]
-            + axis[None, :] * distance
+            + axis[None, :] * axial_depth
         )
     except ValueError:
         # A homothetic inset is only valid for a star-shaped boundary around
@@ -559,7 +624,7 @@ def printable_backing_rings(
     child_clearance: bool,
     inward_directions: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, float]:
-    """Create an outer-large/inner-small 45-degree lead into a 3 mm backing."""
+    """Create a topology-safe backing lead within the printable 30–75° range."""
     boundary = np.asarray(boundary_points, dtype=np.float64)
     axis = np.asarray(plan["inward"], dtype=np.float64)
     axis /= max(float(np.linalg.norm(axis)), 1e-12)
@@ -581,6 +646,10 @@ def printable_backing_rings(
         direction_mode = "single_global_planar_direction_from_safe_axis"
         plan["backing_safe_direction_field_received"] = True
     plan["backing_inward_direction_mode"] = direction_mode
+    sampled_boundary = _sample_ordered_boundary(boundary)
+    sampled_boundary_indices = boundary_screening_indices(
+        boundary, MAX_BOUNDARY_THICKNESS_PROBES
+    )
     backing_depth = float(plan.get("full_boundary_backing_depth_mm", 0.0))
     compact_peg_enabled = bool(plan.get("compact_peg_enabled", True))
     protected_ring = (
@@ -611,7 +680,7 @@ def printable_backing_rings(
         ):
             raise ValueError(
                 "compact connector plan did not reserve the complete full-depth "
-                "45-degree backing wedge"
+                "backing wedge for its selected slope"
             )
         # The connector planner has already reduced the compact peg until the
         # complete 3 mm eroded footprint remains available.  Spend that full
@@ -623,118 +692,292 @@ def printable_backing_rings(
     taper_depth = requested_taper_depth
     requested_backing_depth = float(backing_depth)
 
-    # A deep constant inset of a narrow/concave outline can collapse before
-    # the thickness budget is exhausted.  Falling back at that point to one
-    # normal-offset vertex per source sample recreates a dense, self-folding
-    # ring (for example 15 vertices followed by 2089) and produces the visible
-    # knife triangles this connector is meant to avoid.  The backing and peg
-    # are explicitly elastic: keep the deepest topology-valid 45-degree ring
-    # and reduce backing depth instead of changing construction model.
-    topology_limited_lead = topology_safe_planar_inset_ring(
-        boundary,
-        plan,
-        taper_depth,
+    # Evaluate slope and axial depth together on deterministic equal-arc
+    # boundary samples.  Full-resolution input is retained only to materialize
+    # the selected printable contour after screening has chosen one pair.
+    # If the requested depth is too deep, reduce depth and retry, preferring
+    # steeper allowed slopes that need less lateral inset.
+    taper_angle_candidates = (
+        45.0, 50.0, 55.0, 60.0, 65.0, 70.0, 75.0, 40.0, 35.0, 30.0
     )
-    if topology_limited_lead is None and taper_depth > 0.0:
-        low = 0.0
-        high = float(taper_depth)
-        best_lead: np.ndarray | None = None
-        # Stop at the active physical surface tolerance.  Chasing binary-search
-        # differences far below FDM and exported-coordinate resolution only
-        # repeats the complete polygon offset without changing printable output.
-        from .print_tolerance import current as current_print_tolerance
-        depth_tolerance = max(
-            0.01,
-            min(0.05, float(current_print_tolerance().surface_distance_mm)),
+    candidate_attempts: list[dict] = []
+    preferred_axial_depth = float(taper_depth)
+    topology_limited_lead: np.ndarray | None = None
+    selected_taper_angle = 45.0
+    selected_slope_audit: dict | None = None
+
+    def evaluate_slope_depth(
+        axial_depth: float,
+        angle_degrees: float,
+    ) -> dict | None:
+        attempt = {
+            "target_angle_degrees": float(angle_degrees),
+            "requested_axial_depth_mm": float(axial_depth),
+            "lateral_inset_mm": float(
+                float(axial_depth)
+                / max(math.tan(math.radians(float(angle_degrees))), 1e-12)
+            ),
+            "topology_valid": False,
+            "protected_ring_contained": None,
+            "rejection_reason": None,
+            "measured_slope_statistics": None,
+        }
+        attempt["green_sidewall_depth_mm"] = math.hypot(
+            float(axial_depth),
+            float(attempt["lateral_inset_mm"]),
         )
-        iteration_count = 0
-        while high - low > depth_tolerance and iteration_count < 16:
-            middle = (low + high) * 0.5
-            candidate = topology_safe_planar_inset_ring(
-                boundary,
-                plan,
-                middle,
+        candidate_attempts.append(attempt)
+        candidate_plan = dict(plan)
+        lateral_distance = attempt["lateral_inset_mm"]
+        candidate_lead = topology_safe_planar_inset_ring(
+            sampled_boundary,
+            candidate_plan,
+            lateral_distance,
+            axial_depth_mm=float(axial_depth),
+        )
+        if candidate_lead is None:
+            attempt["rejection_reason"] = "topology_inset_unavailable"
+            return None
+        attempt["topology_valid"] = True
+        if not compact_peg_enabled:
+            candidate_lead = _fit_zero_engagement_planar_backing_slope(
+                sampled_boundary,
+                candidate_lead,
+                candidate_plan,
             )
-            if candidate is None:
-                high = middle
-            else:
-                low = middle
-                best_lead = candidate
-            iteration_count += 1
-        plan["backing_inset_search_iterations"] = int(iteration_count)
-        plan["backing_inset_search_tolerance_mm"] = float(depth_tolerance)
-        if best_lead is None or low < 0.05:
-            if _user_reviewed_shallow_minimal_closure_is_eligible(
-                plan,
-                boundary_vertex_count=len(boundary),
-                backing_depth_mm=backing_depth,
+        elif child_clearance:
+            protected_2d = project_connector_points(protected_ring, candidate_plan)
+            candidate_2d = project_connector_points(candidate_lead, candidate_plan)
+            if not all(
+                point_in_poly(point, candidate_2d)
+                or point_on_poly_boundary(point, candidate_2d)
+                for point in protected_2d
             ):
-                shallow_floor = boundary + directions * float(backing_depth)
-                plan["backing_inset_method"] = (
-                    "user_reviewed_shallow_minimal_vertical_closure"
-                )
-                plan["backing_depth_shape_limited"] = True
-                plan["backing_depth_before_shape_limit_mm"] = (
-                    requested_backing_depth
-                )
-                plan["backing_depth_shape_limit_policy"] = (
-                    "locked_minimal_ring_axial_closure"
-                )
-                plan["shallow_minimal_closure_advisory_accepted"] = True
-                plan["backing_source_ring_vertices"] = int(len(boundary))
-                plan["backing_floor_ring_vertices"] = int(len(boundary))
-                plan["backing_taper_requested_mm"] = float(
-                    requested_taper_depth
-                )
-                plan["backing_taper_shape_backoff_applied"] = False
-                plan.pop("_backing_inset_simplified_section", None)
-                return (
-                    shallow_floor.copy(),
-                    shallow_floor.copy(),
-                    float(backing_depth),
-                )
-            raise ValueError(
-                "connector boundary has no continuous printable 45-degree backing"
+                attempt["protected_ring_contained"] = False
+                attempt["rejection_reason"] = "protected_ring_not_contained"
+                return None
+            attempt["protected_ring_contained"] = True
+        slope_audit = backing_taper_angle_audit(
+            sampled_boundary,
+            candidate_lead,
+            candidate_plan,
+        )
+        attempt["measured_slope_statistics"] = {
+            key: slope_audit.get(key)
+            for key in (
+                "sample_count",
+                "minimum_degrees",
+                "p05_degrees",
+                "median_degrees",
+                "p95_degrees",
+                "maximum_degrees",
+                "outside_ratio",
+                "valid",
             )
-        taper_depth = float(low * 0.995)
+        }
+        if not bool(slope_audit.get("valid", False)):
+            attempt["rejection_reason"] = "measured_slope_statistics_out_of_range"
+            return None
+        attempt["rejection_reason"] = None
+        return {
+            "axial_depth_mm": float(axial_depth),
+            "angle_degrees": float(angle_degrees),
+            "lateral_inset_mm": float(lateral_distance),
+            "green_sidewall_depth_mm": float(attempt["green_sidewall_depth_mm"]),
+            "lead": candidate_lead,
+            "plan": candidate_plan,
+            "audit": slope_audit,
+        }
+
+    feasible_candidates = [
+        candidate
+        for angle_degrees in taper_angle_candidates
+        if (candidate := evaluate_slope_depth(taper_depth, angle_degrees)) is not None
+    ]
+    search_iterations = 0
+    from .print_tolerance import current as current_print_tolerance
+
+    depth_tolerance = max(
+        0.01,
+        min(0.05, float(current_print_tolerance().surface_distance_mm)),
+    )
+    if not feasible_candidates and taper_depth > 0.0:
+        # Jointly refine depth for each representative slope. The prior full
+        # 1-degree-by-multidepth grid repeated hundreds of expensive polygon
+        # offsets per interface. This bounded search keeps measured geometry
+        # authoritative while limiting the total to about 100 candidate pairs.
+        for angle_degrees in taper_angle_candidates:
+            low = 0.0
+            high = float(taper_depth)
+            while (
+                high - low > depth_tolerance
+                and len(candidate_attempts) < 100
+            ):
+                middle = (low + high) * 0.5
+                candidate = evaluate_slope_depth(middle, angle_degrees)
+                if candidate is None:
+                    high = middle
+                else:
+                    low = middle
+                    feasible_candidates.append(candidate)
+                search_iterations += 1
+
+    plan["backing_inset_search_iterations"] = int(search_iterations)
+    plan["backing_inset_search_evaluations"] = int(len(candidate_attempts))
+    plan["backing_inset_search_tolerance_mm"] = float(depth_tolerance)
+    plan["backing_slope_sampling_policy"] = "equal_arc_boundary_vertices_capped"
+    plan["backing_slope_boundary_input_vertices"] = int(len(boundary))
+    plan["backing_slope_boundary_sampled_vertices"] = int(len(sampled_boundary))
+    plan["backing_taper_angle_search"] = candidate_attempts
+    plan["backing_taper_search_rejection_counts"] = {
+        str(reason): int(
+            sum(attempt.get("rejection_reason") == reason for attempt in candidate_attempts)
+        )
+        for reason in sorted(
+            {
+                str(attempt["rejection_reason"])
+                for attempt in candidate_attempts
+                if attempt.get("rejection_reason") is not None
+            }
+        )
+    }
+    if feasible_candidates:
+        selected = max(
+            feasible_candidates,
+            key=lambda candidate: (
+                float(candidate["green_sidewall_depth_mm"]),
+                float(candidate["axial_depth_mm"]),
+                -abs(
+                    float(candidate["audit"].get("median_degrees") or 45.0)
+                    - 45.0
+                ),
+                -abs(float(candidate["angle_degrees"]) - 45.0),
+            ),
+        )
+        taper_depth = float(selected["axial_depth_mm"])
+        backing_depth = float(taper_depth)
+        selected_taper_angle = float(selected["angle_degrees"])
+        plan.update(selected["plan"])
+        # Rebuild the chosen contour once at source resolution so generated
+        # walls preserve the exact manufacturing seam; all depth/slope checks
+        # stay on the equal-arc sample set.
         topology_limited_lead = topology_safe_planar_inset_ring(
             boundary,
             plan,
-            taper_depth,
+            float(selected["lateral_inset_mm"]),
+            axial_depth_mm=float(selected["axial_depth_mm"]),
         )
         if topology_limited_lead is None:
             raise ValueError(
-                "connector topology-safe backing depth search was not stable"
+                "selected sampled backing pair does not materialize on the full source boundary"
             )
-        backing_depth = float(taper_depth)
-        plan["full_boundary_backing_depth_mm"] = float(backing_depth)
-        plan["backing_depth_before_shape_limit_mm"] = requested_backing_depth
-        plan["backing_depth_shape_limited"] = True
-        plan["backing_depth_shape_limit_policy"] = (
-            "deepest_continuous_constant_offset_45_degree"
+        if not compact_peg_enabled:
+            topology_limited_lead = _fit_zero_engagement_planar_backing_slope(
+                sampled_boundary,
+                topology_limited_lead,
+                plan,
+            )
+        selected_slope_audit = backing_taper_angle_audit(
+            sampled_boundary,
+            topology_limited_lead,
+            plan,
         )
-    else:
-        plan["backing_depth_shape_limited"] = False
-    # Equal lateral and axial travel makes the visible transition a true 45
-    # degree outer-large/inner-small lead.  A printable male connector never
-    # falls back to a shortened bevel plus vertical skirt.
-    def lead_for_depth(depth: float) -> np.ndarray:
+        if not bool(selected_slope_audit.get("valid", False)):
+            raise ValueError(
+                "materialized backing slope failed the equal-arc boundary sample audit"
+            )
+        plan["backing_taper_target_degrees"] = selected_taper_angle
+        plan["backing_taper_lateral_inset_mm"] = float(
+            selected["lateral_inset_mm"]
+        )
+        plan["backing_taper_green_sidewall_depth_mm"] = float(
+            selected["green_sidewall_depth_mm"]
+        )
+        plan["backing_taper_depth_convention"] = (
+            "green_sidewall_segment_length_between_equal_arc_boundary_samples"
+        )
+        plan["backing_taper_axial_travel_mm"] = float(
+            selected["axial_depth_mm"]
+        )
+        plan["backing_taper_selected_measured_statistics"] = {
+            key: selected_slope_audit.get(key)
+            for key in (
+                "sample_count",
+                "minimum_degrees",
+                "p05_degrees",
+                "median_degrees",
+                "p95_degrees",
+                "maximum_degrees",
+                "outside_ratio",
+                "valid",
+            )
+        }
+        plan["backing_depth_shape_limited"] = bool(
+            taper_depth < requested_backing_depth - 1e-9
+        )
+        if plan["backing_depth_shape_limited"]:
+            plan["full_boundary_backing_depth_mm"] = float(backing_depth)
+            plan["backing_depth_before_shape_limit_mm"] = requested_backing_depth
+            plan["backing_depth_shape_limit_policy"] = (
+                "deepest_jointly_feasible_depth_and_30_75_degree_slope"
+            )
+        plan["backing_taper_requested_mm"] = float(requested_taper_depth)
+    elif taper_depth > 0.0:
+        if _user_reviewed_shallow_minimal_closure_is_eligible(
+            plan,
+            boundary_vertex_count=len(boundary),
+            backing_depth_mm=backing_depth,
+        ):
+            shallow_floor = boundary + directions * float(backing_depth)
+            plan["backing_inset_method"] = (
+                "user_reviewed_shallow_minimal_vertical_closure"
+            )
+            plan["backing_depth_shape_limited"] = True
+            plan["backing_depth_before_shape_limit_mm"] = requested_backing_depth
+            plan["backing_depth_shape_limit_policy"] = (
+                "locked_minimal_ring_axial_closure"
+            )
+            plan["shallow_minimal_closure_advisory_accepted"] = True
+            plan["backing_source_ring_vertices"] = int(len(boundary))
+            plan["backing_floor_ring_vertices"] = int(len(boundary))
+            plan["backing_taper_requested_mm"] = float(requested_taper_depth)
+            plan["backing_taper_shape_backoff_applied"] = False
+            plan.pop("_backing_inset_simplified_section", None)
+            return shallow_floor.copy(), shallow_floor.copy(), float(backing_depth)
+        plan["backing_taper_angle_search"] = candidate_attempts
+        raise ValueError(
+            "connector boundary has no continuous backing whose measured "
+            "slope statistics fit 30-75 degrees; "
+            f"requested_depth_mm={preferred_axial_depth:.6f}, "
+            f"boundary_vertices={len(boundary)}, "
+            f"candidate_pairs={len(candidate_attempts)}, "
+            f"rejection_counts={plan['backing_taper_search_rejection_counts']}"
+        )
+
+    # Each candidate floor keeps its jointly selected slope/depth pair while
+    # preserving the complete visible source rim.
+    def lead_for_depth(axial_depth: float) -> np.ndarray:
         if (
             topology_limited_lead is not None
-            and abs(float(depth) - float(taper_depth)) <= 1e-9
+            and abs(float(axial_depth) - float(taper_depth)) <= 1e-9
         ):
             return np.asarray(topology_limited_lead, dtype=np.float64).copy()
+        lateral_distance = float(axial_depth) / max(
+            math.tan(math.radians(selected_taper_angle)),
+            1e-12,
+        )
         topology_safe = topology_safe_planar_inset_ring(
             boundary,
             plan,
-            depth,
+            lateral_distance,
+            axial_depth_mm=float(axial_depth),
         )
         if topology_safe is not None:
             return topology_safe
         inset_displacements = line_preserving_inset_displacements(
             boundary,
             plan,
-            depth,
+            lateral_distance,
         )
         candidate = boundary + inset_displacements
         candidate_2d = project_connector_points(candidate, plan)
@@ -742,7 +985,7 @@ def printable_backing_rings(
         u = np.asarray(plan["u"], dtype=np.float64)
         v = np.asarray(plan["v"], dtype=np.float64)
         source_axial = (boundary - center[None, :]) @ axis
-        floor_axial = float(np.mean(source_axial)) + float(depth)
+        floor_axial = float(np.mean(source_axial)) + float(axial_depth)
         plan["backing_inset_method"] = "source_projection_flat_miter_offset"
         return (
             center[None, :]
@@ -773,13 +1016,12 @@ def printable_backing_rings(
         if child_clearance:
             raise ValueError(
                 "reserved compact connector footprint is outside the complete "
-                "full-depth 45-degree backing wedge"
+                "backing wedge for its selected slope"
             )
         # Concave outlines can spend less lateral distance than the inscribed
         # circle estimate predicts.  Search the actual generated outline, keep
         # a small safety margin, and continue vertically to the unchanged 3 mm
-        # backing depth.  The surviving lateral and axial taper travel remain
-        # equal, so the lead itself stays at the requested 45-degree target.
+        # backing depth. The lead retains its selected slope/depth relationship.
         low = 0.0
         high = taper_depth
         for _ in range(18):
@@ -788,12 +1030,49 @@ def printable_backing_rings(
                 low = middle
             else:
                 high = middle
-        taper_depth = low * 0.95
-        if taper_depth < 0.05:
+        backed_off_depth = low * 0.95
+        if backed_off_depth < 0.05:
             raise ValueError(
-                "concave connector boundary cannot preserve a printable 45-degree lead"
+                "concave connector boundary cannot preserve the selected printable lead slope"
             )
-        lead = lead_for_depth(taper_depth)
+        backed_off = evaluate_slope_depth(
+            backed_off_depth,
+            selected_taper_angle,
+        )
+        if backed_off is None:
+            raise ValueError(
+                "connector boundary lost its printable slope after protected-ring backoff"
+            )
+        taper_depth = float(backed_off["axial_depth_mm"])
+        backing_depth = float(taper_depth)
+        plan["full_boundary_backing_depth_mm"] = float(backing_depth)
+        plan["backing_depth_before_shape_limit_mm"] = requested_backing_depth
+        plan["backing_depth_shape_limited"] = True
+        plan["backing_depth_shape_limit_policy"] = (
+            "protected_ring_containment_after_joint_slope_depth_search"
+        )
+        plan["backing_taper_target_degrees"] = float(selected_taper_angle)
+        plan["backing_taper_requested_mm"] = float(requested_taper_depth)
+        topology_limited_lead = np.asarray(backed_off["lead"], dtype=np.float64)
+        selected_slope_audit = backed_off["audit"]
+        plan.update(backed_off["plan"])
+        plan["backing_taper_lateral_inset_mm"] = float(
+            backed_off["lateral_inset_mm"]
+        )
+        plan["backing_taper_selected_measured_statistics"] = {
+            key: selected_slope_audit.get(key)
+            for key in (
+                "sample_count",
+                "minimum_degrees",
+                "p05_degrees",
+                "median_degrees",
+                "p95_degrees",
+                "maximum_degrees",
+                "outside_ratio",
+                "valid",
+            )
+        }
+        lead = np.asarray(topology_limited_lead, dtype=np.float64)
         shape_backoff_applied = True
 
     # A zero-engagement backing has no compact peg which requires its floor at
@@ -810,6 +1089,28 @@ def printable_backing_rings(
             lead,
             plan,
         )
+        selected_slope_audit = backing_taper_angle_audit(
+            sampled_boundary,
+            lead,
+            plan,
+        )
+        if not bool(selected_slope_audit.get("valid", False)):
+            raise ValueError(
+                "zero-engagement backing lost its printable slope after planar fit"
+            )
+        plan["backing_taper_selected_measured_statistics"] = {
+            key: selected_slope_audit.get(key)
+            for key in (
+                "sample_count",
+                "minimum_degrees",
+                "p05_degrees",
+                "median_degrees",
+                "p95_degrees",
+                "maximum_degrees",
+                "outside_ratio",
+                "valid",
+            )
+        }
 
     # Triangulation is a representation problem, not a shape constraint.  The
     # previous preflight probe repeatedly shortened a valid wedge whenever its
@@ -822,6 +1123,12 @@ def printable_backing_rings(
     continuation_directions = np.tile(axis, (len(lead), 1))
     backing = lead + continuation_directions * remaining_depth
     plan["backing_source_ring_vertices"] = int(len(boundary))
+    plan["backing_slope_evaluation_policy"] = "equal_arc_boundary_samples_only"
+    plan["backing_slope_evaluation_source_vertices"] = int(len(boundary))
+    plan["backing_slope_evaluation_sample_count"] = int(len(sampled_boundary))
+    plan["backing_slope_evaluation_source_sample_indices"] = [
+        int(value) for value in sampled_boundary_indices[:32]
+    ]
     plan["backing_floor_ring_vertices"] = int(len(lead))
     plan["backing_taper_requested_mm"] = float(requested_taper_depth)
     plan["backing_taper_shape_backoff_applied"] = bool(shape_backoff_applied)
@@ -915,15 +1222,16 @@ def _fit_zero_engagement_planar_backing_slope(
     the planar-arc target, lateral inset, and visible source ring are immutable.
     """
 
-    source = np.asarray(source_ring, dtype=np.float64)
+    source = _sample_ordered_boundary(source_ring)
     floor = np.asarray(planar_floor, dtype=np.float64).copy()
+    sampled_floor = _sample_ordered_boundary(floor)
     source_2d = project_connector_points(source, plan)
-    floor_2d = project_connector_points(floor, plan)
+    floor_2d = project_connector_points(sampled_floor, plan)
     axis = np.asarray(plan["inward"], dtype=np.float64)
     axis /= max(float(np.linalg.norm(axis)), 1e-12)
     center = np.asarray(plan["center"], dtype=np.float64)
     source_axial = (source - center[None, :]) @ axis
-    floor_axial = (floor - center[None, :]) @ axis
+    floor_axial = (sampled_floor - center[None, :]) @ axis
     current_plane = float(np.mean(floor_axial))
     if float(np.ptp(floor_axial)) > 1e-7:
         raise ValueError("zero-engagement connector backing floor is not planar")
@@ -946,30 +1254,24 @@ def _fit_zero_engagement_planar_backing_slope(
             ratio = sample_index / int(subdivisions[index])
             constraint_samples.append(point * (1.0 - ratio) + following * ratio)
 
-    matched_source: list[float] = []
-    lateral: list[float] = []
-    for point in constraint_samples:
-        distance, segment_index, parameter = _point_to_closed_ring_projection(
-            point,
-            source_2d,
-        )
-        if not np.isfinite(distance) or distance <= 1e-9:
-            continue
-        following = (segment_index + 1) % len(source_axial)
-        matched_source.append(
-            float(
-                source_axial[segment_index] * (1.0 - parameter)
-                + source_axial[following] * parameter
-            )
-        )
-        lateral.append(float(distance))
-    if not lateral:
+    sample_array = np.asarray(constraint_samples, dtype=np.float64)
+    distances, segment_indices, parameters = _project_points_to_closed_ring(
+        sample_array,
+        source_2d,
+    )
+    following = (segment_indices + 1) % len(source_axial)
+    matched = (
+        source_axial[segment_indices] * (1.0 - parameters)
+        + source_axial[following] * parameters
+    )
+    valid = np.isfinite(distances) & (distances > 1e-9)
+    if not np.any(valid):
         plan["backing_planar_slope_bias_applied"] = False
         plan["backing_planar_slope_bias_status"] = "no_measurable_lateral_span"
         return floor
 
-    matched = np.asarray(matched_source, dtype=np.float64)
-    lateral_array = np.asarray(lateral, dtype=np.float64)
+    matched = matched[valid]
+    lateral_array = distances[valid]
     lower = float(
         np.max(matched + np.tan(np.radians(float(minimum_degrees))) * lateral_array)
     )
@@ -998,7 +1300,7 @@ def _fit_zero_engagement_planar_backing_slope(
         float(maximum_degrees),
     ]
     plan["backing_planar_slope_constraint_samples"] = int(
-        len(constraint_samples)
+        np.count_nonzero(valid)
     )
     return floor + axis[None, :] * shift
 
@@ -1082,15 +1384,15 @@ def printable_backing_profile(
     inward_directions: np.ndarray | None = None,
     maximum_layer_step_mm: float | None = None,
 ) -> BackingProfile:
-    """Build one topology-coherent approximately 45-degree backing profile.
+    """Build one topology-coherent profile in the printable 30–75° range.
 
     A constant-distance offset can lose vertices and pass medial-axis events as
     depth increases.  Independently offsetting many intermediate layers and
     sewing those different topologies together creates the cratered underside
     seen on dense, deeply concave vendor contours.  The visible source rim and
     the final topology-safe offset are therefore joined by one audited annulus.
-    Equal lateral inset and axial travel still define the requested 45-degree
-    transition, while one topology solve prevents layer-to-layer phase drift.
+    Jointly selected lateral inset and axial travel define the chosen slope,
+    while one topology solve prevents layer-to-layer phase drift.
 
     ``maximum_layer_step_mm`` is retained for API compatibility but is no
     longer a geometry instruction.

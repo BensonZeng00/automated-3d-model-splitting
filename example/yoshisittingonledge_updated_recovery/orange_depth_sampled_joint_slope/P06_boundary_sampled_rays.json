@@ -1,0 +1,268 @@
+{
+  "source_3mf": "D:\\3Dmodel\\yoshisittingonledge.3mf",
+  "recognition_profile": "exterior-visible/32-view/768-depth-map",
+  "visibility_faces": 476651,
+  "P06": {
+    "face_count": 90734,
+    "bbox_min": [
+      155.146045429,
+      177.3843992075,
+      1.9199999989893968e-06
+    ],
+    "bbox_max": [
+      167.701277507125,
+      201.46914579,
+      25.23072242
+    ]
+  },
+  "P01": {
+    "face_count": 254412,
+    "bbox_min": [
+      147.982196569,
+      175.67036296999999,
+      0.07648186999999873
+    ],
+    "bbox_max": [
+      174.529107769,
+      206.64327012,
+      24.58464862
+    ]
+  },
+  "interface": {
+    "P06_P01_face_adjacency_pairs": 21123,
+    "contact_edges": 21123,
+    "contact_edge_components": 4014,
+    "contact_edge_length_sum_mm": 120.81808337272803,
+    "equal_arc_sample_count": 768,
+    "sampling_policy": "equal arc-length samples along all P06/P01 contact edges; maximum 768"
+  },
+  "ray_direction_source": "slerp-like blend of projected planar-center direction and local P06-to-P01 inward normal",
+  "angle_to_inward_normal_range_degrees": [
+    30.0,
+    75.0
+  ],
+  "ray_start_offset_mm": 0.03,
+  "parent_bbox_diagonal_search_limit_mm": 47.58896625299833,
+  "search_limit_mm": 10.0,
+  "unhit_policy": "safe_to_search_limit",
+  "rays": [
+    {
+      "sample_slot": 0,
+      "origin_xyz_mm": [
+        164.27913523290795,
+        178.40795659203167,
+        2.6520889504728524
+      ],
+      "direction_unit": [
+        -0.7475580468583986,
+        0.6295520392265286,
+        0.21171017094834169
+      ],
+      "angle_to_inward_normal_degrees": 35.0,
+      "hit": false,
+      "safe_depth_mm": 10.0,
+      "surface_hit_depth_mm": null,
+      "endpoint_xyz_mm": [
+        156.80355476432396,
+        184.70347698429694,
+        4.769190659956269
+      ],
+      "search_limit_mm": 10.0,
+      "unhit_means_safe_to_limit": true
+    },
+    {
+      "sample_slot": 95,
+      "origin_xyz_mm": [
+        167.41291220406708,
+        198.7202813437273,
+        15.02834940918191
+      ],
+      "direction_unit": [
+        0.21440990205828447,
+        -0.7581018335333186,
+        -0.6158814852654506
+      ],
+      "angle_to_inward_normal_degrees": 30.0,
+      "hit": false,
+      "safe_depth_mm": 10.0,
+      "surface_hit_depth_mm": null,
+      "endpoint_xyz_mm": [
+        169.55701122464993,
+        191.1392630083941,
+        8.869534556527404
+      ],
+      "search_limit_mm": 10.0,
+      "unhit_means_safe_to_limit": true
+    },
+    {
+      "sample_slot": 191,
+      "origin_xyz_mm": [
+        163.384932285929,
+        178.37301395770717,
+        2.2757041877299495
+      ],
+      "direction_unit": [
+        -0.24554317335596101,
+        0.7459597932407106,
+        0.6190739349113004
+      ],
+      "angle_to_inward_normal_degrees": 30.0,
+      "hit": false,
+      "safe_depth_mm": 10.0,
+      "surface_hit_depth_mm": null,
+      "endpoint_xyz_mm": [
+        160.9295005523694,
+        185.83261189011426,
+        8.466443536842954
+      ],
+      "search_limit_mm": 10.0,
+      "unhit_means_safe_to_limit": true
+    },
+    {
+      "sample_slot": 287,
+      "origin_xyz_mm": [
+        165.98508788049642,
+        194.26209105276837,
+        3.185865643987293
+      ],
+      "direction_unit": [
+        0.07081356857984539,
+        -0.3306970410578606,
+        0.9410764610490283
+      ],
+      "angle_to_inward_normal_degrees": 30.0,
+      "hit": false,
+      "safe_depth_mm": 10.0,
+      "surface_hit_depth_mm": null,
+      "endpoint_xyz_mm": [
+        166.69322356629488,
+        190.95512064218977,
+        12.596630254477576
+      ],
+      "search_limit_mm": 10.0,
+      "unhit_means_safe_to_limit": true
+    },
+    {
+      "sample_slot": 383,
+      "origin_xyz_mm": [
+        158.27787520701992,
+        196.22017327801532,
+        4.180509747178149
+      ],
+      "direction_unit": [
+        -0.04979090419242344,
+        -0.6945623508476115,
+        0.717707465925178
+      ],
+      "angle_to_inward_normal_degrees": 30.0,
+      "hit": false,
+      "safe_depth_mm": 10.0,
+      "surface_hit_depth_mm": null,
+      "endpoint_xyz_mm": [
+        157.7799661650957,
+        189.27454976953922,
+        11.357584406429929
+      ],
+      "search_limit_mm": 10.0,
+      "unhit_means_safe_to_limit": true
+    },
+    {
+      "sample_slot": 479,
+      "origin_xyz_mm": [
+        167.4889493727653,
+        197.65217764362387,
+        16.26923955617885
+      ],
+      "direction_unit": [
+        -0.9540781531914686,
+        -0.0036778423742631072,
+        -0.29953522510420494
+      ],
+      "angle_to_inward_normal_degrees": 30.0,
+      "hit": false,
+      "safe_depth_mm": 10.0,
+      "surface_hit_depth_mm": null,
+      "endpoint_xyz_mm": [
+        157.9481678408506,
+        197.61539921988125,
+        13.2738873051368
+      ],
+      "search_limit_mm": 10.0,
+      "unhit_means_safe_to_limit": true
+    },
+    {
+      "sample_slot": 575,
+      "origin_xyz_mm": [
+        158.30581466078465,
+        200.93907279752463,
+        11.236642157754527
+      ],
+      "direction_unit": [
+        0.4897531002372132,
+        -0.868871107910975,
+        0.07214498350955056
+      ],
+      "angle_to_inward_normal_degrees": 30.0,
+      "hit": false,
+      "safe_depth_mm": 10.0,
+      "surface_hit_depth_mm": null,
+      "endpoint_xyz_mm": [
+        163.20334566315677,
+        192.2503617184149,
+        11.958091992850033
+      ],
+      "search_limit_mm": 10.0,
+      "unhit_means_safe_to_limit": true
+    },
+    {
+      "sample_slot": 671,
+      "origin_xyz_mm": [
+        158.67476281742844,
+        193.464373924408,
+        2.832523636463447
+      ],
+      "direction_unit": [
+        -0.0021693211524593738,
+        0.07177065690578997,
+        0.9974188021353161
+      ],
+      "angle_to_inward_normal_degrees": 30.0,
+      "hit": false,
+      "safe_depth_mm": 10.0,
+      "surface_hit_depth_mm": null,
+      "endpoint_xyz_mm": [
+        158.65306960590385,
+        194.1820804934659,
+        12.806711657816608
+      ],
+      "search_limit_mm": 10.0,
+      "unhit_means_safe_to_limit": true
+    },
+    {
+      "sample_slot": 767,
+      "origin_xyz_mm": [
+        158.74037275332591,
+        189.49617643233037,
+        24.43704957818213
+      ],
+      "direction_unit": [
+        0.026044123828703598,
+        0.04922264458206804,
+        -0.9984482134163708
+      ],
+      "angle_to_inward_normal_degrees": 30.0,
+      "hit": false,
+      "safe_depth_mm": 10.0,
+      "surface_hit_depth_mm": null,
+      "endpoint_xyz_mm": [
+        159.00081399161294,
+        189.98840287815105,
+        14.452567444018422
+      ],
+      "search_limit_mm": 10.0,
+      "unhit_means_safe_to_limit": true
+    }
+  ],
+  "note": "Rendered all P06/P01 contact edges and sparse surface context; equal-arc samples are measured along the combined physical edge length.",
+  "image": "E:\\automated-3d-model-splitting\\example\\yoshisittingonledge_updated_recovery\\orange_depth_sampled_joint_slope\\P06_boundary_sampled_rays.png"
+}

@@ -9,6 +9,8 @@ from .common import *
 HIDDEN_INTERFACE_MINIMUM_LOAD_BEARING_DEPTH_MM = 0.45
 HIDDEN_INTERFACE_CANDIDATE_TARGET_FRACTIONS = (0.25, 0.50, 0.75, 1.00)
 HIDDEN_INTERFACE_BLEND_FACTORS = (0.35, 0.65, 1.00)
+MAX_BOUNDARY_THICKNESS_PROBES = 768
+HIDDEN_INTERFACE_MAX_SCREENING_PROBES = MAX_BOUNDARY_THICKNESS_PROBES
 
 
 class ThicknessProbe(Protocol):
@@ -28,10 +30,15 @@ class HiddenInterfaceCandidate:
     name: str
     axis: np.ndarray
     directions: np.ndarray
-    safe_depth_mm: float
+    screening_depth_mm: float
     minimum_local_inward_dot: float
     mean_initial_direction_dot: float
     thickness_record: dict
+
+    @property
+    def safe_depth_mm(self) -> float:
+        """Compatibility view; this is a sparse screening estimate, not final safety."""
+        return self.screening_depth_mm
 
 
 @dataclass(frozen=True)
@@ -45,6 +52,23 @@ class HiddenInterfacePlan:
 def _normalize_rows(values: np.ndarray) -> np.ndarray:
     values = np.asarray(values, dtype=np.float64)
     return values / np.maximum(np.linalg.norm(values, axis=1)[:, None], 1e-12)
+
+
+def boundary_screening_indices(points: np.ndarray, maximum_count: int) -> np.ndarray:
+    """Choose deterministic, equal-arc samples that are actual loop vertices."""
+    values = np.asarray(points, dtype=np.float64)
+    count = len(values)
+    sample_count = min(count, max(int(maximum_count), 1))
+    if sample_count == count:
+        return np.arange(count, dtype=np.int64)
+    edge_lengths = np.linalg.norm(np.roll(values, -1, axis=0) - values, axis=1)
+    cumulative = np.concatenate(([0.0], np.cumsum(edge_lengths[:-1])))
+    total_length = float(edge_lengths.sum())
+    if total_length <= 1e-12:
+        return np.linspace(0, count - 1, num=sample_count, dtype=np.int64)
+    targets = np.arange(sample_count, dtype=np.float64) * (total_length / sample_count)
+    indices = np.searchsorted(cumulative, targets, side="left")
+    return np.unique(np.clip(indices, 0, count - 1)).astype(np.int64)
 
 
 def _active_parent_centroid(probe: ThicknessProbe) -> np.ndarray:
@@ -181,11 +205,17 @@ class HiddenInterfacePlanner:
         parent_thickness_probe: ThicknessProbe,
         baseline_safe_depth_mm: float,
         preferred_depth_mm: float,
+        maximum_screening_probes: int = MAX_BOUNDARY_THICKNESS_PROBES,
     ) -> HiddenInterfacePlan:
         points = np.asarray(points, dtype=np.float64)
         initial = _normalize_rows(initial_directions)
         local = _normalize_rows(local_inward_normals)
         parent_interior_point = _active_parent_centroid(parent_thickness_probe)
+        screening_indices = boundary_screening_indices(
+            points,
+            maximum_screening_probes,
+        )
+        screening_points = points[screening_indices]
         ceiling = min(
             max(float(preferred_depth_mm), HIDDEN_INTERFACE_MINIMUM_LOAD_BEARING_DEPTH_MM),
             MAXIMUM_SAFE_INWARD_DEPTH_MM,
@@ -201,8 +231,8 @@ class HiddenInterfacePlanner:
         ):
             try:
                 safe_depth, thickness_record = parent_thickness_probe.safety_limit(
-                    points,
-                    directions,
+                    screening_points,
+                    directions[screening_indices],
                     ceiling,
                 )
             except (ValueError, RuntimeError) as exc:
@@ -214,7 +244,7 @@ class HiddenInterfacePlanner:
                     name=name,
                     axis=np.asarray(axis, dtype=np.float64).copy(),
                     directions=np.asarray(directions, dtype=np.float64).copy(),
-                    safe_depth_mm=float(safe_depth),
+                    screening_depth_mm=float(safe_depth),
                     minimum_local_inward_dot=float(local_dot.min(initial=1.0)),
                     mean_initial_direction_dot=float(mean_initial_dot),
                     thickness_record=dict(thickness_record),
@@ -222,7 +252,7 @@ class HiddenInterfacePlanner:
             )
         evaluated.sort(
             key=lambda item: (
-                -item.safe_depth_mm,
+                -item.screening_depth_mm,
                 -item.minimum_local_inward_dot,
                 -item.mean_initial_direction_dot,
                 item.name,
@@ -231,13 +261,19 @@ class HiddenInterfacePlanner:
         improved = [
             item
             for item in evaluated
-            if item.safe_depth_mm > float(baseline_safe_depth_mm) + 1e-6
+            if item.screening_depth_mm > float(baseline_safe_depth_mm) + 1e-6
         ]
         record = {
             "hidden_interface_policy": "deterministic_parent_interior_direction_search",
             "hidden_interface_baseline_safe_depth_mm": float(
                 baseline_safe_depth_mm
             ),
+            "hidden_interface_screening_policy": "equal_arc_boundary_vertex_samples",
+            "hidden_interface_full_boundary_vertex_count": int(len(points)),
+            "hidden_interface_screening_probe_vertex_count": int(
+                len(screening_indices)
+            ),
+            "hidden_interface_screening_is_authoritative": False,
             "hidden_interface_minimum_load_bearing_depth_mm": (
                 HIDDEN_INTERFACE_MINIMUM_LOAD_BEARING_DEPTH_MM
             ),
@@ -249,7 +285,7 @@ class HiddenInterfacePlanner:
             "hidden_interface_candidates": [
                 {
                     "name": item.name,
-                    "safe_depth_mm": item.safe_depth_mm,
+                    "screening_depth_mm": item.screening_depth_mm,
                     "minimum_local_inward_dot": item.minimum_local_inward_dot,
                     "mean_initial_direction_dot": item.mean_initial_direction_dot,
                     "axis": item.axis.round(6).tolist(),
@@ -264,5 +300,3 @@ class HiddenInterfacePlanner:
             candidates=tuple(improved),
             record=record,
         )
-
-

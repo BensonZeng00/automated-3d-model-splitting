@@ -5,6 +5,11 @@ from typing import Protocol
 
 import numpy as np
 
+from .hidden_interface import (
+    MAX_BOUNDARY_THICKNESS_PROBES,
+    boundary_screening_indices,
+)
+
 
 GUIDED_CUT_MINIMUM_RAY_DOT = 0.05
 GUIDED_CUT_MINIMUM_LOCAL_INWARD_DOT = 0.01
@@ -77,18 +82,26 @@ def adaptive_guided_entry_ring(
             "guided_entry_unsafe_seed_vertices": 0,
             "guided_entry_inset_min_mm": base,
             "guided_entry_inset_max_mm": base,
+            "guided_entry_thickness_boundary_input_vertices": int(len(boundary)),
+            "guided_entry_thickness_boundary_sampled_vertices": 0,
         }
 
     entry_directions = np.tile(spec.entry_direction, (len(boundary), 1))
     search_limit = min(max(float(spec.maximum_depth_mm), 0.0), 10.0) + 0.05
-    hits = parent_thickness_probe.first_hit_distances(
+    thickness_sample_indices = boundary_screening_indices(
         base_points,
-        entry_directions,
+        MAX_BOUNDARY_THICKNESS_PROBES,
+    )
+    sampled_hits = parent_thickness_probe.first_hit_distances(
+        base_points[thickness_sample_indices],
+        entry_directions[thickness_sample_indices],
         search_limit,
     )
-    unsafe = np.asarray(hits, dtype=np.float64) < (
+    sampled_unsafe = np.asarray(sampled_hits, dtype=np.float64) < (
         float(spec.minimum_depth_mm) + GUIDED_CUT_PARENT_CLEARANCE_MM
     )
+    unsafe = np.zeros(len(boundary), dtype=bool)
+    unsafe[thickness_sample_indices] = sampled_unsafe
     seed_count = int(np.count_nonzero(unsafe))
     if seed_count == 0:
         return base_points, np.full(len(boundary), base), {
@@ -96,6 +109,10 @@ def adaptive_guided_entry_ring(
             "guided_entry_unsafe_seed_vertices": 0,
             "guided_entry_inset_min_mm": base,
             "guided_entry_inset_max_mm": base,
+            "guided_entry_thickness_boundary_input_vertices": int(len(boundary)),
+            "guided_entry_thickness_boundary_sampled_vertices": int(
+                len(thickness_sample_indices)
+            ),
         }
 
     edge_lengths = np.linalg.norm(
@@ -145,6 +162,10 @@ def adaptive_guided_entry_ring(
     direction_dot = np.einsum("ij,ij->i", smooth_conormals, conormals)
     return fit_points, insets, {
         "guided_entry_inset_policy": "localized_parent_thickness_avoidance",
+        "guided_entry_thickness_boundary_input_vertices": int(len(boundary)),
+        "guided_entry_thickness_boundary_sampled_vertices": int(
+            len(thickness_sample_indices)
+        ),
         "guided_entry_unsafe_seed_vertices": seed_count,
         "guided_entry_unsafe_seed_indices": [
             int(value) for value in np.flatnonzero(unsafe)[:32]

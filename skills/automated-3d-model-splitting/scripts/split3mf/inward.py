@@ -42,7 +42,9 @@ from .interface_retopology import (
 from .domain import PlanarArcRetopologyContext, CapDecision
 from .hidden_interface import (
     HIDDEN_INTERFACE_MINIMUM_LOAD_BEARING_DEPTH_MM,
+    MAX_BOUNDARY_THICKNESS_PROBES,
     HiddenInterfacePlanner,
+    boundary_screening_indices,
 )
 from .guided_internal_cut import (
     GuidedInternalCutPlanner,
@@ -56,7 +58,7 @@ from .local_connectors import (
     subtract_socket_cutters,
 )
 from .connector_planning import (
-    local_connector_safe_depth_at_footprint,
+    local_connector_safe_depth_at_boundary,
     local_connector_safe_depth_from_field,
     local_connector_spec_for_interface,
 )
@@ -1729,13 +1731,9 @@ def build_layer_child_cut_references(
                                 planar_extra_limit_mm=cap_planar_extra_limit_mm,
                                 parent_thickness_probe=child_parent_thickness_probe,
                                 source_points=source_points,
-                                # Screening and final selection must use one
-                                # thickness horizon.  A shorter ray can observe
-                                # an entry without its matching exit (or neither)
-                                # and therefore cannot classify whether the
-                                # origin is inside the parent.  Let the shared
-                                # cap planner apply its ordinary authoritative
-                                # ceiling here as it does in the replay below.
+                                # Keep the full ray horizon even for sparse
+                                # boundary screening so entry/exit classification
+                                # remains consistent with the final audit.
                             )
                         except ValueError as exc:
                             if "No positive inward depth remains" not in str(exc):
@@ -1798,38 +1796,21 @@ def build_layer_child_cut_references(
                         effective_insert_shrink_mm = float(
                             selected["effective_insert_shrink_mm"]
                         )
-                        selected_fit_points = offset_points_along_conormals(
-                            candidate_points,
-                            candidate_conormals,
-                            effective_insert_shrink_mm,
-                        )
-                        # Candidate evaluation above already used the complete
-                        # authoritative thickness horizon.  Replaying the same
-                        # deterministic plan here performed a third identical
-                        # multi-million-candidate ray pass without adding a
-                        # stronger safety check; retain the selected evaluated
-                        # result instead.
+                        # Candidate planning retains the complete cap geometry;
+                        # ParentThicknessProbe limits every ray query to
+                        # equal-arc boundary samples. Reuse this sampled result
+                        # instead of repeating the same ray query.
                         candidate_decision = selected["decision"]
-                        authoritative_reserved_distances = np.asarray(
+                        sampled_reserved_distances = np.asarray(
                             selected["reserved_distances"], dtype=np.float64
                         ).copy()
                         reserved_record = dict(selected["reserved_record"])
                         screening_minimum_depth_mm = float(
                             selected["minimum_depth_mm"]
                         )
-                        authoritative_minimum_depth_mm = float(
-                            np.min(authoritative_reserved_distances)
+                        sampled_minimum_depth_mm = float(
+                            np.min(sampled_reserved_distances)
                         )
-                        if (
-                            screening_minimum_depth_mm
-                            >= preferred_minimum_depth_mm - 1e-9
-                            and authoritative_minimum_depth_mm
-                            < preferred_minimum_depth_mm - 1e-9
-                        ):
-                            raise RuntimeError(
-                                "target-depth screening disagrees with the authoritative "
-                                "parent-thickness audit"
-                            )
                         candidate_evaluations = [
                             {
                                 "effective_insert_shrink_mm": float(
@@ -1897,9 +1878,8 @@ def build_layer_child_cut_references(
                                 "taper_profile_screening_minimum_depth_mm": (
                                     screening_minimum_depth_mm
                                 ),
-                                "taper_profile_authoritative_replan_applied": True,
-                                "taper_profile_authoritative_minimum_depth_mm": (
-                                    authoritative_minimum_depth_mm
+                                "taper_profile_sampled_minimum_depth_mm": (
+                                    sampled_minimum_depth_mm
                                 ),
                             }
                         )
@@ -1915,7 +1895,7 @@ def build_layer_child_cut_references(
                                 dtype=np.float64,
                             ).copy(),
                             distances=np.asarray(
-                                authoritative_reserved_distances,
+                                sampled_reserved_distances,
                                 dtype=np.float64,
                             ).copy(),
                             record=reserved_record,
@@ -2134,9 +2114,10 @@ def build_layer_child_cut_references(
                             hidden_attempts.append(
                                 {
                                     "name": hidden_candidate.name,
-                                    "safe_depth_mm": (
-                                        hidden_candidate.safe_depth_mm
+                                    "screening_depth_mm": (
+                                        hidden_candidate.screening_depth_mm
                                     ),
+                                    "authoritative_safe_depth_mm": None,
                                     "accepted": False,
                                     "reason": str(exc),
                                 }
@@ -2152,7 +2133,15 @@ def build_layer_child_cut_references(
                         hidden_attempts.append(
                             {
                                 "name": hidden_candidate.name,
-                                "safe_depth_mm": hidden_candidate.safe_depth_mm,
+                                "screening_depth_mm": (
+                                    hidden_candidate.screening_depth_mm
+                                ),
+                                "authoritative_safe_depth_mm": float(
+                                    hidden_decision.record.get(
+                                        "safe_maximum_inward_depth_mm",
+                                        hidden_minimum,
+                                    )
+                                ),
                                 "generated_minimum_depth_mm": hidden_minimum,
                                 "accepted": improved,
                             }
@@ -2185,7 +2174,13 @@ def build_layer_child_cut_references(
                                     selected_hidden.axis.round(6).tolist()
                                 ),
                                 "hidden_interface_selected_safe_depth_mm": (
-                                    selected_hidden.safe_depth_mm
+                                    selected_hidden_decision.record.get(
+                                        "safe_maximum_inward_depth_mm",
+                                        selected_hidden_minimum,
+                                    )
+                                ),
+                                "hidden_interface_selected_screening_depth_mm": (
+                                    selected_hidden.screening_depth_mm
                                 ),
                                 "hidden_interface_generated_minimum_depth_mm": (
                                     selected_hidden_minimum
@@ -2235,7 +2230,13 @@ def build_layer_child_cut_references(
                             baseline_safe_depth_mm=baseline_safe_depth_mm,
                             selected_candidate=selected_hidden.name,
                             selected_safe_depth_mm=float(
-                                selected_hidden.safe_depth_mm
+                                selected_hidden_decision.record.get(
+                                    "safe_maximum_inward_depth_mm",
+                                    selected_hidden_minimum,
+                                )
+                            ),
+                            selected_screening_depth_mm=float(
+                                selected_hidden.screening_depth_mm
                             ),
                             generated_minimum_depth_mm=float(
                                 selected_hidden_minimum
@@ -2696,7 +2697,7 @@ def build_layer_child_cut_references(
                     # equal-count boundary-extrusion proxy is not part of that
                     # output and can falsely report folded quads on concave rims.
                     # Preflight the exact production geometry instead.
-                    local_connector_safety = local_connector_safe_depth_at_footprint(
+                    local_connector_safety = local_connector_safe_depth_at_boundary(
                         boundary_points=np.asarray(
                             cap_decision.source_points,
                             dtype=np.float64,
@@ -2926,7 +2927,7 @@ def build_layer_child_cut_references(
                     runtime_log(
                         "厚度测量",
                         "local_connector_safety_precomputed",
-                        "局部连接器已使用排除子树后的内部足迹预计算安全深度",
+                        "局部连接器已使用排除子树后的接口边界等弧采样预计算安全深度",
                         parent_index=int(parent_index),
                         child_index=int(child_index),
                         loop_index=int(selected["loop_index"]),
@@ -3111,6 +3112,7 @@ class ParentThicknessProbe:
         global_ceiling = min(
             max(float(global_ceiling_mm), 0.0),
             MAXIMUM_SAFE_INWARD_DEPTH_MM,
+            float(self.maximum_probe_distance_mm),
         )
         search_limit = global_ceiling + PARENT_THICKNESS_CLEARANCE_MM
         bucket_groups: list[tuple[np.ndarray, ...]] = []
@@ -3173,6 +3175,12 @@ class ParentThicknessProbe:
             )
         self.active_triangle_mask = np.ones(triangle_count, dtype=bool)
         self.active_triangle_count = triangle_count
+        active_points = self.triangles.reshape(-1, 3)
+        self.maximum_probe_distance_mm = (
+            float(np.linalg.norm(np.ptp(active_points, axis=0)))
+            if len(active_points)
+            else 0.0
+        )
         self.filter_context: dict = {
             "excluded_triangle_count": 0,
             "included_triangle_count": triangle_count,
@@ -3243,10 +3251,17 @@ class ParentThicknessProbe:
             "radii",
             "normals",
             "maximum_radius",
+            "maximum_probe_distance_mm",
         ):
             setattr(view, attribute, getattr(self, attribute))
         view.active_triangle_mask = active_mask
         view.active_triangle_count = int(np.count_nonzero(active_mask))
+        active_points = view.triangles[active_mask].reshape(-1, 3)
+        view.maximum_probe_distance_mm = (
+            float(np.linalg.norm(np.ptp(active_points, axis=0)))
+            if len(active_points)
+            else 0.0
+        )
         # Rebuild only the inexpensive centroid trees for the active parent
         # shell.  Sharing the original bucket trees made every later query
         # return child-subtree triangles which were immediately discarded.
@@ -3776,9 +3791,24 @@ class ParentThicknessProbe:
         global_ceiling_mm: float,
         broad_phase_cache: "ParentThicknessProbe.BroadPhaseCandidateCache | None" = None,
     ) -> tuple[float, dict]:
+        points = np.asarray(points, dtype=np.float64)
+        directions = np.asarray(directions, dtype=np.float64)
+        full_boundary_probe_count = int(len(points))
+        # Preserve pre-sampled loops passed by multi-candidate searches. This
+        # keeps query hits, directions, and source-vertex diagnostics aligned.
+        if len(points) <= MAX_BOUNDARY_THICKNESS_PROBES:
+            boundary_sample_indices = np.arange(len(points), dtype=np.int64)
+        else:
+            boundary_sample_indices = boundary_screening_indices(
+                points,
+                MAX_BOUNDARY_THICKNESS_PROBES,
+            )
+            points = points[boundary_sample_indices]
+            directions = directions[boundary_sample_indices]
         global_ceiling = min(
             max(float(global_ceiling_mm), 0.0),
             MAXIMUM_SAFE_INWARD_DEPTH_MM,
+            float(self.maximum_probe_distance_mm),
         )
         search_limit = global_ceiling + PARENT_THICKNESS_CLEARANCE_MM
         if broad_phase_cache is None:
@@ -3988,16 +4018,34 @@ class ParentThicknessProbe:
             if len(usable_thicknesses)
             else search_limit
         )
+        hit_exit_ids = np.asarray(
+            getattr(
+                self,
+                "last_selected_exit_triangle_ids",
+                np.full(len(thicknesses), -1, dtype=np.int64),
+            ),
+            dtype=np.int64,
+        )
+        measured_hits = (
+            hit_exit_ids >= 0
+        ) | (selected_entry_triangle_ids >= 0)
+        has_opposing_surface_hit = bool(
+            hit_exit_ids.shape == thicknesses.shape
+            and np.any(measured_hits & usable_mask)
+        )
         thickness_quantiles = (
             np.quantile(usable_thicknesses, [0.0, 0.01, 0.05, 0.50, 0.95, 1.0])
             if len(usable_thicknesses)
             else np.full(6, search_limit, dtype=np.float64)
         )
-        safe_maximum = min(
-            global_ceiling,
-            max(0.0, measured_minimum - PARENT_THICKNESS_CLEARANCE_MM),
+        safe_maximum = (
+            min(
+                global_ceiling,
+                max(0.0, measured_minimum - PARENT_THICKNESS_CLEARANCE_MM),
+            )
+            if has_opposing_surface_hit
+            else global_ceiling
         )
-        measured_hits = thicknesses <= search_limit + 1e-9
         limiting_vertex_indices = np.flatnonzero(
             usable_mask
             & np.isclose(
@@ -4101,6 +4149,19 @@ class ParentThicknessProbe:
             "parent_thickness_isolated_coincident_hits_discarded": discard_isolated_coincident,
             "parent_thickness_hit_vertices": int(np.count_nonzero(measured_hits)),
             "parent_thickness_probe_vertices": int(len(points)),
+            "parent_thickness_boundary_sampling_policy": (
+                "equal_arc_boundary_vertices_capped"
+            ),
+            "parent_thickness_boundary_input_vertices": full_boundary_probe_count,
+            "parent_thickness_boundary_sampled_vertices": int(len(points)),
+            "parent_thickness_boundary_sampled_indices": [
+                int(value) for value in boundary_sample_indices[:32]
+            ],
+            "parent_thickness_full_boundary_audit_applied": False,
+            "parent_thickness_unhit_policy": "safe_through_finite_search_limit",
+            "parent_thickness_no_opposing_hit_safe_limit_applied": bool(
+                not has_opposing_surface_hit
+            ),
             "parent_thickness_is_lower_bound": bool(not np.all(measured_hits)),
             "parent_thickness_quantiles_mm": {
                 key: float(value)
@@ -4180,6 +4241,34 @@ class ParentThicknessProbe:
         return safe_maximum, result
 
 
+def _expand_sampled_boundary_minima(
+    sample_indices: np.ndarray,
+    sampled_values: np.ndarray,
+    boundary_count: int,
+) -> np.ndarray:
+    """Spread sampled safety limits over each intervening ordered boundary arc."""
+    indices = np.asarray(sample_indices, dtype=np.int64)
+    values = np.asarray(sampled_values, dtype=np.float64)
+    expanded = np.full(int(boundary_count), np.inf, dtype=np.float64)
+    if not len(indices):
+        return expanded
+    if len(indices) != len(values):
+        raise ValueError("boundary sample indices and values must have matching lengths")
+    if len(indices) == 1:
+        expanded[:] = values[0]
+        return expanded
+    for position, start in enumerate(indices):
+        next_position = (position + 1) % len(indices)
+        end = int(indices[next_position])
+        current = int(start)
+        segment_limit = min(float(values[position]), float(values[next_position]))
+        expanded[current] = min(expanded[current], segment_limit)
+        while current != end:
+            current = (current + 1) % int(boundary_count)
+            expanded[current] = min(expanded[current], segment_limit)
+    return expanded
+
+
 def boundary_cap_distances(
     points: np.ndarray,
     fallback_inward: np.ndarray,
@@ -4191,7 +4280,7 @@ def boundary_cap_distances(
     parent_thickness_probe: ParentThicknessProbe | None = None,
     safety_ceiling_mm: float | None = None,
 ) -> tuple[np.ndarray, np.ndarray, dict]:
-    """Use a common bottom plane when it fits; otherwise use safe local offset."""
+    """Measure and generate depth along the shared interface inward axis."""
     points = np.asarray(points, dtype=np.float64)
     fallback = np.asarray(fallback_inward, dtype=np.float64)
     fallback /= max(float(np.linalg.norm(fallback)), 1e-12)
@@ -4203,6 +4292,15 @@ def boundary_cap_distances(
     directions, smooth_direction_record = smooth_closed_inward_direction_field(
         local_plane_rays
     )
+    if len(points) > MAX_BOUNDARY_THICKNESS_PROBES:
+        boundary_sample_indices = boundary_screening_indices(
+            points,
+            MAX_BOUNDARY_THICKNESS_PROBES,
+        )
+    else:
+        boundary_sample_indices = np.arange(len(points), dtype=np.int64)
+    evaluation_points = points[boundary_sample_indices]
+    evaluation_directions = directions[boundary_sample_indices]
     preferred_minimum = max(float(fixed_depth_mm), 0.4)
     global_ceiling = min(
         preferred_minimum + max(float(planar_extra_limit_mm), 0.0),
@@ -4224,36 +4322,74 @@ def boundary_cap_distances(
                 "parent_thickness_is_lower_bound": True,
                 "parent_thickness_clearance_mm": PARENT_THICKNESS_CLEARANCE_MM,
                 "safe_maximum_inward_depth_mm": global_ceiling,
+                "parent_thickness_depth_path": (
+                    "interface_boundary_to_opposing_surface_along_shared_component_inward_axis"
+                ),
+                "parent_thickness_depth_direction": fallback.round(9).tolist(),
             }
         return parent_thickness_probe.safety_limit(
-            points,
+            evaluation_points,
             candidate_directions,
             global_ceiling,
         )
 
     candidate_specs: list[tuple[str, np.ndarray]] = [("global_inward", fallback)]
-    best_fit_normal = fit_plane_normal(points, fallback)
+    best_fit_normal = fit_plane_normal(evaluation_points, fallback)
     best_fit_dot_global = float(np.dot(best_fit_normal, fallback))
     if best_fit_dot_global >= 0.15:
         candidate_specs.append(("loop_best_fit_normal", best_fit_normal))
 
-    # Every candidate plane uses the same smoothed local ray field.  Thickness
-    # depends on those rays, not on the normal used to place the common bottom
-    # plane, so measuring once is both exact and substantially cheaper on dense
-    # painted seams.  Previously the global and best-fit plane candidates each
-    # repeated the identical broad phase and ray/triangle intersection pass.
+    # Measure depth along the shared component-inward axis: this is the path
+    # from the interface boundary to the opposite exposed surface (the orange
+    # dimension in the cross-section), not along each locally varying rim
+    # normal. Use the same axis for cap travel so measured and generated depth
+    # refer to the same physical line.
+    depth_directions = np.tile(fallback, (len(evaluation_points), 1))
+
+    def materialize_sampled_boundary_field(
+        sampled_distances: np.ndarray,
+        record: dict,
+    ) -> tuple[np.ndarray, np.ndarray, dict]:
+        """Expand sampled safety decisions onto the source loop for geometry creation.
+
+        Thickness is evaluated only at equal-arc boundary samples.  The cap
+        mesh still has one vertex per source boundary vertex, so propagate the
+        more conservative neighboring sample limit across each intervening
+        arc before returning the planned geometry arrays.
+        """
+        full_distances = _expand_sampled_boundary_minima(
+            boundary_sample_indices,
+            np.asarray(sampled_distances, dtype=np.float64),
+            len(points),
+        )
+        full_directions = np.tile(fallback, (len(points), 1))
+        record.update(
+            {
+                "depth_field_sampled_vertex_count": int(len(evaluation_points)),
+                "depth_field_materialized_vertex_count": int(len(points)),
+                "depth_field_materialization_policy": (
+                    "conservative_neighbor_equal_arc_sample_minimum"
+                ),
+                "minimum_generated_inward_travel_mm": float(full_distances.min()),
+                "maximum_generated_inward_travel_mm": float(full_distances.max()),
+            }
+        )
+        return full_distances, full_directions, record
+
     shared_safe_maximum, shared_thickness_record = measured_limit(
-        local_plane_rays
+        depth_directions
+    )
+    shared_thickness_record["parent_thickness_depth_path"] = (
+        "interface_boundary_to_opposing_surface_along_shared_component_inward_axis"
+    )
+    shared_thickness_record["parent_thickness_depth_direction"] = (
+        fallback.round(9).tolist()
     )
     plane_candidates = []
     for orientation, plane_direction in candidate_specs:
-        # The cap plane and the travel rays solve different problems.  The
-        # former must be one coherent printable plane; the latter should retain
-        # the already-smoothed local inward field so thickness is measured
-        # through the parent instead of along an arbitrary average axis.  Each
-        # local ray is intersected with the common plane below, so varying rays
-        # cannot reintroduce the old wavy/folded bottom surface.
-        plane_directions = local_plane_rays.copy()
+        # Keep cap travel on the same shared axis used by the thickness probe;
+        # local rim normals remain available for seam shaping, not depth.
+        plane_directions = depth_directions.copy()
         ray_dot_plane = plane_directions @ plane_direction
         if len(ray_dot_plane) and float(ray_dot_plane.min()) <= 0.05:
             continue
@@ -4263,7 +4399,7 @@ def boundary_cap_distances(
             effective_minimum = 0.0
         else:
             effective_minimum = min(preferred_minimum, safe_maximum)
-        values = points @ plane_direction
+        values = evaluation_points @ plane_direction
         plane_s = float(np.min(values + safe_maximum * ray_dot_plane))
         distances = (plane_s - values) / ray_dot_plane
         required_maximum = (
@@ -4354,8 +4490,8 @@ def boundary_cap_distances(
             "requested_cap_mode": cap_mode,
             "cap_mode": "flat",
             "flat_orientation": selected["orientation"],
-            "cap_depth_reference": "common_plane_with_variable_point_depth",
-            "inward_depth_policy": "deepest_safe_common_plane",
+            "cap_depth_reference": "interface_boundary_to_opposing_surface_shared_axis",
+            "inward_depth_policy": "deepest_safe_depth_along_shared_component_axis",
             "preferred_minimum_inward_depth_mm": preferred_minimum,
             "effective_minimum_inward_depth_mm": min(
                 selected["effective_minimum_mm"],
@@ -4408,7 +4544,7 @@ def boundary_cap_distances(
             **smooth_direction_record,
             **selected["thickness_record"],
         }
-        return distances, np.asarray(selected["directions"]), record
+        return materialize_sampled_boundary_field(distances, record)
 
     if cap_mode in {"flat", "tilted"}:
         if not plane_candidates:
@@ -4432,13 +4568,10 @@ def boundary_cap_distances(
             and parent_thickness_probe is not None
             and len(points) >= 3
         ):
-            uniform_directions = np.asarray(
-                attempted["directions"],
-                dtype=np.float64,
-            )
-            raw_thicknesses = parent_thickness_probe.first_hit_distances(
-                points,
-                uniform_directions,
+            uniform_directions = depth_directions
+            sampled_raw_thicknesses = parent_thickness_probe.first_hit_distances(
+                evaluation_points,
+                depth_directions,
                 global_ceiling + PARENT_THICKNESS_CLEARANCE_MM,
             )
             # Keep the normal absolute reserve wherever the source shell is
@@ -4446,15 +4579,18 @@ def boundary_cap_distances(
             # reserve itself, preserve half of the measured thickness so both
             # sides remain positive; the closed-loop Lipschitz pass then spreads
             # that exceptional shallow point with a <=45 degree transition.
-            per_vertex_reserve = np.where(
-                raw_thicknesses < PARENT_THICKNESS_CLEARANCE_MM,
-                raw_thicknesses * 0.5,
+            sampled_reserve = np.where(
+                sampled_raw_thicknesses < PARENT_THICKNESS_CLEARANCE_MM,
+                sampled_raw_thicknesses * 0.5,
                 PARENT_THICKNESS_CLEARANCE_MM,
             )
-            per_vertex_safe = np.minimum(
+            sampled_safe = np.minimum(
                 global_ceiling,
-                np.maximum(0.0, raw_thicknesses - per_vertex_reserve),
+                np.maximum(0.0, sampled_raw_thicknesses - sampled_reserve),
             )
+            raw_thicknesses = sampled_raw_thicknesses
+            per_vertex_reserve = sampled_reserve
+            per_vertex_safe = sampled_safe
             # ``per_vertex_safe`` has already had the full parent-thickness
             # clearance subtracted above.  Requiring another clearance-sized
             # extrusion here double-counts that reserve and rejects valid,
@@ -4464,7 +4600,7 @@ def boundary_cap_distances(
             if float(per_vertex_safe.min()) > 1e-6:
                 distances = per_vertex_safe.copy()
                 edge_lengths = np.linalg.norm(
-                    np.roll(points, -1, axis=0) - points,
+                    np.roll(evaluation_points, -1, axis=0) - evaluation_points,
                     axis=1,
                 )
                 for _ in range(3):
@@ -4499,8 +4635,19 @@ def boundary_cap_distances(
                     "requested_cap_mode": cap_mode,
                     "cap_mode": "uniform-direction-lipschitz",
                     "flat_orientation": attempted["orientation"],
-                    "cap_depth_reference": "per_vertex_measured_ceiling_with_uniform_direction",
+                    "cap_depth_reference": "interface_boundary_to_opposing_surface_shared_axis",
                     "inward_depth_policy": "maximum_safe_depth_with_planar_arc_interface",
+                    "thickness_sampling_policy": "equal_arc_boundary_vertices_capped",
+                    "thickness_boundary_input_vertex_count": int(len(points)),
+                    "thickness_boundary_sampled_vertex_count": int(
+                        len(thickness_sample_indices)
+                    ),
+                    "thickness_full_boundary_audit_applied": False,
+                    "depth_slope_evaluation_policy": "equal_arc_boundary_samples_only",
+                    "thickness_depth_path": (
+                        "interface_boundary_to_opposing_surface_along_shared_component_inward_axis"
+                    ),
+                    "thickness_depth_direction": fallback.round(9).tolist(),
                     "preferred_minimum_inward_depth_mm": preferred_minimum,
                     "effective_minimum_inward_depth_mm": float(distances.min()),
                     "safe_maximum_inward_depth_mm": global_ceiling,
@@ -4550,7 +4697,7 @@ def boundary_cap_distances(
                     },
                     **smooth_direction_record,
                 }
-                return distances, uniform_directions, record
+                return materialize_sampled_boundary_field(distances, record)
             zero_safe_indices = np.flatnonzero(per_vertex_safe <= 1e-6)
             raise ValueError(
                 f"Forced {cap_mode} uniform-direction fallback has no positive "
@@ -4567,7 +4714,15 @@ def boundary_cap_distances(
             f"minimum_travel={attempted['minimum_travel_mm']:.6f}mm"
         )
 
-    local_safe_maximum, local_thickness_record = measured_limit(directions)
+    local_safe_maximum, local_thickness_record = measured_limit(
+        depth_directions
+    )
+    local_thickness_record["parent_thickness_depth_path"] = (
+        "interface_boundary_to_opposing_surface_along_shared_component_inward_axis"
+    )
+    local_thickness_record["parent_thickness_depth_direction"] = (
+        fallback.round(9).tolist()
+    )
     if local_safe_maximum <= 1e-6:
         raise ValueError(
             "No positive inward depth remains after the 0.05 mm parent-thickness clearance: "
@@ -4582,18 +4737,18 @@ def boundary_cap_distances(
         ),
         default=preferred_minimum,
     )
-    direction_dot = np.clip(directions @ fallback, -1.0, 1.0)
+    direction_dot = np.clip(depth_directions @ fallback, -1.0, 1.0)
     record = {
         "requested_cap_mode": cap_mode,
         "cap_mode": "local-offset",
-        "cap_depth_reference": "per_boundary_vertex_safe_local_inward_direction",
+        "cap_depth_reference": "interface_boundary_to_opposing_surface_shared_axis",
         "preferred_minimum_inward_depth_mm": preferred_minimum,
         "effective_minimum_inward_depth_mm": min(
             preferred_minimum,
             local_safe_maximum,
         ),
         "safe_maximum_inward_depth_mm": local_safe_maximum,
-        "local_offset_depth_policy": "requested_depth_clamped_to_measured_ceiling",
+        "local_offset_depth_policy": "requested_depth_clamped_to_shared_axis_surface_distance",
         "flat_span_mm": float(
             min(
                 (candidate["span_mm"] for candidate in plane_candidates),
@@ -4635,7 +4790,11 @@ def boundary_cap_distances(
         **smooth_direction_record,
         **local_thickness_record,
     }
-    return distances, directions, record
+    record["thickness_depth_path"] = (
+        "interface_boundary_to_opposing_surface_along_shared_component_inward_axis"
+    )
+    record["thickness_depth_direction"] = fallback.round(9).tolist()
+    return materialize_sampled_boundary_field(distances, record)
 
 
 def plan_cap_decision(
@@ -7018,7 +7177,18 @@ def _finalize_local_male_record(
         side_faces,
         cap_faces,
     )
-    record["backing_taper_target_degrees"] = 45.0
+    record["backing_taper_target_degrees"] = float(
+        plan.get("backing_taper_target_degrees", 45.0)
+    )
+    record["backing_taper_lateral_inset_mm"] = float(
+        plan.get("backing_taper_lateral_inset_mm", 0.0)
+    )
+    record["backing_taper_angle_search"] = list(
+        plan.get("backing_taper_angle_search", [])
+    )
+    record["backing_taper_selected_measured_statistics"] = dict(
+        plan.get("backing_taper_selected_measured_statistics", {})
+    )
     taper_audit = _backing_taper_angle_audit(
         boundary,
         backing_boundary,
@@ -7182,7 +7352,7 @@ def add_local_male_connector_and_backing(
     runtime_log(
         "local-connector",
         "male_backing_profile_ready",
-        "Printable 45-degree backing profile is ready",
+        "Printable backing profile is ready",
         boundary_vertices=int(len(boundary)),
         backing_layers=int(len(backing_profile.rings)),
         stage_elapsed_seconds=round(time.perf_counter() - build_started, 3),
@@ -8819,7 +8989,7 @@ def make_body_cut_mesh(
             connector_safety = (
                 dict(precomputed_connector_safety)
                 if isinstance(precomputed_connector_safety, dict)
-                else local_connector_safe_depth_at_footprint(
+                else local_connector_safe_depth_at_boundary(
                     boundary_points=source_boundary_points,
                     inward=inward,
                     fit_clearance_mm=connector_fit_clearance_mm,
@@ -9321,7 +9491,7 @@ def make_layer_child_subassembly_mesh(
             connector_safety = (
                 dict(precomputed_connector_safety)
                 if isinstance(precomputed_connector_safety, dict)
-                else local_connector_safe_depth_at_footprint(
+                else local_connector_safe_depth_at_boundary(
                     boundary_points=source_boundary_points,
                     inward=inward,
                     fit_clearance_mm=fit_clearance_mm,

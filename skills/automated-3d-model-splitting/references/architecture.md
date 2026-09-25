@@ -87,7 +87,7 @@ Prefer these explicit records when data crosses stage boundaries. Do not introdu
 - `BodySelector` scores body candidates and excludes definite structural separators.
 - `AssemblyPlanner` infers and repairs the recursive-minimal parent tree, plans depth-first steps, and validates state transitions.
 - `InwardDirectionPlanner` creates locally safe, smoothed inward directions.
-- `HiddenInterfacePlanner` proposes deterministic parent-interior direction fields only when the baseline interface is thinner than the 0.45 mm load-bearing minimum. `inward.py` remains responsible for passing each candidate through the complete cap, reserve, and authoritative thickness gates before adoption.
+- `HiddenInterfacePlanner` proposes deterministic parent-interior direction fields only when the baseline interface is thinner than the 0.45 mm load-bearing minimum. Parent-thickness ray checks use at most 768 equal-arc samples from the ordered boundary inputs; cap geometry still uses the complete boundary. No complete-boundary thickness audit follows the sampled depth decision.
 - `GuidedInternalCutPlanner` converts a high-confidence image-guided internal-section constraint into a symmetric child/socket `CapDecision`. It localizes entry inset to measured thin arcs, ranks bounded parent-interior direction and plane-shift candidates, locks the already-retopologized visible rim, and emits the source-id fit ring and diagnostics consumed unchanged by both sides.
 - `InterfaceRetopologyService` owns the actual shared visible seam and its topology-connected C2 surface-band deformation. It moves child and parent seam vertices to one canonical planar-arc target, preserves vertices outside the band, and blocks degenerate, topologically inconsistent, mismatched, excessively stretched, or materially clustered fold results. Boundary-ear repair first performs one vectorized source/result-normal broad phase, then runs topology-aware local repair only for reversed candidates; the complete vectorized quality audit remains authoritative. On a large band only, at most 0.05% nondegenerate source-normal outliers may remain advisory when each result angle is at least 3 degrees and edge-connected clusters contain at most two faces.
 - `ConnectorSurfaceService` regularizes the hidden 45-degree annulus. Index-aligned rings use complete intermediate rings; unequal rings use conforming internal refinement followed by bounded convex-quad edge flips that break inherited radial spoke chains without moving either boundary. Both shared rim rings remain immutable after visible retopology.
@@ -161,9 +161,9 @@ Services should be stateless where practical. Inject or replace collaborators th
 - An empty semantic-review list returns before global adjacency/projection
   work. Disconnected needle spans share one total affected-area budget.
 
-- Candidate screening may use a preferred-depth ceiling, but the selected
-  inward field must always receive one unrestricted authoritative thickness
-  audit before geometry is emitted.
+- Parent-thickness ray checks use no more than 768 equal-arc samples from the
+  ordered boundary input, including candidate screening and final depth
+  selection. Generated cap geometry continues to use every boundary vertex.
 - Parent-thickness broad phases must be conservative: active-only triangle
   buckets and segmented capsule covers may reduce exact ray/triangle tests but
   must never exclude a triangle that can intersect the finite probe segment.
@@ -191,7 +191,7 @@ Services should be stateless where practical. Inject or replace collaborators th
 - `inward.py`: recursive inward orchestration, thickness probing, cap planning,
   mesh-buffer construction adapters, and translated copies of already-emitted
   connector attachments used as private backing-clearance cutters;
-- `hidden_interface.py`: pure hidden-interface candidate generation, local-inward projection, authoritative thickness ranking, and evidence records;
+- `hidden_interface.py`: pure hidden-interface candidate generation, equal-arc boundary sampling, local-inward projection, and evidence records;
 - `connector_planning.py`: immutable connector depth policy, independent
   backing/engagement budgets, elastic priority allocation, and compact-footprint
   safety planning;

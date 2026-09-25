@@ -4,7 +4,11 @@ from __future__ import annotations
 import numpy as np
 import trimesh
 
-from .recognition import make_component_from_global_faces, triangle_areas
+from .recognition import (
+    connected_face_regions,
+    make_component_from_global_faces,
+    triangle_areas,
+)
 
 
 def apply_semantic_partitions(vertices, faces, components, specifications, minimum_confidence):
@@ -12,9 +16,23 @@ def apply_semantic_partitions(vertices, faces, components, specifications, minim
     result = list(components)
     records = {"applied": [], "rejected": []}
     areas = triangle_areas(vertices, faces)
+    expanded_specifications = []
+    for specification in specifications:
+        if str(specification.get("scope", "part")).strip().lower() == "all_components":
+            # A user-directed global section describes two physical sides of
+            # one painted shell. Combine recognized material regions into one
+            # temporary ownership component so its colors are cut together
+            # and the resulting interface remains a single geometric seam.
+            expanded_specifications.append({
+                **specification,
+                "part_index": 1,
+                "_combine_all_components": True,
+            })
+        else:
+            expanded_specifications.append(specification)
     # Descending source indices keep earlier part references stable while a
     # replacement is inserted immediately after its source component.
-    for specification in sorted(specifications, key=lambda item: int(item["part_index"]), reverse=True):
+    for specification in sorted(expanded_specifications, key=lambda item: int(item["part_index"]), reverse=True):
         part_index = int(specification["part_index"])
         rejection = {"part_index": part_index, "label": specification.get("label", "")}
         if not bool(specification.get("user_confirmed", False)):
@@ -36,34 +54,61 @@ def apply_semantic_partitions(vertices, faces, components, specifications, minim
             records["rejected"].append({**rejection, "reason": "zero_plane_normal"})
             continue
         normal /= length
+        combined_component_count = 1
+        if bool(specification.get("_combine_all_components", False)):
+            combined_component_count = len(result)
+            source_ids = np.unique(np.concatenate([
+                np.asarray(component.global_faces, dtype=np.int64)
+                for component in result
+            ]))
+            combined = make_component_from_global_faces(
+                vertices, faces, areas, source_ids, result[0].color_code
+            )
+            result = [combined]
+            part_index = 1
+            rejection["part_index"] = part_index
         component = result[part_index - 1]
         source_ids = np.asarray(component.global_faces, dtype=np.int64)
-        centers = np.asarray(vertices)[np.asarray(faces)[source_ids]].mean(axis=1)
-        negative = source_ids[((centers - origin) @ normal) <= 0.0]
-        positive = source_ids[((centers - origin) @ normal) > 0.0]
         minimum_faces = max(3, int(round(len(source_ids) * 0.03)))
+        source_regions = connected_face_regions(vertices, faces, source_ids)
+        positive_assignment = np.zeros(len(faces), dtype=bool)
+        split_region_count = 0
+        retained_region_count = 0
+        for region in source_regions:
+            region_centers = np.asarray(vertices)[np.asarray(faces)[region]].mean(axis=1)
+            signed_distance = (region_centers - origin) @ normal
+            region_positive = signed_distance > 0.0
+            if min(int(np.count_nonzero(region_positive)),
+                   int(len(region) - np.count_nonzero(region_positive))) >= minimum_faces:
+                positive_assignment[region] = region_positive
+                split_region_count += 1
+            else:
+                positive_assignment[region] = bool(
+                    np.count_nonzero(region_positive) > len(region) / 2
+                    or (
+                        np.count_nonzero(region_positive) == len(region) / 2
+                        and float(signed_distance.mean()) > 0.0
+                    )
+                )
+                retained_region_count += 1
+        negative = source_ids[~positive_assignment[source_ids]]
+        positive = source_ids[positive_assignment[source_ids]]
         if min(len(negative), len(positive)) < minimum_faces:
             records["rejected"].append({**rejection, "reason": "insufficient_partition_support"})
             continue
-        region_counts = []
-        for side in (source_ids, negative, positive):
+        output_region_counts = []
+        for side in (negative, positive):
             local_faces = np.asarray(faces)[side]
             adjacency = trimesh.graph.face_adjacency(faces=local_faces)
             groups = trimesh.graph.connected_components(
                 adjacency, nodes=np.arange(len(side)), min_len=1, engine="scipy"
             )
-            region_counts.append(len(groups))
-        # Dense paint consolidation may intentionally place disconnected
-        # same-material islands in one Component.  A valid semantic cut may
-        # retain those islands, but it may split at most one existing region.
-        if region_counts[1] + region_counts[2] > region_counts[0] + 1:
-            records["rejected"].append({**rejection, "reason": "partition_creates_extra_regions"})
-            continue
+            output_region_counts.append(len(groups))
         local_faces = np.asarray(faces)[source_ids]
         adjacency, adjacency_edges = trimesh.graph.face_adjacency(
             faces=local_faces, return_edges=True
         )
-        local_positive = ((centers - origin) @ normal) > 0.0
+        local_positive = positive_assignment[source_ids]
         seam_edges = adjacency_edges[
             local_positive[adjacency[:, 0]] != local_positive[adjacency[:, 1]]
         ]
@@ -102,8 +147,11 @@ def apply_semantic_partitions(vertices, faces, components, specifications, minim
             "source_face_count": int(len(source_ids)),
             "partition_face_counts": [int(len(negative)), int(len(positive))],
             "boundary_edge_count": int(len(seam_edges)),
-            "source_region_count": int(region_counts[0]),
-            "partition_region_counts": [int(region_counts[1]), int(region_counts[2])],
+            "source_region_count": int(len(source_regions)),
+            "partition_region_counts": [int(output_region_counts[0]), int(output_region_counts[1])],
+            "plane_split_region_count": int(split_region_count),
+            "whole_region_assignments": int(retained_region_count),
+            "combined_source_component_count": int(combined_component_count),
             "source_material_preserved": True,
         })
     return result, records

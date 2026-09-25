@@ -231,13 +231,15 @@ def load_visual_semantics(path: Path | None) -> dict:
     for item in raw.get("physical_partitions", []):
         if not isinstance(item, dict):
             continue
+        scope = str(item.get("scope", "part")).strip().lower()
         part_index = parse_part_index(item.get("part") or item.get("part_index"))
         plane = item.get("plane", item)
-        if part_index is None or not isinstance(plane, dict):
+        if (scope != "all_components" and part_index is None) or not isinstance(plane, dict):
             continue
         confidence = item.get("confidence", "UNKNOWN")
         physical_partitions.append({
-            "part_index": int(part_index),
+            "part_index": int(part_index) if part_index is not None else None,
+            "scope": scope,
             "label": str(item.get("label") or item.get("semantic_boundary") or ""),
             "origin": plane.get("origin"),
             "normal": plane.get("normal"),

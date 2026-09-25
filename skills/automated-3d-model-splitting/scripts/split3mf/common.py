@@ -40,7 +40,10 @@ MATERIAL_NS = "{" + MATERIAL_URI + "}"
 PRODUCTION_NS = "{" + PRODUCTION_URI + "}"
 VERSION = "2.1.0"
 DEFAULT_EFFECTIVE_MINIMUM_INWARD_DEPTH_MM = 3.0
-MAXIMUM_SAFE_INWARD_DEPTH_MM = 10.0
+# Absolute guard only. A ParentThicknessProbe narrows this to the diagonal of
+# its active parent shell, so hollow models can be measured in centimetres
+# without permitting a ray to wander beyond the source geometry bounds.
+MAXIMUM_SAFE_INWARD_DEPTH_MM = 50.0
 DEFAULT_LEAD_IN_SLOPE_DEGREES = 45.0
 PARENT_THICKNESS_CLEARANCE_MM = 0.05
 # When the measured parent is thinner than the preferred backing depth, a

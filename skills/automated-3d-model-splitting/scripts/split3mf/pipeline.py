@@ -85,7 +85,10 @@ class SplitPipeline:
             "preferred_minimum_inward_depth_mm": float(args.max_extension_mm),
             "global_safety_ceiling_mm": maximum_planar_travel_mm,
             "parent_thickness_clearance_mm": PARENT_THICKNESS_CLEARANCE_MM,
-            "parent_thickness_rule": "min(global ceiling, 10 mm, parent thickness - 0.05 mm)",
+            "parent_thickness_rule": (
+                "min(global ceiling, active parent bounding diagonal, "
+                "sampled opposing-surface distance - 0.05 mm)"
+            ),
             "requested_planar_extra_limit_mm": requested_planar_extra_limit_mm,
             "effective_planar_extra_limit_mm": float(args.planar_extra_limit_mm),
         }
@@ -344,7 +347,7 @@ class SplitPipeline:
         else:
             region_review = {"status": "not_required", "candidate_count": 0}
         components, _ = summarize_components(
-            vertices, faces, recognition_colors, groups, 1,
+            vertices, faces, recognition_colors, groups, 101,
             display_colors=recognition_token_colors)
         visual_semantics = load_visual_semantics(
             Path(args.visual_semantics_json).expanduser()

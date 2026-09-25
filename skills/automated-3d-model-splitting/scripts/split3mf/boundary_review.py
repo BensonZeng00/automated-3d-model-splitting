@@ -117,6 +117,22 @@ class BoundaryReviewService:
         if assessment.clear:
             runtime_log('分界', 'boundary_clear_direct', '边界清晰，直接进入原拆分流程', context=context)
             return labels, report
+        # Source paint boundaries are recognition evidence, not generated
+        # handoff seams. Preserve their exact ownership and report ambiguity
+        # without blocking recognition; generated recursive interfaces remain
+        # subject to the normal blocking checks below.
+        if context == 'input' or context.startswith('step_'):
+            report.update(status='source_diagnostics',
+                          source_diagnostics='non_blocking',
+                          ownership_changed=False,
+                          geometry_changed=False,
+                          requires_semantic_confirmation=False)
+            runtime_log('警告', 'source_boundary_diagnostic',
+                        '源材料边界存在拓扑歧义，保留原始面归属并继续识别；生成接口仍执行严格审核',
+                        context=context,
+                        ambiguous_pairs=len(assessment.reasons),
+                        uncertain_faces=len(assessment.uncertain_faces))
+            return labels, report
         if all(not item['branching_vertices'] for item in assessment.reasons):
             from .nearest_boundary import merge_nearest_ownership
             labels, nearest = merge_nearest_ownership(graph, labels)

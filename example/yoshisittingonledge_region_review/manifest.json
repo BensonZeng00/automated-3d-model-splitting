@@ -1,0 +1,98 @@
+{
+  "schema_version": 2,
+  "source": "E:\\automated-3d-model-splitting\\example\\yoshisittingonledge.3mf",
+  "source_face_count": 728002,
+  "noise_max_faces": 100,
+  "small_region_max_faces": 999,
+  "review_required": true,
+  "instruction": "Regions through the small-region threshold and long-thin regions require semantic classification. Set classification to noise, part, or uncertain. Classification never merges, deletes, recolors, or repairs source geometry.",
+  "items": [
+    {
+      "fragment_id": 1,
+      "source_min_face_index": 272043,
+      "color_code": "1C",
+      "faces": 22954,
+      "area_mm2": 75.49337359430797,
+      "bbox_min": [
+        165.49869,
+        179.289859,
+        35.280666
+      ],
+      "bbox_max": [
+        178.442623,
+        183.606562,
+        42.603243
+      ],
+      "center": [
+        172.096102,
+        181.460093,
+        39.057542
+      ],
+      "physical_review_evidence": {
+        "long_thin_candidate": true,
+        "visible_area_mm2": 75.49337359430797,
+        "visible_face_count": 22954,
+        "boundary_length_mm": 219.51596523038313,
+        "width_estimate_mm": 0.68781670176087,
+        "elongation_estimate": 159.5744656013756,
+        "bbox_diagonal_mm": 15.485459309891647,
+        "measurement": "visible_surface_2A_over_perimeter",
+        "thresholds": {
+          "maximum_width_estimate_mm": 1.2,
+          "minimum_elongation": 12.0,
+          "minimum_span_mm": 10.0
+        }
+      },
+      "review_reason": "long_thin_noise_candidate",
+      "connectivity_color_code": "material:filament-slot:3",
+      "boundary_loop_count": 1948,
+      "boundary_edge_count": 14178,
+      "shared_boundary_edge_count": 4953,
+      "shared_boundary_attachment_ratio": 0.34934405416842995,
+      "neighbor_group_slots": [
+        0,
+        12,
+        13
+      ],
+      "distinct_neighbor_material": true,
+      "bbox_diagonal_mm": 15.485459638629607,
+      "bbox_diagonal_model_ratio": 0.2189940620853231,
+      "exterior_visible_face_ratio": 1.0,
+      "projected_max_span_pixels": 208.79661866087113,
+      "projected_max_footprint_pixels": 25422.0219673838,
+      "projected_readable_view_count": 32,
+      "projected_view_count": 32,
+      "projected_readable_view_ratio": 1.0,
+      "repeated_feature_pair_fragment_id": null,
+      "repeated_feature_similarity": 0.0,
+      "semantic_evidence": [
+        "closed_boundary_loop",
+        "substantial_shared_boundary",
+        "large_projected_span",
+        "large_projected_footprint",
+        "meaningful_model_relative_size",
+        "near_face_threshold",
+        "distinct_neighbor_material",
+        "strong_exterior_visibility"
+      ],
+      "semantic_penalties": [],
+      "geometry_evidence_score": 0.9500000000000001,
+      "geometry_evidence_threshold": 0.55,
+      "review_status": "awaiting_user_classification",
+      "review_category": "long_strip_candidate",
+      "review_image": "example\\yoshisittingonledge_region_review\\F001_context_and_zoom.png",
+      "review_layout": {
+        "top_row": "whole-model context with candidate highlighted magenta",
+        "bottom_row": "candidate-centered zoom with local context",
+        "columns": [
+          "+X",
+          "-X",
+          "+Y",
+          "-Y",
+          "+Z",
+          "-Z"
+        ]
+      }
+    }
+  ]
+}

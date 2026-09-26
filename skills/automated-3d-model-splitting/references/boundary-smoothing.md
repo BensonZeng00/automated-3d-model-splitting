@@ -2,14 +2,15 @@
 
 This is the sole production boundary policy. `smooth` is the default; the source mode has been removed. First apply the area-based local cleanup and completion-first judgment in [completion-first.md](completion-first.md), then fit the shared seam.
 
-Recognized component boundary loops are cleaned once during recognition. Sparse
-isolated spike vertices are removed using a local edge-scale and chord-deviation
-check. Only the largest perimeter loop is considered for each recognized
-component; all secondary loops are removed. The selected loop is also removed
-when its largest axis-aligned span is below 1 mm. If this leaves a component
-without an accepted ring, recognition excludes that component before it creates
-the final region list; plotting receives only that final list. Both simplified
-and unsimplified topology snapshots omit rejected loops, preventing later seam
+Recognized component boundary loops are cleaned once during recognition. One
+individual boundary is one closed ring; a component may have multiple distinct
+interfaces, so do not discard valid rings merely because another ring on the
+same component is longer. Sparse isolated spike vertices are removed using a
+local edge-scale and chord-deviation check. Each ring is filtered only when its
+largest axis-aligned span is below 1 mm. If this leaves a component without an
+accepted ring, recognition excludes that component before it creates the final
+region list; plotting receives only that final list. Both simplified and
+unsimplified topology snapshots omit rejected rings, preventing later seam
 planning from restoring them. A surviving ring is simplified by approximately
 5% sampling at equal physical arc-length intervals, with at least three source
 vertices. There is no geometric deviation tolerance. The review image applies

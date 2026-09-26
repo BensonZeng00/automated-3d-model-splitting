@@ -77,27 +77,11 @@ class BoundarySnapshotBuilder:
                 ).sum())
                 for loop in raw_loops
             ]
-            largest_loop_index = int(np.argmax(loop_perimeters)) if loop_perimeters else -1
             for loop_index, source_loop in enumerate(raw_loops, start=1):
                 source_ids = np.asarray(source_loop, dtype=np.int64)
                 source_points = np.asarray(vertices[source_ids], dtype=np.float64)
                 perimeter = loop_perimeters[loop_index - 1]
                 span = float(np.max(np.ptp(source_points, axis=0))) if len(source_points) else 0.0
-                is_noise_loop = loop_index - 1 != largest_loop_index
-                if is_noise_loop:
-                    simplification_records.append({
-                        "component_index": component_index,
-                        "loop_index": loop_index,
-                        "status": "filtered",
-                        "reason": "secondary_loop_removed_single_ring_policy",
-                        "source_vertex_count": int(len(source_ids)),
-                        "simplified_vertex_count": 0,
-                        "retained_fraction": float(retained_fraction),
-                        "filtered_spike_vertex_count": 0,
-                        "perimeter_mm": perimeter,
-                        "span_mm": span,
-                    })
-                    continue
                 if span < MINIMUM_BOUNDARY_LOOP_SPAN_MM:
                     simplification_records.append({
                         "component_index": component_index,

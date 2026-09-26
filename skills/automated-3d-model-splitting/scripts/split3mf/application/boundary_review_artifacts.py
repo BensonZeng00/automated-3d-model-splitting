@@ -22,9 +22,13 @@ def write_boundary_review_artifacts(
     source_color_map: dict[str, str] | None = None,
 ) -> dict[str, str | int]:
     """Write a color-coded boundary preview and a compact human review report."""
+    recognition_records = list(recognition_records)
+    semantic_labels = _required_semantic_labels(recognition_records)
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     image_path = directory / "03_recognition_boundaries.png"
+    opposite_image_path = directory / "03_recognition_boundaries_opposite.png"
+    side_image_path = directory / "03_recognition_boundaries_side.png"
     report_path = directory / "03_recognition_boundary_review.md"
     records = list(boundaries.simplification_records)
     plotted_boundary_count = _write_boundary_plot(
@@ -35,13 +39,39 @@ def write_boundary_review_artifacts(
         source_face_color_tokens=source_face_color_tokens,
         source_color_map=source_color_map,
         components=components,
+        azimuth=-90,
+        view_label="current view",
+    )
+    _write_boundary_plot(
+        opposite_image_path,
+        boundaries,
+        source_vertices=source_vertices,
+        source_faces=source_faces,
+        source_face_color_tokens=source_face_color_tokens,
+        source_color_map=source_color_map,
+        components=components,
+        azimuth=90,
+        view_label="opposite view",
+    )
+    _write_boundary_plot(
+        side_image_path,
+        boundaries,
+        source_vertices=source_vertices,
+        source_faces=source_faces,
+        source_face_color_tokens=source_face_color_tokens,
+        source_color_map=source_color_map,
+        components=components,
+        azimuth=0,
+        view_label="side view",
     )
     _write_summary(
         report_path, records, recognition_records, region_review, components,
-        recognition_review_path,
+        recognition_review_path, semantic_labels,
     )
     return {
         "boundary_image": str(image_path),
+        "boundary_image_opposite": str(opposite_image_path),
+        "boundary_image_side": str(side_image_path),
         "boundary_review_report": str(report_path),
         "boundary_count": sum(
             len(loops) for loops in boundaries.component_loops
@@ -61,6 +91,8 @@ def _write_boundary_plot(
     source_face_color_tokens: np.ndarray | None = None,
     source_color_map: dict[str, str] | None = None,
     components: list | None = None,
+    azimuth: float = -90,
+    view_label: str = "current view",
 ) -> int:
     import matplotlib
 
@@ -156,9 +188,9 @@ def _write_boundary_plot(
         axis.set_zlim(center[2] - extent[2] / 2 - margin, center[2] + extent[2] / 2 + margin)
         axis.set_box_aspect(extent)
     axis.set_title(
-        "Original painted model with recognized boundaries (5% arc sampling)"
+        f"Original painted model with simplified and smoothed boundaries ({view_label})"
         if render_source_mesh
-        else "Recognized region boundaries (5% arc sampling)"
+        else f"Simplified and smoothed recognized boundaries ({view_label})"
     )
     axis.set_xlabel("X (mm)")
     axis.set_ylabel("Y (mm)")
@@ -166,8 +198,7 @@ def _write_boundary_plot(
     axis.xaxis.label.set_color("#E6E8EB")
     axis.yaxis.label.set_color("#E6E8EB")
     axis.zaxis.label.set_color("#E6E8EB")
-    if render_source_mesh:
-        axis.view_init(elev=20, azim=-90)
+    axis.view_init(elev=20, azim=float(azimuth))
     axis.title.set_color("#FFFFFF")
     if legend_handles:
         legend = axis.legend(handles=legend_handles, loc="upper left", bbox_to_anchor=(1.02, 1.0))
@@ -228,6 +259,7 @@ def _write_summary(
     region_review: dict,
     components: list,
     recognition_review_path: Path | None,
+    semantic_labels: dict[int, str],
 ) -> None:
     recognition_by_index = {
         int(record["part_index"]): record for record in recognition_records
@@ -251,7 +283,7 @@ def _write_summary(
         "",
         "边界重合时会互相遮盖，预览中的重合处只显示一种颜色。",
         "",
-        "| 区域 | 颜色 | 面数 / 面积 mm² | 判断建议 |",
+        "| 区域 | 区域语义 / 颜色 | 面数 / 面积 mm² | 判断建议 |",
         "|---|---|---:|---|",
     ]
     for component_index, part in sorted(recognition_by_index.items()):
@@ -267,10 +299,7 @@ def _write_summary(
             suggestion = "需人工判断；检查是否应与相邻区域合并"
         else:
             suggestion = "检查外观与语义；不独立时可考虑合并"
-        semantic = str(
-            part.get("region_review_label") or part.get("visual_semantic_label")
-            or part.get("label") or part.get("semantic_label") or "未标注"
-        )
+        semantic = semantic_labels[component_index]
         semantic_confidence = str(part.get("visual_semantic_confidence") or "").upper()
         confidence_label = {
             "HIGH": "高置信度",
@@ -279,12 +308,12 @@ def _write_summary(
             "LOW": "低置信度",
             "VERYLOW": "极低置信度",
         }.get(semantic_confidence)
-        if semantic != "未标注" and confidence_label:
+        if confidence_label:
             semantic = f"{semantic}（{confidence_label}）"
         color = str(part.get("color_hex") or part.get("color_code") or "未知")
         color_name = _chinese_color_name(color)
         lines.append(
-            f"| P{component_index:02d} | {color_name}（{color}；{semantic}） | "
+            f"| P{component_index:02d} | {semantic} · {color_name}（{color}） | "
             f"{int(part.get('faces', 0))} / {float(part.get('area_mm2', 0.0)):.2f} | "
             f"{suggestion} |"
         )
@@ -298,6 +327,34 @@ def _write_summary(
     if recognition_review_path is not None:
         lines.append(f"复核文件：`{recognition_review_path}`")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _semantic_label(part: dict) -> str:
+    """Return a normalized non-empty visual label for one recognized region."""
+    for key in (
+        "region_review_label",
+        "visual_semantic_label",
+        "label",
+        "semantic_label",
+    ):
+        value = str(part.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _required_semantic_labels(recognition_records: list[dict]) -> dict[int, str]:
+    labels = {
+        int(part["part_index"]): _semantic_label(part)
+        for part in recognition_records
+    }
+    missing = [f"P{index:02d}" for index, label in labels.items() if not label]
+    if missing:
+        raise ValueError(
+            "识别报告要求每个有效区域都有视觉语义标签；请通过 "
+            "--visual-semantics-json 补全：" + ", ".join(missing)
+        )
+    return labels
 
 
 def _chinese_color_name(color_hex: str) -> str:

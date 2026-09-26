@@ -10,7 +10,7 @@ Decide recognition before generating geometry.
 2. Project source-face centroids into a depth map for every view.
 3. Mark a face visible when its depth is within tolerance of the frontmost sample in at least one view.
 4. Keep original paint tokens on visible faces.
-5. Reassign occluded faces to the explicit body color, source `DEFAULT`, or most common exterior color. Before reassignment, preserve any connected occluded patch whose complete shared-edge rim consists of visible faces with the same source color, or whose rim has at least two-thirds visible same-color support and no visible competing material. This protects centroid-depth visibility holes at both patch interiors and material boundaries without restoring open or wholly hidden paint.
+5. Reassign occluded faces to source `DEFAULT` or the most common exterior color. Before reassignment, preserve any connected occluded patch whose complete shared-edge rim consists of visible faces with the same source color, or whose rim has at least two-thirds visible same-color support and no visible competing material. This protects centroid-depth visibility holes at both patch interiors and material boundaries without restoring open or wholly hidden paint.
 6. Group the resulting labels by shared mesh edges.
 
 For connectivity labels, coalesce raw paint tokens only when trusted source metadata resolves them to the same filament slot. Keep the original token counts as provenance on the resulting component.
@@ -19,53 +19,38 @@ This filter changes recognition labels only. Preserve the source vertices, faces
 
 ## Component Recognition
 
-Use `--noise-review-max-faces 100` and `--small-region-review-max-faces 999` only to select semantic-review candidates. Long strips remain candidates at every face count. A complete source-matched decision file classifies every candidate as `noise`, `part`, or `uncertain`; all three classifications preserve the source region and enter the same body-selection, tree-inference, and interface-planning flow. Never merge, delete, recolor, repair, or filter source geometry because of its classification.
+Use `--noise-review-max-faces 100` and `--small-region-review-max-faces 999` only to select semantic-review candidates. Long strips remain candidates at every face count. A complete source-matched decision file classifies every candidate as `noise`, `part`, or `uncertain`; all three classifications preserve the source region and enter the same pairwise contact-planning flow. Never merge, delete, recolor, repair, or filter source geometry because of its classification.
 
-Before automatic body selection, test high-confidence through candidates as possible structural separators. Exclude a candidate from automatic body selection only when all of the following hold:
+## Pairwise Tenon/Mortise Planning
 
-- the through geometry gate and score pass;
-- it has at least two large structural interfaces, where each neighbor has at least 25% of the candidate's face count and shares at least 32 source edges; and
-- removing it splits the complete shell into exactly two meaningful regions whose smaller/larger face-count ratio is at least 0.50.
+Stage 04 uses the immutable simplified boundary loops produced by recognition.
+Each simplified segment is expanded only to its represented source-edge chain
+so the planner can identify the exact pair of components sharing that retained
+boundary. It does not search for a root part, build a parent map, or create
+recursive layers.
 
-Record a body-candidate score that combines relative component size with penalties for through likelihood, balanced shell separation, and multiple large structural interfaces. After excluding definite strong separators, choose the highest-scoring remaining component across all colors. `DEFAULT`, base-color, filament-slot, and resolved material color must not filter or boost automatic body candidates. Explicit body flags always win.
+Each contacting part pair becomes one independent interface record containing
+the two recognized parts, the boundary loops and shared-edge count, the tenon
+part, the mortise part, both local inward directions, and the evidence used to
+choose the tenon side. The side whose geometric inward vector aligns more
+strongly with the line toward the other part is selected as the tenon. If the
+alignment scores differ by no more than 0.05, the smaller recognized surface
+region is selected; exact ties use part index for deterministic output.
 
-## Structural Evidence and Processing Mode
+The stage artifact is `04_assembly_plan.json`, schema
+`contact-interface-plan/v1`. Its `interfaces` list has no global parent or
+body identity, so one part may be the tenon at one interface and the mortise at
+another. The direction evidence is explicit for later review and consumption.
 
-Measure each component independently. Never infer structure from color name alone.
+Stages 05 and later still contain their previous recursive consumers and have
+not yet been migrated to this interface-list contract. They are not invoked
+when stopping after Stage 04.
 
-Measure:
+## Legacy Downstream Stages (Not Yet Migrated)
 
-- area-weighted normal resultant;
-- balance between opposite-facing normal clusters;
-- separation of those clusters along the dominant normal;
-- component diagonal relative to the source model;
-- largest boundary-loop span relative to the source model.
-
-Treat those measurements only as body-selection evidence. Mark a strong structural separator candidate when both conditions hold:
-
-1. removing the candidate from the current complete shell leaves at least two meaningful connected shell regions; and
-2. the candidate has at least two large structural shared-boundary interfaces to other recognized parts.
-
-Count a neighboring part only when it has at least 25% of the candidate's face count and shares at least 32 source edges. This filters small decorative inserts while retaining structural peers. Record every shared interface, thresholds, and gate result, then use the evidence to penalize or exclude the candidate from automatic body selection. It never creates a geometry mode: the selected body is `body`; every other part is `inward`.
-
-
-## Recursive Parent Inference
-
-Default to `recursive-minimal`:
-
-1. Treat the current complete piece as a local assembly.
-2. Identify its local body and direct child subassemblies from recognized exterior boundaries.
-3. Compute the root local body cut and direct children as the first complete assembly state.
-4. Serialize every direct child as an independent colored 3MF in the parent step, preserving triangle colors and filament-slot meanings.
-5. Traverse pending child subassemblies in deterministic depth-first preorder.
-6. Reload the exact standalone child 3MF emitted by its parent, consume that pending subassembly, and replace it with its local body cut plus direct children.
-7. Keep cumulative 3MF packages as complete-state audits only; never use them as recursive child inputs.
-8. Reject missing, already expanded, skipped-parent, color-changed, or descendant-provenance-mismatched targets.
-9. Flatten local bodies and leaves into separate final objects.
-
-Use the final recursive state as the final mesh source. Do not regenerate all final parts in an unrelated component-index loop.
-
-Keep structural evidence independent from parent inference. After selecting the root body, infer one ordinary inward-recursive tree across all recognized components.
+The recursive debug and inward-geometry implementation below still describes
+Stages 05 and later. It is not part of Stage 04 and is not invoked when the
+pipeline stops after writing the pairwise contact plan.
 
 ## Recursive Debug Trace
 

@@ -49,8 +49,6 @@ class BoundarySnapshotBuilder:
     ) -> RecognizedBoundaries:
         component_loops: list[tuple[tuple[int, ...], ...]] = []
         component_loop_points: list[tuple[tuple[tuple[float, float, float], ...], ...]] = []
-        source_component_loops: list[tuple[tuple[int, ...], ...]] = []
-        source_component_loop_points: list[tuple[tuple[tuple[float, float, float], ...], ...]] = []
         simplification_records: list[dict] = []
         excluded_components: list[dict] = []
         digest = hashlib.sha256()
@@ -60,16 +58,10 @@ class BoundarySnapshotBuilder:
             )
             raw_loops = tuple(
                 tuple(int(global_vertex_ids[int(local_id)]) for local_id in loop)
-                for loop in boundary_loops(local_faces)
-            )
-            raw_point_loops = tuple(
-                tuple(tuple(float(value) for value in vertices[vertex_id]) for vertex_id in loop)
-                for loop in raw_loops
+                for loop in boundary_loops(local_faces, _local_vertices)
             )
             loops_for_component = []
             points_for_component = []
-            retained_source_loops = []
-            retained_source_point_loops = []
             loop_perimeters = [
                 float(np.linalg.norm(
                     np.roll(np.asarray(vertices[np.asarray(loop, dtype=np.int64)]), -1, axis=0)
@@ -82,6 +74,22 @@ class BoundarySnapshotBuilder:
                 source_points = np.asarray(vertices[source_ids], dtype=np.float64)
                 perimeter = loop_perimeters[loop_index - 1]
                 span = float(np.max(np.ptp(source_points, axis=0))) if len(source_points) else 0.0
+                if (
+                    span >= MINIMUM_BOUNDARY_LOOP_SPAN_MM
+                    and _is_geometrically_degenerate_loop(source_points)
+                ):
+                    simplification_records.append({
+                        "component_index": component_index,
+                        "loop_index": loop_index,
+                        "status": "filtered",
+                        "reason": "geometrically_degenerate_boundary_loop",
+                        "source_vertex_count": int(len(source_ids)),
+                        "simplified_vertex_count": 0,
+                        "retained_fraction": float(retained_fraction),
+                        "perimeter_mm": perimeter,
+                        "span_mm": span,
+                    })
+                    continue
                 if span < MINIMUM_BOUNDARY_LOOP_SPAN_MM:
                     simplification_records.append({
                         "component_index": component_index,
@@ -132,7 +140,9 @@ class BoundarySnapshotBuilder:
                     })
                     continue
                 simplified_ids = source_ids[retained]
-                simplified_points = np.asarray(vertices[simplified_ids], dtype=np.float64)
+                simplified_points = _taubin_smooth_closed_loop(
+                    np.asarray(vertices[simplified_ids], dtype=np.float64)
+                )
                 record = {
                     "component_index": component_index,
                     "loop_index": loop_index,
@@ -146,10 +156,10 @@ class BoundarySnapshotBuilder:
                     ),
                     "perimeter_mm": perimeter,
                     "span_mm": span,
+                    "smoothing_algorithm": "taubin_closed_loop",
+                    "smoothing_iterations": 6,
                 }
                 simplification_records.append(record)
-                retained_source_loops.append(source_loop)
-                retained_source_point_loops.append(raw_point_loops[loop_index - 1])
                 loops_for_component.append(tuple(int(value) for value in simplified_ids))
                 points_for_component.append(tuple(
                     tuple(float(value) for value in point)
@@ -158,9 +168,6 @@ class BoundarySnapshotBuilder:
             loops = tuple(loops_for_component)
             point_loops = tuple(points_for_component)
             digest.update(np.asarray([component_index], dtype=np.int64).tobytes())
-            for loop in raw_loops:
-                digest.update(np.asarray(loop, dtype=np.int64).tobytes())
-                digest.update(b"\1")
             for loop in loops:
                 digest.update(np.asarray(loop, dtype=np.int64).tobytes())
                 digest.update(b"\0")
@@ -185,23 +192,13 @@ class BoundarySnapshotBuilder:
                 continue
             component_loops.append(loops)
             component_loop_points.append(point_loops)
-            # Keep the unsimplified topology only for accepted rings. This keeps
-            # downstream seam planning from resurrecting discarded micro-loops.
-            source_component_loops.append(tuple(retained_source_loops))
-            source_component_loop_points.append(tuple(retained_source_point_loops))
         for point_loops in component_loop_points:
             for loop_points in point_loops:
                 digest.update(np.asarray(loop_points, dtype=np.float64).tobytes())
                 digest.update(b"\0")
-        for point_loops in source_component_loop_points:
-            for loop_points in point_loops:
-                digest.update(np.asarray(loop_points, dtype=np.float64).tobytes())
-                digest.update(b"\1")
         return RecognizedBoundaries(
             component_loops=tuple(component_loops),
             component_loop_points=tuple(component_loop_points),
-            source_component_loops=tuple(source_component_loops),
-            source_component_loop_points=tuple(source_component_loop_points),
             source_vertex_count=int(len(vertices)),
             source_face_count=int(len(faces)),
             fingerprint=digest.hexdigest(),
@@ -216,50 +213,95 @@ def _remove_isolated_spikes(points: np.ndarray) -> np.ndarray:
     retained = list(range(len(values)))
     maximum_removals = max(1, int(len(values) * 0.02))
     removed = 0
-    for _pass in range(4):
+    for _pass in range(maximum_removals):
         if len(retained) <= 3 or removed >= maximum_removals:
             break
         current = values[np.asarray(retained, dtype=np.int64)]
         edges = np.linalg.norm(np.roll(current, -1, axis=0) - current, axis=1)
-        candidates = []
-        for index, point in enumerate(current):
-            if len(current) <= 7:
-                break
-            previous = current[(index - 1) % len(current)]
-            following = current[(index + 1) % len(current)]
-            chord = following - previous
-            chord_squared = float(np.dot(chord, chord))
-            if chord_squared <= 1e-18:
-                deviation = float(np.linalg.norm(point - previous))
-                chord_length = 0.0
-            else:
-                fraction = float(np.clip(np.dot(point - previous, chord) / chord_squared, 0.0, 1.0))
-                deviation = float(np.linalg.norm(point - (previous + fraction * chord)))
-                chord_length = float(np.sqrt(chord_squared))
-            incoming = float(edges[(index - 1) % len(edges)])
-            outgoing = float(edges[index])
-            local_reference = [
-                float(edges[(index - 4) % len(edges)]),
-                float(edges[(index - 3) % len(edges)]),
-                float(edges[(index + 1) % len(edges)]),
-                float(edges[(index + 2) % len(edges)]),
-            ]
-            local_scale = float(np.median([length for length in local_reference if length > 1e-12]) or 0.0)
-            if local_scale <= 1e-9:
-                continue
-            path_length = incoming + outgoing
-            if (
-                deviation > max(0.02, 4.0 * local_scale)
-                and path_length > 4.0 * local_scale
-                and path_length > 2.5 * max(chord_length, 1e-9)
-            ):
-                candidates.append((deviation / local_scale, index))
-        if not candidates:
+        if len(current) <= 7:
             break
-        _, index_to_remove = max(candidates)
+        previous = np.roll(current, 1, axis=0)
+        following = np.roll(current, -1, axis=0)
+        chord = following - previous
+        chord_squared = np.einsum("ij,ij->i", chord, chord)
+        projection = np.einsum("ij,ij->i", current - previous, chord)
+        fraction = np.zeros(len(current), dtype=np.float64)
+        valid_chords = chord_squared > 1e-18
+        fraction[valid_chords] = np.clip(
+            projection[valid_chords] / chord_squared[valid_chords], 0.0, 1.0
+        )
+        nearest = previous + fraction[:, None] * chord
+        deviation = np.linalg.norm(current - nearest, axis=1)
+        deviation[~valid_chords] = np.linalg.norm(
+            current[~valid_chords] - previous[~valid_chords], axis=1
+        )
+        chord_length = np.sqrt(chord_squared)
+        incoming = np.roll(edges, 1)
+        outgoing = edges
+        local_reference = np.stack((
+            np.roll(edges, 4), np.roll(edges, 3),
+            np.roll(edges, -1), np.roll(edges, -2),
+        ), axis=1)
+        local_reference[local_reference <= 1e-12] = np.nan
+        local_scale = np.nanmedian(local_reference, axis=1)
+        local_scale = np.nan_to_num(local_scale, nan=0.0)
+        path_length = incoming + outgoing
+        candidate_mask = (
+            (local_scale > 1e-9)
+            & (deviation > np.maximum(0.02, 4.0 * local_scale))
+            & (path_length > 4.0 * local_scale)
+            & (path_length > 2.5 * np.maximum(chord_length, 1e-9))
+        )
+        candidate_indices = np.flatnonzero(candidate_mask)
+        if not len(candidate_indices):
+            break
+        scores = deviation[candidate_indices] / local_scale[candidate_indices]
+        index_to_remove = int(candidate_indices[int(np.argmax(scores))])
         retained.pop(index_to_remove)
         removed += 1
     return np.asarray(retained, dtype=np.int64)
+
+
+def _is_geometrically_degenerate_loop(points: np.ndarray) -> bool:
+    """Reject graph cycles that collapse to a line in source geometry.
+
+    Vertex-only boundary graphs can create tiny closed walks along collinear
+    T-junction subdivisions. They are topological cycles but have no enclosed
+    interface area, and rendering them produces the short dangling strokes
+    visible in recognition previews.
+    """
+    values = np.asarray(points, dtype=np.float64)
+    if len(values) < 3:
+        return True
+    centered = values - values.mean(axis=0)
+    eigenvalues = np.linalg.eigvalsh(centered.T @ centered)
+    largest = float(eigenvalues[-1])
+    second = float(eigenvalues[-2])
+    return largest <= 1e-18 or second <= largest * 1e-8
+
+
+def _taubin_smooth_closed_loop(
+    points: np.ndarray,
+    *,
+    iterations: int = 6,
+    relaxation: float = 0.35,
+    inflation: float = -0.36,
+) -> np.ndarray:
+    """Smooth a cyclic polyline in place conceptually, preserving sample count.
+
+    Taubin's positive/negative Laplacian passes reduce high-frequency contour
+    noise while counteracting the shrinkage of ordinary Laplacian smoothing.
+    Every input sample remains represented by one output point.
+    """
+    smoothed = np.asarray(points, dtype=np.float64).copy()
+    if len(smoothed) < 3:
+        return smoothed
+    for _ in range(max(0, int(iterations))):
+        neighbors = (np.roll(smoothed, 1, axis=0) + np.roll(smoothed, -1, axis=0)) * 0.5
+        smoothed += float(relaxation) * (neighbors - smoothed)
+        neighbors = (np.roll(smoothed, 1, axis=0) + np.roll(smoothed, -1, axis=0)) * 0.5
+        smoothed += float(inflation) * (neighbors - smoothed)
+    return smoothed
 
 
 def _equal_arc_sample_indices(points: np.ndarray, sample_count: int) -> np.ndarray:

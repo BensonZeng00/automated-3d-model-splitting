@@ -18,8 +18,6 @@ from .reporting import *
 from .source_region_review import *
 from .domain import PlanarArcRetopologyConfig, PlanarArcRetopologyContext, SplitConfig
 from .recursive_preflight import FullTreePreflightError, FullTreePreflightService
-from .explicit_merge import merge_body_components, parse_part_group
-from .interface_retreat import apply_visual_interface_retreats
 from .uniform_fit import scale_finished_insert
 from .guided_internal_cut import GuidedInternalCutSpec
 from .boundary_review import BoundaryReviewService, owners_from_components
@@ -57,8 +55,6 @@ class SplitPipeline:
         self.parser = parser
         self.reader = ThreeMFReader()
         self.recognizer = PartRecognizer()
-        self.body_selector = BodySelector()
-        self.assembly_planner = AssemblyPlanner()
         self.direction_planner = InwardDirectionPlanner()
         self.cap_planner = AdaptiveCapPlanner()
         self.triangulator = BoundaryTriangulator()
@@ -104,10 +100,6 @@ class SplitPipeline:
         insert_shrink_mm, socket_overcut_mm = clearance_offsets(args.clearance_mode, args.fit_clearance_mm)
         top_edge_clearance_mm = visible_top_edge_clearance(insert_shrink_mm)
         force_flat_part_indices = parse_part_index_tokens(args.force_flat_parts)
-        try:
-            part_mode_overrides = parse_part_mode_overrides(args.part_mode_overrides)
-        except ValueError as exc:
-            parser.error(str(exc))
 
         output_path = default_output_3mf(input_path, args.output)
         artifact_root = (
@@ -237,7 +229,6 @@ class SplitPipeline:
         recognition_token_colors, exterior_color_filter = recognition_colors_from_exterior(
             colors,
             visible_faces,
-            body_color_override=args.body_color,
             faces=faces,
         )
         runtime_log(
@@ -435,51 +426,6 @@ class SplitPipeline:
         # an ambiguous seam later, but it must not reassign source faces.
         # Ownership and semantic classification must never repaint source.
         recursive_face_colors = list(colors)
-        explicit_body_merge = None
-        explicit_body_index = None
-        if args.merge_body_parts:
-            try:
-                requested_merge_indices = parse_part_group(args.merge_body_parts)
-                merge_result = merge_body_components(
-                    vertices,
-                    faces,
-                    components,
-                    requested_merge_indices,
-                )
-            except ValueError as exc:
-                parser.error(str(exc))
-            components = merge_result.components
-            explicit_body_index = int(merge_result.body_index)
-            explicit_body_merge = merge_result.record
-            explicit_body_component = components[explicit_body_index - 1]
-            components, recognized_boundaries, merge_exclusions = (
-                self.boundary_snapshot_builder.build_with_component_filter(
-                    vertices, faces, components
-                )
-            )
-            recognition_exclusions.extend(merge_exclusions)
-            explicit_body_index = next(
-                (
-                    index
-                    for index, component in enumerate(components, start=1)
-                    if component is explicit_body_component
-                ),
-                None,
-            )
-            if explicit_body_index is None:
-                parser.error("recognition boundary filtering removed the explicitly merged body")
-            explicit_body_merge["effective_body_index"] = explicit_body_index
-            runtime_log(
-                "主体",
-                "explicit_body_merge_done",
-                "已将指定识别部件合并为保留逐面的多材料主体",
-                requested_parts=explicit_body_merge[
-                    "requested_original_part_indices"
-                ],
-                effective_body_index=explicit_body_index,
-                effective_components=int(len(components)),
-                per_face_materials_preserved=True,
-            )
         runtime_log(
             "识别",
             "component_connectivity_done",
@@ -514,119 +460,7 @@ class SplitPipeline:
                 flush=True,
             )
         model_center = vertices.mean(axis=0)
-        runtime_log(
-            "主体",
-            "body_evidence_start",
-            "开始测量结构分隔证据并选择根主体",
-            components=int(len(components)),
-        )
-        body_separator_evidence = body_selection_separator_evidence(
-            vertices=vertices,
-            faces=faces,
-            components=components,
-            model_center=model_center,
-            min_faces=(args.small_region_review_max_faces + 1),
-        )
-        excluded_auto_body_indices = {
-            int(index)
-            for index, record in body_separator_evidence.items()
-            if record.get("exclude_from_automatic_body")
-        }
-        body_component = choose_body_component(
-            components,
-            args.body_strategy,
-            args.body_color,
-            explicit_body_index if explicit_body_index is not None else args.body_index,
-            excluded_auto_indices=excluded_auto_body_indices,
-            auto_selection_evidence=body_separator_evidence,
-        )
-        body_index = component_identity_index(components, body_component)
-        runtime_log(
-            "主体",
-            "body_evidence_done",
-            "根主体选择完成",
-            body_index=body_index,
-            excluded_separator_candidates=sorted(excluded_auto_body_indices),
-        )
-        progress(
-            "主体",
-            "已在排除强结构分隔候选后选择根主体",
-            body=None if body_index is None else f"P{body_index:02d}",
-            body_candidate_score=(
-                None
-                if body_index is None
-                else round(float(body_separator_evidence[body_index]["body_candidate_score"]), 6)
-            ),
-            excluded_separator_candidates=[f"P{index:02d}" for index in sorted(excluded_auto_body_indices)],
-        )
-        components, interface_retreat_records = apply_visual_interface_retreats(
-            vertices,
-            faces,
-            components,
-            visual_semantics.get("interface_retreats", []),
-            visual_semantic_min_confidence,
-        )
-        if interface_retreat_records["applied"]:
-            requested_body_face_ids = None
-            requested_body_index = (
-                explicit_body_index
-                if explicit_body_index is not None
-                else args.body_index
-            )
-            if requested_body_index is not None and 1 <= int(requested_body_index) <= len(components):
-                requested_body_face_ids = np.asarray(
-                    components[int(requested_body_index) - 1].global_faces,
-                    dtype=np.int64,
-                )
-            previous_component_count = len(components)
-            components, recognized_boundaries, retreat_exclusions = (
-                self.boundary_snapshot_builder.build_with_component_filter(
-                    vertices, faces, components
-                )
-            )
-            recognition_exclusions.extend(retreat_exclusions)
-            if len(components) != previous_component_count and requested_body_face_ids is not None:
-                requested_faces = set(map(int, requested_body_face_ids))
-                overlap_counts = [
-                    len(requested_faces.intersection(map(int, component.global_faces)))
-                    for component in components
-                ]
-                if not overlap_counts or max(overlap_counts) == 0:
-                    parser.error("recognition boundary filtering removed the requested body region")
-                requested_body_index = int(np.argmax(overlap_counts)) + 1
-                if explicit_body_index is not None:
-                    explicit_body_index = requested_body_index
-                    if explicit_body_merge is not None:
-                        explicit_body_merge["effective_body_index"] = explicit_body_index
-            body_separator_evidence = body_selection_separator_evidence(
-                vertices=vertices,
-                faces=faces,
-                components=components,
-                model_center=model_center,
-                min_faces=(args.small_region_review_max_faces + 1),
-            )
-            excluded_auto_body_indices = {
-                int(index)
-                for index, record in body_separator_evidence.items()
-                if record.get("exclude_from_automatic_body")
-            }
-            body_component = choose_body_component(
-                components,
-                args.body_strategy,
-                args.body_color,
-                requested_body_index,
-                excluded_auto_indices=excluded_auto_body_indices,
-                auto_selection_evidence=body_separator_evidence,
-            )
-            body_index = component_identity_index(components, body_component)
-            runtime_log(
-                "切面内收",
-                "interface_retreat_done",
-                "已按视觉语义将局部薄边表皮转移到子件，源材料保持不变",
-                applied=interface_retreat_records["applied"],
-                rejected=interface_retreat_records["rejected"],
-            )
-        recognition = component_recognition_records(vertices, faces, components, body_component, colors)
+        recognition = component_recognition_records(vertices, faces, components, colors)
         recognition = annotate_recognition_with_visual_semantics(recognition, visual_semantics.get("parts", {}))
         confirmed_tiny_labels = {
             int(record["source_min_face_index"]): record
@@ -644,41 +478,17 @@ class SplitPipeline:
                 confirmed_tiny.get("visual_confidence", "UNKNOWN")
             )
             record["region_review_user_confirmed"] = True
-        invalid_mode_override_indices = sorted(index for index in part_mode_overrides if index < 1 or index > len(components))
-        if invalid_mode_override_indices:
-            parser.error(
-                "--part-mode-overrides references unknown parts: "
-                + ", ".join(f"P{index:02d}" for index in invalid_mode_override_indices)
-            )
-        runtime_log(
-            "分类",
-            "processing_classification_start",
-            "开始分类主体和内嵌部件处理模式",
-            components=int(len(components)),
-        )
-        processing_classifications = classify_component_processing_modes(
-            vertices=vertices,
-            faces=faces,
-            components=components,
-            body_component=body_component,
-            model_center=model_center,
-            global_mode=args.part_processing_mode,
-            overrides=part_mode_overrides,
-            accept_ambiguous_inward=args.accept_ambiguous_inward,
-            precomputed_structural_evidence=body_separator_evidence,
-        )
-        runtime_log(
-            "分类",
-            "processing_classification_done",
-            "部件处理模式分类完成",
-            body_index=body_index,
-            inward_parts=int(
-                sum(
-                    record["selected_processing_mode"] == "inward"
-                    for record in processing_classifications.values()
-                )
-            ),
-        )
+        processing_classifications = {
+            index: {
+                "part_index": index,
+                "selected_processing_mode": "not_applicable_to_interface_planning",
+                "suggested_processing_mode": "not_applicable_to_interface_planning",
+                "processing_mode_status": "parent_child_processing_modes_removed",
+                "processing_mode_confidence": 1.0,
+                "processing_mode_evidence": {},
+            }
+            for index in range(1, len(components) + 1)
+        }
         for record in recognition:
             record["recognition_basis"] = "exterior-visible"
             record["occluded_paint_excluded"] = True
@@ -789,180 +599,35 @@ class SplitPipeline:
             raise SystemExit(4)
         if args.recognize_only or getattr(args, "stop_after_stage", None) == "recognize":
             return
-        processing_mode_by_part = {
-            index: str(classification["selected_processing_mode"])
-            for index, classification in processing_classifications.items()
-        }
+        from .contact_interface_planner import plan_contact_interfaces
+
         runtime_log(
-            "装配",
-            "assembly_plan_start",
-            "开始构建共享边、边界环和递归装配树",
-            strategy=args.assembly_tree_strategy,
+            "装配规划",
+            "contact_interface_plan_start",
+            "根据识别冻结的简化边界规划接触零件间的榫卯关系",
             components=int(len(components)),
+            boundary_fingerprint=recognized_boundaries.fingerprint,
         )
-        component_adjacency = component_shared_edges(faces, components)
-        boundary_neighbor_lookup = component_boundary_neighbor_lookup(faces, components)
-        boundary_loop_neighbors = [
-            record
-            for index, component in enumerate(components, start=1)
-            for record in component_boundary_loop_neighbors(
-                vertices, faces, component, index, boundary_neighbor_lookup,
-                recognized_boundaries.source_loops_for_component(index),
-            )
-        ]
-        recursive_minimal_reparents: list[dict] = []
-        recursive_assembly_enabled = args.assembly_mode in {"tree", "flat"}
-        if recursive_assembly_enabled:
-            assembly_parents, assembly_children, assembly_records = self.assembly_planner.build_tree(
-                components,
-                body_component,
-                component_adjacency,
-                args.min_assembly_shared_edges,
-                args.assembly_tree_strategy,
-                boundary_loop_neighbors,
-            )
-            (
-                assembly_parents,
-                assembly_children,
-                assembly_records,
-                mixed_boundary_reparents,
-                boundary_loop_neighbors,
-            ) = refine_mixed_boundary_parents(
-                boundary_loop_neighbors,
-                component_adjacency,
-                assembly_parents,
-                assembly_records,
-                args.min_assembly_shared_edges,
-            )
-            (
-                assembly_parents,
-                assembly_children,
-                assembly_records,
-                cycle_breaks,
-            ) = break_assembly_parent_cycles(
-                components,
-                body_index,
-                component_adjacency,
-                assembly_parents,
-                assembly_records,
-                args.min_assembly_shared_edges,
-            )
-            (
-                assembly_parents,
-                assembly_children,
-                assembly_records,
-                shared_loop_reparents,
-            ) = reparent_shared_parent_child_loops(
-                assembly_parents,
-                assembly_records,
-                boundary_loop_neighbors,
-                component_adjacency,
-            )
-            mixed_boundary_reparents = mixed_boundary_reparents + shared_loop_reparents
-            if args.assembly_tree_strategy == "recursive-minimal":
-                (
-                    assembly_parents,
-                    assembly_children,
-                    assembly_records,
-                    recursive_minimal_reparents,
-                ) = refine_recursive_minimal_parents(
-                    components,
-                    component_adjacency,
-                    assembly_parents,
-                    assembly_records,
-                    boundary_loop_neighbors,
-                    args.min_assembly_shared_edges,
-                )
-                (
-                    assembly_parents,
-                    assembly_children,
-                    assembly_records,
-                    recursive_cycle_breaks,
-                ) = break_assembly_parent_cycles(
-                    components,
-                    body_index,
-                    component_adjacency,
-                    assembly_parents,
-                    assembly_records,
-                    args.min_assembly_shared_edges,
-                )
-                cycle_breaks = cycle_breaks + recursive_cycle_breaks
-                (
-                    assembly_parents,
-                    assembly_children,
-                    assembly_records,
-                    mixed_parent_loop_groups,
-                ) = group_mixed_parent_loop_children(
-                    components,
-                    component_adjacency,
-                    assembly_parents,
-                    assembly_records,
-                    boundary_loop_neighbors,
-                )
-                mixed_boundary_reparents = (
-                    mixed_boundary_reparents + mixed_parent_loop_groups
-                )
-                runtime_log(
-                    "装配诊断",
-                    "mixed_parent_loop_grouping_done",
-                    "混合父边界环子装配分组完成",
-                    parent_map={
-                        str(int(child_index)): (
-                            None if parent_index is None else int(parent_index)
-                        )
-                        for child_index, parent_index in sorted(assembly_parents.items())
-                    },
-                    grouping_changes=mixed_parent_loop_groups,
-                )
-        else:
-            assembly_parents = {
-                index: (None if index == body_index else body_index)
-                for index in range(1, len(components) + 1)
-            }
-            assembly_children = collections.defaultdict(list)
-            for child_index, parent_index in assembly_parents.items():
-                if parent_index is not None:
-                    assembly_children[parent_index].append(child_index)
-            assembly_children = {
-                parent: sorted(children) for parent, children in assembly_children.items()
-            }
-            assembly_records = [
-                {
-                    "part_index": index,
-                    "parent_index": parent_index,
-                    "shared_edges_to_parent": 0,
-                    "reason": "legacy_flat_mode_direct_body_insert" if parent_index is not None else "body_root",
-                }
-                for index, parent_index in sorted(assembly_parents.items())
-            ]
-            mixed_boundary_reparents = []
-            cycle_breaks = []
-        visual_semantic_parent_overrides = {"applied": [], "rejected": []}
-        if recursive_assembly_enabled and visual_semantics.get("parent_relations"):
-            (
-                assembly_parents,
-                assembly_children,
-                assembly_records,
-                visual_semantic_parent_overrides,
-            ) = apply_visual_semantic_parent_relations(
-                components,
-                component_adjacency,
-                assembly_parents,
-                assembly_records,
-                visual_semantics.get("parent_relations", []),
-                visual_semantic_min_confidence,
-            )
+        contact_interface_plan = plan_contact_interfaces(
+            vertices=vertices,
+            faces=faces,
+            components=components,
+            recognized_boundaries=recognized_boundaries,
+            model_center=model_center,
+            recognition_records=recognition,
+        )
+        stage_artifacts.write_json("04_assembly_plan", contact_interface_plan)
         runtime_log(
-            "装配",
-            "assembly_plan_done",
-            "递归装配树和执行顺序已确定",
-            strategy=args.assembly_tree_strategy,
-            parent_relations=int(
-                sum(parent is not None for parent in assembly_parents.values())
-            ),
-            internal_steps=int(
-                sum(bool(children) for children in assembly_children.values())
-            ),
+            "装配规划",
+            "contact_interface_plan_done",
+            "榫卯关系规划完成",
+            interfaces=int(contact_interface_plan["interface_count"]),
+        )
+        if getattr(args, "stop_after_stage", None) == "assembly":
+            return
+        raise RuntimeError(
+            "Stage 05+ still consumes the removed parent-tree contract; "
+            "run with --stop-after-stage assembly until downstream stages are migrated."
         )
         effective_fit_clearance_by_part: dict[int, float] = {}
         clearance_records: list[dict] = []

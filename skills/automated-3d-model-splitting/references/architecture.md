@@ -10,14 +10,10 @@
 
 1. read and normalize the source project;
 2. recognize connected painted source regions, review <=100-face noise candidates, 101–999-face small-region candidates, and long strips, then preserve every confirmed noise/part/uncertain region for normal interface planning;
-3. select the root body from geometry and separator evidence;
-4. infer the recursive-minimal assembly tree and deterministic depth-first execution steps;
-5. plan safe inward directions and adaptive caps;
-6. preflight every recursive interface before the first expensive Boolean;
-7. execute strict tree recursion, reloading each pending subassembly from the independent colored 3MF emitted by its parent step while replacing one active subassembly at a time;
-8. compare source and assembled generated surfaces across deterministic depth views;
-9. write the temporary grouped multi-object 3MF;
-10. reload, validate, and atomically publish the result.
+3. use the recognition-frozen simplified boundaries to enumerate every contacting part pair and plan tenon/mortise sides plus inward directions;
+4. stop after the Stage 04 relation artifact until later stages are migrated to the pairwise relation contract;
+Stages 05 and later are not invoked until their consumers are migrated from
+the removed parent-tree contract to `contact-interface-plan/v1`.
 
 The pipeline may coordinate policy but must not duplicate geometry, XML, ZIP, or validation algorithms.
 
@@ -80,12 +76,8 @@ Prefer these explicit records when data crosses stage boundaries. Do not introdu
 - `VendorPaintDecoder` restores composite `paint_color` subdivision streams.
 - `PartRecognizer` groups material-equivalent, edge-connected exterior paint.
 - `source_region_review.py` renders deterministic whole-model and local-zoom PNG sheets for every face-count or long-strip candidate, writes the classification manifest/template, and validates complete user-confirmed noise/part/uncertain decisions without changing source geometry.
-- `explicit_merge.py` applies user-authorized recognition-space body merges,
-  preserves the first member as the body identity, recomputes component
-  geometry, and records the original-to-effective index mapping. Per-face
-  material arrays remain owned by the pipeline and are not recolored.
-- `BodySelector` scores body candidates and excludes definite structural separators.
-- `AssemblyPlanner` infers and repairs the recursive-minimal parent tree, plans depth-first steps, and validates state transitions.
+- `contact_interface_planner.py` reads only retained simplified boundary loops, recovers the represented source-edge chains, and emits one independent tenon/mortise relation per contacting pair. It does not select a body or infer a tree.
+- `assembly.py` still contains legacy consumers for later stages; Stage 04 does not call its parent-tree planner.
 - `InwardDirectionPlanner` creates locally safe, smoothed inward directions.
 - `HiddenInterfacePlanner` proposes deterministic parent-interior direction fields only when the baseline interface is thinner than the 0.45 mm load-bearing minimum. Parent-thickness ray checks use at most 768 equal-arc samples from the ordered boundary inputs; cap geometry still uses the complete boundary. No complete-boundary thickness audit follows the sampled depth decision.
 - `GuidedInternalCutPlanner` converts a high-confidence image-guided internal-section constraint into a symmetric child/socket `CapDecision`. It localizes entry inset to measured thin arcs, ranks bounded parent-interior direction and plane-shift candidates, locks the already-retopologized visible rim, and emits the source-id fit ring and diagnostics consumed unchanged by both sides.

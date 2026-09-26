@@ -89,15 +89,13 @@ Whole-tree preflight plans every recursive interface before the first expensive 
 
 Before either recognition profile runs, vendor composite `paint_color` streams are decoded into their actual recursively split leaf faces. The parser conforms T-joints along internal and neighboring source-triangle edges, then reports source faces, decoded leaves, conformed faces, leaf states, and parse failures. Review face thresholds apply to restored leaf-face connectivity, never to raw composite token strings.
 
-## Processing Mode
+## Stage 04 Contact Relations
 
-- `--part-processing-mode auto|inward`: default `auto`; both use inward geometry for every non-body part.
-- `--part-mode-overrides P10=inward`: legacy-compatible inward-only override.
-- `--accept-ambiguous-inward`: retained compatibility flag; geometry is already inward-only.
-
-Automatic body selection records normal coherence, opposite-normal balance, dominant-normal separation, component span, loop span, through-like score, shell-removal balance, and large structural interfaces. Through likelihood contributes only to strong-separator evidence; it is not an unconditional penalty after a candidate fails the balanced shell-split gate. These measurements affect only body choice; they never create a through geometry path.
-
-`auto-score` compares every eligible component regardless of raw paint token, resolved color, filament slot, or `DEFAULT` status. Color filtering is allowed only through an explicit `--body-color` override.
+Stage 04 no longer selects a body or infers parent-child relationships. It
+consumes the simplified boundaries frozen by `recognize` and writes one
+independent tenon/mortise relation for each contacting pair to
+`04_assembly_plan.json`. Run with `--stop-after-stage assembly` while later
+stages are being migrated to this relation list.
 
 ## Components and Colors
 
@@ -120,7 +118,6 @@ The default inward planner automatically invokes a hidden-interface fallback whe
 - `--max-extension-mm 3.0`, `--max-planar-travel-mm 10.0`: preferred depth and measured safety ceiling.
 - `--cap-mode flat|adaptive|tilted|offset`, `--nested-cap-mode inherit|flat|adaptive|tilted|offset`.
 - `--lead-in-mm 0.60`: backing/peg geometry, not socket enlargement.
-- `--assembly-mode tree|flat|legacy-flat`, `--assembly-tree-strategy recursive-minimal|strongest-path`.
 - `--output-layout assembly|separate-items`, default assembly.
 
 All pre-cut fit/floor/sibling clearances are zero. No fit-allocation mode,

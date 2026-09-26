@@ -499,14 +499,18 @@ def face_edges_among_vertices(
     return result
 
 
-def boundary_cycles_from_edges(edges: np.ndarray) -> list[list[int]]:
+def boundary_cycles_from_edges(
+    edges: np.ndarray, vertices: np.ndarray | None = None
+) -> list[list[int]]:
     """Return edge-complete simple cycles from canonical undirected edges.
 
     Painted regions can have several boundary cycles touching at one vertex, so
     the boundary graph may have degree 4 or higher. A greedy previous/next walk
     turns that graph into open paths and then falsely caps the path endpoints.
-    Decompose every even boundary graph into Euler circuits first, then split
-    circuits at repeated vertices into genuine simple cycles.
+    Pair incident edges by straight-through continuation at every vertex, then
+    walk those pairings into simple cycles.  Euler circuits are edge-complete,
+    but an arbitrary neighbor order can splice unrelated contours together at
+    high-degree vertices and create long artificial jumps in a boundary loop.
     """
     adjacency: dict[int, set[int]] = collections.defaultdict(set)
     unused_edges: set[tuple[int, int]] = set()
@@ -515,28 +519,87 @@ def boundary_cycles_from_edges(edges: np.ndarray) -> list[list[int]]:
         adjacency[a].add(b)
         adjacency[b].add(a)
         unused_edges.add((a, b))
-    # A min-heap retains the previous smallest-neighbor traversal without
-    # rescanning a high-degree vertex's complete adjacency set every time the
-    # Euler walk returns to it.  Each directed adjacency entry is discarded at
-    # most once, including the stale copy left after its undirected edge was
-    # consumed from the opposite endpoint.
-    neighbor_heaps = {
-        int(vertex): list(neighbors) for vertex, neighbors in adjacency.items()
-    }
-    for neighbors in neighbor_heaps.values():
-        heapq.heapify(neighbors)
+    if vertices is None:
+        # Callers that only have edge ids retain the established deterministic
+        # topology walk. Geometry-aware contour pairing is used by recognition,
+        # where source coordinates are available.
+        neighbor_heaps = {vertex: list(neighbors) for vertex, neighbors in adjacency.items()}
+        for neighbors in neighbor_heaps.values():
+            heapq.heapify(neighbors)
+        legacy_loops: list[list[int]] = []
+
+        def split_legacy_trail(trail: list[int]) -> None:
+            if len(trail) < 4 or trail[0] != trail[-1]:
+                return
+            path: list[int] = []
+            positions: dict[int, int] = {}
+            for vertex in trail:
+                start_position = positions.get(int(vertex))
+                if start_position is None:
+                    positions[int(vertex)] = len(path)
+                    path.append(int(vertex))
+                    continue
+                cycle = path[start_position:]
+                if len(cycle) >= 3:
+                    legacy_loops.append(cycle)
+                for removed in path[start_position + 1:]:
+                    positions.pop(int(removed), None)
+                path = path[:start_position + 1]
+
+        while unused_edges:
+            start_edge = min(unused_edges)
+            stack = [int(start_edge[0])]
+            trail: list[int] = []
+            while stack:
+                current_vertex = int(stack[-1])
+                candidates = neighbor_heaps.get(current_vertex, [])
+                while candidates and tuple(sorted((current_vertex, int(candidates[0])))) not in unused_edges:
+                    heapq.heappop(candidates)
+                if candidates:
+                    next_vertex = int(heapq.heappop(candidates))
+                    unused_edges.remove(tuple(sorted((current_vertex, next_vertex))))
+                    stack.append(next_vertex)
+                else:
+                    trail.append(int(stack.pop()))
+            split_legacy_trail(list(reversed(trail)))
+        legacy_loops.sort(key=lambda loop: (-len(loop), tuple(loop)))
+        return legacy_loops
+    if any(len(neighbors) % 2 for neighbors in adjacency.values()):
+        # Keep the historical edge-complete walk for malformed odd-degree
+        # graphs; geometric pairings require every incidence to have a mate.
+        return boundary_cycles_from_edges(np.asarray(edges, dtype=np.int64))
+    # Each edge endpoint has exactly one continuation. At an even-degree
+    # vertex, pair the most opposed outgoing directions first: this preserves
+    # the contour that arrives along one side and leaves along the other.
+    continuations: dict[tuple[int, int], tuple[int, int]] = {}
+    for vertex, neighbors in adjacency.items():
+        ordered = sorted(neighbors)
+        if len(ordered) < 2:
+            continue
+        points = np.asarray(vertices, dtype=np.float64)
+        directions = points[np.asarray(ordered, dtype=np.int64)] - points[int(vertex)]
+        lengths = np.linalg.norm(directions, axis=1)
+        valid = lengths > 1e-12
+        normalized = np.zeros_like(directions)
+        normalized[valid] = directions[valid] / lengths[valid, None]
+        candidates = []
+        for left in range(len(ordered)):
+            for right in range(left + 1, len(ordered)):
+                # Smallest dot product is the straightest continuation.
+                candidates.append((float(np.dot(normalized[left], normalized[right])),
+                                   int(ordered[left]), int(ordered[right])))
+        used: set[int] = set()
+        for _score, left, right in sorted(candidates):
+            if left in used or right in used:
+                continue
+            continuations[(int(vertex), left)] = (int(vertex), right)
+            continuations[(int(vertex), right)] = (int(vertex), left)
+            used.add(left)
+            used.add(right)
 
     loops: list[list[int]] = []
 
-    def split_simple_cycles(closed_trail: list[int]) -> None:
-        """Split one Euler trail without repeatedly copying its remainder.
-
-        Removing one repeated-vertex cycle at a time with list slices is
-        quadratic for painted regions containing thousands of boundary loops
-        joined at shared vertices.  Maintain the current simple path and emit
-        a cycle as soon as its closing vertex is observed.  Every trail
-        occurrence is appended and removed at most once.
-        """
+    def append_simple_cycles(closed_trail: list[int]) -> None:
         if len(closed_trail) < 4 or closed_trail[0] != closed_trail[-1]:
             return
         path: list[int] = []
@@ -554,34 +617,34 @@ def boundary_cycles_from_edges(edges: np.ndarray) -> list[list[int]]:
             for removed in path[start_position + 1:]:
                 positions.pop(int(removed), None)
             path = path[:start_position + 1]
-
+    unused_edges = set(unused_edges)
     while unused_edges:
-        start_edge = min(unused_edges)
-        start = int(start_edge[0])
-        stack = [start]
-        circuit: list[int] = []
-        while stack:
-            current = int(stack[-1])
-            candidates = neighbor_heaps.get(current, [])
-            while candidates:
-                next_vertex = int(candidates[0])
-                if tuple(sorted((current, next_vertex))) in unused_edges:
-                    break
-                heapq.heappop(candidates)
-            if candidates:
-                next_vertex = int(heapq.heappop(candidates))
-                unused_edges.remove(tuple(sorted((current, next_vertex))))
-                stack.append(next_vertex)
-            else:
-                circuit.append(int(stack.pop()))
-        circuit.reverse()
-        split_simple_cycles(circuit)
+        first_edge = min(unused_edges)
+        start = (first_edge[0], first_edge[1])
+        current = start
+        trail = [start[0]]
+        while True:
+            left, right = current
+            edge = tuple(sorted((left, right)))
+            if edge not in unused_edges:
+                break
+            unused_edges.remove(edge)
+            trail.append(right)
+            following = continuations.get((right, left))
+            if following is None:
+                break
+            current = (following[0], following[1])
+            if current == start:
+                append_simple_cycles(trail)
+                break
 
     loops.sort(key=lambda loop: (-len(loop), tuple(loop)))
     return loops
 
 
-def boundary_loops(faces: np.ndarray) -> list[list[int]]:
+def boundary_loops(
+    faces: np.ndarray, vertices: np.ndarray | None = None
+) -> list[list[int]]:
     """Return simple cycles along edges used by exactly one supplied face."""
     edge_count: collections.Counter[tuple[int, int]] = collections.Counter()
     for face in faces:
@@ -591,7 +654,7 @@ def boundary_loops(faces: np.ndarray) -> list[list[int]]:
         [edge for edge, count in edge_count.items() if count == 1],
         dtype=np.int64,
     ).reshape((-1, 2))
-    return boundary_cycles_from_edges(boundary_edges)
+    return boundary_cycles_from_edges(boundary_edges, vertices)
 
 
 def average_outward_normal(local_vertices: np.ndarray, local_faces: np.ndarray, component_center: np.ndarray, model_center: np.ndarray) -> np.ndarray:

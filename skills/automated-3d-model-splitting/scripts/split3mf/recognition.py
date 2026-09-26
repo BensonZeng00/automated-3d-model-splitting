@@ -104,17 +104,13 @@ def exterior_visible_face_mask(
 def recognition_colors_from_exterior(
     colors: list[str],
     visible_faces: np.ndarray,
-    body_color_override: str | None = None,
     faces: np.ndarray | None = None,
 ) -> tuple[list[str], dict]:
     """Keep exterior paint and neutralize occluded paint for recognition only."""
     color_array = np.asarray(colors, dtype=object)
     if len(color_array) != len(visible_faces):
         raise ValueError("exterior visibility mask does not match source face count")
-    if body_color_override:
-        base_color = str(body_color_override)
-        base_source = "explicit_body_color"
-    elif np.any(color_array == "DEFAULT"):
+    if np.any(color_array == "DEFAULT"):
         base_color = "DEFAULT"
         base_source = "source_default_token"
     else:

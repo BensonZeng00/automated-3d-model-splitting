@@ -158,28 +158,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--exterior-depth-map-resolution", type=int, default=768, help="Square depth-map resolution per exterior view.")
     parser.add_argument("--exterior-depth-tolerance-mm", type=float, default=0.08, help="Depth tolerance for externally visible recognition faces.")
     parser.add_argument(
-        "--part-processing-mode",
-        choices=["auto", "inward"],
-        default="auto",
-        help="All non-body parts use inward geometry; inward is retained as an explicit compatibility value.",
-    )
-    parser.add_argument(
         "--interface-geometry",
         choices=["local-connector"],
         default="local-connector",
         help=(
             "Build male backing/peg solids, subtract them at full size, then scale the emitted inserts."
         ),
-    )
-    parser.add_argument(
-        "--part-mode-overrides",
-        default="",
-        help="Legacy-compatible inward-only overrides such as P10=inward.",
-    )
-    parser.add_argument(
-        "--accept-ambiguous-inward",
-        action="store_true",
-        help="Resolve uncertain automatic classifications as legacy inward inserts instead of stopping for confirmation.",
     )
     parser.add_argument(
         "--noise-review-max-faces",
@@ -285,35 +269,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Maximum entry-taper depth; actual depth follows the local lateral shrink for an approximately 45-degree slope.",
     )
     parser.add_argument(
-        "--assembly-mode",
-        choices=["tree", "flat", "legacy-flat"],
-        default="tree",
-        help="tree and flat infer recursive subassemblies; legacy-flat makes every non-body part a direct body insert.",
-    )
-    parser.add_argument(
         "--output-layout",
         choices=["assembly", "separate-items"],
         default="assembly",
         help="Write one top-level component assembly by default, or legacy parallel build items.",
-    )
-    parser.add_argument(
-        "--assembly-tree-strategy",
-        choices=["recursive-minimal", "strongest-path"],
-        default="recursive-minimal",
-        help=(
-            "recursive-minimal splits each local body into only its direct child subassemblies, then recurses; "
-            "strongest-path preserves the older global body-rooted path heuristic."
-        ),
-    )
-    parser.add_argument("--min-assembly-shared-edges", type=int, default=20, help="Minimum shared original mesh edges used to infer a parent-child assembly relation.")
-    parser.add_argument(
-        "--assembly-direction-override-dot",
-        type=float,
-        default=0.0,
-        help=(
-            "Only override a nested insert's inward direction toward its inferred parent when the original inward direction "
-            "has dot(parent_direction) below this threshold. Lower values preserve more original geometry."
-        ),
     )
     parser.add_argument("--boundary-target-samples", type=int, default=384)
     parser.add_argument("--boundary-smooth-passes", type=int, default=28)
@@ -380,23 +339,13 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--body-strategy",
-        choices=["auto-score", "largest", "none"],
-        default="auto-score",
-        help="How to choose the body part. Automatic scoring never filters candidates by color.",
-    )
-    parser.add_argument("--body-color", default=None, help="Choose the largest effective component with this color code as body.")
-    parser.add_argument("--body-index", type=int, default=None, help="Choose the 1-based recognized component index as body.")
-    parser.add_argument(
-        "--merge-body-parts",
+        "--visual-semantics-json",
         default=None,
         help=(
-            "Merge two or more pre-merge recognized parts into one multi-material body, "
-            "for example P14+P04. The first part supplies the body identity while all "
-            "source per-face filament assignments are preserved."
+            "JSON mapping every recognized P## region to a visual semantic label; "
+            "recognition review artifacts are not written when any label is missing."
         ),
     )
-    parser.add_argument("--visual-semantics-json", default=None, help="Optional JSON with visual part labels and semantic parent-child relation hints.")
     parser.add_argument("--visual-semantic-min-confidence", default="MED", help="Minimum confidence for applying semantic parent hints: LOW, MED, HIGH, or 0-1.")
     parser.add_argument(
         "--visual-validation-profile",
@@ -489,19 +438,10 @@ def main(argv: list[str] | None = None) -> None:
             parser.error(f"{option} must be between 0 and 1")
     if args.visual_max_local_material_mismatch_pixels < 0:
         parser.error("--visual-max-local-material-mismatch-pixels must be non-negative")
-    if args.debug_recursive_3mf and (
-        args.assembly_mode not in {"tree", "flat"} or args.assembly_tree_strategy != "recursive-minimal"
-    ):
-        parser.error("--debug-recursive-3mf requires tree/flat assembly with recursive-minimal strategy")
     if args.resume != "off" and not args.cache_dir:
         parser.error("--resume requires --cache-dir")
     if args.debug_recursive_3mf and args.resume != "off":
         parser.error("--resume cannot be combined with --debug-recursive-3mf")
-    if args.merge_body_parts and (args.body_index is not None or args.body_color):
-        parser.error(
-            "--merge-body-parts already selects the body and cannot be combined "
-            "with --body-index or --body-color"
-        )
     input_path = Path(args.input).expanduser()
     progress("预检", "检查输入文件和 Python 依赖", input=str(input_path))
     checks = preflight(input_path)

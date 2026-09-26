@@ -20,7 +20,7 @@ from split3mf.assembly import load_visual_semantics
 from split3mf.cli import build_parser
 from split3mf.common import Component, cKDTree, trimesh
 from split3mf.domain import CapDecision
-from split3mf.inward import (
+from split3mf.part_geometry import (
     ParentThicknessProbe,
     boundary_cap_distances,
     classify_body_cut_loop_references,

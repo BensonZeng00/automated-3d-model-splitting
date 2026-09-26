@@ -9,7 +9,7 @@ from split3mf.common import load_core_dependencies
 load_core_dependencies()
 import trimesh
 from split3mf.domain import CapDecision
-from split3mf.inward import remap_cap_decision
+from split3mf.part_geometry import remap_cap_decision
 from split3mf.boundary_correspondence import source_loop_print_match
 from split3mf.surface_preservation import audit_replaced_surface, face_key
 from split3mf.print_tolerance import PrintTolerance, tolerance_scope

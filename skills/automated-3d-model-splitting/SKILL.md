@@ -70,6 +70,8 @@ python scripts/split_painted_3mf.py \
 
 边界统一使用 `--boundary-shape smooth`。阅读 [boundary-smoothing.md](references/boundary-smoothing.md)、[assembly-algorithm.md](references/assembly-algorithm.md) 和 [architecture.md](references/architecture.md) 后再修改接口算法。
 
+拆件流程阶段、输入输出和单步调试工件见 [application-stages.md](references/application-stages.md)。开发或诊断时可使用 `--stop-after-stage` 和 `--stage-artifacts-dir` 查看每个阶段的 JSON/NPZ 结果。
+
 ## CLI 与执行
 
 安装 `requirements.txt` 后先运行：

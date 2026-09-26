@@ -12,7 +12,7 @@ from .package_io import *
 from .selection import *
 from .assembly import *
 from .validation import *
-from .inward import *
+from .part_geometry import *
 from .debug_export import *
 from .reporting import *
 from .source_region_review import *
@@ -31,6 +31,7 @@ from .stage_cache import (
     sha256_file,
 )
 from .semantic_partition import apply_semantic_partitions
+from .application import BoundarySnapshotBuilder, StageArtifactStore
 
 
 def uses_layer_child_cut_references(assembly_mode: str, tree_strategy: str) -> bool:
@@ -58,6 +59,7 @@ class SplitPipeline:
         self.writer = ThreeMFWriter()
         self.validator = ValidationService()
         self.full_tree_preflight = FullTreePreflightService()
+        self.boundary_snapshot_builder = BoundarySnapshotBuilder()
 
     def run(self) -> None:
         args = self.config.namespace
@@ -101,6 +103,14 @@ class SplitPipeline:
             parser.error(str(exc))
 
         output_path = default_output_3mf(input_path, args.output)
+        artifact_root = (
+            Path(getattr(args, "stage_artifacts_dir", None)).expanduser()
+            if getattr(args, "stage_artifacts_dir", None)
+            else output_path.with_name(output_path.stem + "_stages")
+        )
+        stage_artifacts = StageArtifactStore(
+            artifact_root, run_id=getattr(args, "stage_artifacts_run_id", None)
+        )
         runtime_log(
             "输入",
             "source_read_start",
@@ -132,6 +142,21 @@ class SplitPipeline:
             source_unit=project_settings.get("_source_unit", "millimeter"),
             selected_model_entry=project_settings.get("_selected_model_entry"),
         )
+        stage_artifacts.write_arrays(
+            "02_loaded_project",
+            vertices=np.asarray(vertices),
+            faces=np.asarray(faces),
+            face_color_tokens=np.asarray(colors, dtype="U"),
+        )
+        stage_artifacts.write_json(
+            "02_loaded_project_summary",
+            {"source": str(input_path.resolve()),
+             "source_sha256": sha256_file(input_path) if input_path.is_file() else None,
+             "vertex_count": len(vertices), "face_count": len(faces),
+             "project_settings": project_settings},
+        )
+        if getattr(args, "stop_after_stage", None) == "load":
+            return
         retopology_failure_sink = None
         if bool(args.diagnostic_preview):
             failure_output_dir = output_path.parent / (
@@ -415,6 +440,11 @@ class SplitPipeline:
             reviewed_source_regions=int(len(source_region_classifications)),
             source_geometry_changed=False,
         )
+        # This run-scoped immutable snapshot is the only source-mesh boundary
+        # definition consumed by downstream planning stages.
+        recognized_boundaries = self.boundary_snapshot_builder.build(
+            vertices, faces, components
+        )
         print("region_review=" + json.dumps({
             "policy": "preserve-source",
             "review": region_review,
@@ -547,8 +577,35 @@ class SplitPipeline:
             record["occluded_paint_excluded"] = args.recognition_surface_profile == "exterior-visible"
             record.update(processing_classifications[int(record["part_index"])])
         progress("识别", f"识别到 {len(recognition)} 个有效部件", region_review="preserve-source", reviewed=len(source_region_classifications))
+        stage_artifacts.write_arrays(
+            "03_recognition_regions",
+            **{f"region_{index:04d}_source_face_ids": np.asarray(component.global_faces, dtype=np.int64)
+               for index, component in enumerate(components, start=1)},
+        )
+        stage_artifacts.write_arrays(
+            "03_recognized_boundaries",
+            **recognized_boundaries.flattened_arrays(),
+        )
+        stage_artifacts.write_json(
+            "03_recognition_summary",
+            {"regions": recognition, "region_review": region_review,
+             "source_region_classifications": source_region_classifications,
+             "source_geometry_changed": False,
+             "recognized_boundaries": {
+                 "fingerprint": recognized_boundaries.fingerprint,
+                 "component_count": len(recognized_boundaries.component_loops),
+                 "loop_count": sum(len(loops) for loops in recognized_boundaries.component_loops),
+                 "loop_vertex_counts": [
+                     [len(loop) for loop in loops]
+                     for loops in recognized_boundaries.component_loops
+                 ],
+                 "source_vertex_count": recognized_boundaries.source_vertex_count,
+                 "source_face_count": recognized_boundaries.source_face_count,
+                 "immutable_after_recognition": True,
+             }},
+        )
         print_recognition(recognition)
-        if args.recognize_only:
+        if args.recognize_only or getattr(args, "stop_after_stage", None) == "recognize":
             return
         processing_mode_by_part = {
             index: str(classification["selected_processing_mode"])
@@ -566,7 +623,10 @@ class SplitPipeline:
         boundary_loop_neighbors = [
             record
             for index, component in enumerate(components, start=1)
-            for record in component_boundary_loop_neighbors(vertices, faces, component, index, boundary_neighbor_lookup)
+            for record in component_boundary_loop_neighbors(
+                vertices, faces, component, index, boundary_neighbor_lookup,
+                recognized_boundaries.loops_for_component(index),
+            )
         ]
         recursive_minimal_reparents: list[dict] = []
         recursive_assembly_enabled = args.assembly_mode in {"tree", "flat"}
@@ -586,10 +646,7 @@ class SplitPipeline:
                 mixed_boundary_reparents,
                 boundary_loop_neighbors,
             ) = refine_mixed_boundary_parents(
-                vertices,
-                faces,
-                components,
-                boundary_neighbor_lookup,
+                boundary_loop_neighbors,
                 component_adjacency,
                 assembly_parents,
                 assembly_records,
@@ -893,6 +950,7 @@ class SplitPipeline:
                 inward_overrides,
                 fit_clearance_by_part=effective_fit_clearance_by_part,
                 clearance_mode=args.clearance_mode,
+                recognized_boundaries=recognized_boundaries,
             )
             runtime_log(
                 "几何",
@@ -951,6 +1009,7 @@ class SplitPipeline:
                     bottom_clearance_mm=args.bottom_clearance_mm,
                     lead_in_mm=args.lead_in_mm,
                     interface_geometry=args.interface_geometry,
+                    recognized_boundaries=recognized_boundaries,
                 )
             return layer_child_context_cache[parent_index]
 
@@ -974,6 +1033,15 @@ class SplitPipeline:
                     ref_with_mode["processing_mode"] = "inward"
                     refs.append(ref_with_mode)
             return refs
+
+        stage_artifacts.write_json(
+            "04_assembly_plan",
+            {"body_index": body_index, "strategy": args.assembly_tree_strategy,
+             "assembly": assembly_records, "recursive_layers": recursive_minimal_layers,
+             "recognized_boundary_fingerprint": recognized_boundaries.fingerprint},
+        )
+        if getattr(args, "stop_after_stage", None) == "assembly":
+            return
 
         full_tree_preflight_record = {
             "status": "SKIPPED",
@@ -1011,6 +1079,17 @@ class SplitPipeline:
                     full_tree_preflight_record.get("elapsed_seconds", 0.0)
                 ),
             )
+
+        stage_artifacts.write_json(
+            "05_interface_plan",
+            {"preflight": full_tree_preflight_record,
+             "recursive_layer_count": len(recursive_minimal_layers),
+             "interface_geometry": args.interface_geometry,
+             "boundary_shape": args.boundary_shape,
+             "recognized_boundary_fingerprint": recognized_boundaries.fingerprint},
+        )
+        if getattr(args, "stop_after_stage", None) == "interfaces":
+            return
 
         component_centers = {
             index: component.center
@@ -1295,6 +1374,26 @@ class SplitPipeline:
             final_parts=int(len(strict_active_parts)),
             final_active_indices=sorted(strict_active_parts),
         )
+        build_arrays = {}
+        built_parts = []
+        for position, (part_index, entry) in enumerate(sorted(strict_active_parts.items()), start=1):
+            mesh = entry.get("mesh") if isinstance(entry, dict) else None
+            if mesh is None:
+                continue
+            build_arrays[f"part_{position:04d}_vertices"] = np.asarray(mesh.vertices)
+            build_arrays[f"part_{position:04d}_faces"] = np.asarray(mesh.faces)
+            built_parts.append({"part_index": int(part_index), "part_id": entry.get("part_id"),
+                                "vertex_count": len(mesh.vertices), "face_count": len(mesh.faces)})
+        if build_arrays:
+            stage_artifacts.write_arrays("06_recursive_build_meshes", **build_arrays)
+        stage_artifacts.write_json(
+            "06_recursive_build_summary",
+            {"parts": built_parts, "stage_records": strict_execution_stage_records,
+             "completed_steps": len(recursive_execution_steps),
+             "recognized_boundary_fingerprint": recognized_boundaries.fingerprint},
+        )
+        if getattr(args, "stop_after_stage", None) == "build":
+            return
 
         if partial_recursive_debug:
             latest_snapshot = (
@@ -1746,6 +1845,27 @@ class SplitPipeline:
             ),
         )
         report["visual_surface_validation"] = visual_surface_validation
+        fit_arrays = {}
+        fit_parts = []
+        for position, part in enumerate(colored_3mf_parts, start=1):
+            mesh = part.get("mesh")
+            if mesh is None:
+                continue
+            fit_arrays[f"part_{position:04d}_vertices"] = np.asarray(mesh.vertices)
+            fit_arrays[f"part_{position:04d}_faces"] = np.asarray(mesh.faces)
+            fit_parts.append({"part_id": part.get("part_id"),
+                              "vertex_count": len(mesh.vertices),
+                              "face_count": len(mesh.faces)})
+        if fit_arrays:
+            stage_artifacts.write_arrays("07_fitted_assembly_meshes", **fit_arrays)
+        stage_artifacts.write_json(
+            "07_fitted_assembly_summary",
+            {"parts": fit_parts, "seating_validation": seating_validation,
+             "visual_surface_validation": visual_surface_validation,
+             "recognized_boundary_fingerprint": recognized_boundaries.fingerprint},
+        )
+        if getattr(args, "stop_after_stage", None) == "fit":
+            return
         print(
             "visual_surface_validation="
             + json.dumps(visual_surface_validation, ensure_ascii=False),
@@ -1958,6 +2078,12 @@ class SplitPipeline:
             three_mf_validation["valid"] = True
             progress("验证", "3MF 包结构与颜色复检通过；仅保留已标注的网格缺陷", topology_errors=len(known_topology_errors))
         temporary_output.replace(output_path)
+        stage_artifacts.write_json(
+            "08_validated_publish",
+            {"output_3mf": str(output_path.resolve()), "validation": three_mf_validation,
+             "part_count": len(colored_3mf_parts),
+             "recognized_boundary_fingerprint": recognized_boundaries.fingerprint},
+        )
         runtime_log(
             "发布",
             "atomic_publish_done",

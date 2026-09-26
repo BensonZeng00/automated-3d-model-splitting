@@ -22,7 +22,7 @@ from split3mf.stage_cache import RecursiveStageCache, normalized_run_arguments
 from split3mf.common import Component
 from split3mf.explicit_merge import merge_body_components, parse_part_group
 from split3mf.cap_template import fit_affine_cap_inside_parent
-from split3mf.inward import ParentThicknessProbe
+from split3mf.part_geometry import ParentThicknessProbe
 from split3mf.pipeline import uses_layer_child_cut_references
 
 

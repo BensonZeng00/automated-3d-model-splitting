@@ -8,14 +8,15 @@ from .layer_surface_plan import build_layer_surface_plan
 _BOUNDARY_TOPOLOGY_IMPLEMENTATION = "boundary-loops-v1"
 
 
-def layer_child_boundary_topology(faces, components, subtree, context):
+def layer_child_boundary_topology(faces, components, subtree, context,
+                                  neighbor_lookup=None, recognized_boundaries=None):
     """Return cached local connectivity for one recursive subtree.
 
     Vertex positions are deliberately not cached: seam planning may move them.
     The expensive face extraction, dense remap, and boundary walk depend only
     on connectivity, which is authenticated by the key on every lookup.
     """
-    from .mesh import build_local_mesh_from_faces, boundary_loops
+    from .mesh import build_local_mesh_from_faces, boundary_loops, boundary_cycles_from_edges
 
     subtree_key = tuple(sorted(int(index) for index in subtree))
     face_array = np.asarray(faces, dtype=np.int64)
@@ -28,6 +29,8 @@ def layer_child_boundary_topology(faces, components, subtree, context):
     digest.update(selected_faces.tobytes())
     digest.update(np.asarray(selected_faces.shape, dtype=np.int64).tobytes())
     key = (_BOUNDARY_TOPOLOGY_IMPLEMENTATION, digest.hexdigest(), subtree_key)
+    if recognized_boundaries is not None:
+        key += (recognized_boundaries.fingerprint,)
     cached = context.layer_boundary_topologies.get(key) if context is not None else None
     if cached is not None:
         return cached
@@ -39,24 +42,46 @@ def layer_child_boundary_topology(faces, components, subtree, context):
     _, local_faces, _, global_vertex_ids = build_local_mesh_from_faces(
         placeholder_vertices, face_array, global_faces
     )
-    result = (local_faces, global_vertex_ids, boundary_loops(local_faces))
+    if recognized_boundaries is None:
+        loops = boundary_loops(local_faces)
+    else:
+        subtree_set = set(subtree_key)
+        boundary_edges = set()
+        for component_index in subtree_key:
+            for loop in recognized_boundaries.loops_for_component(component_index):
+                for position, left in enumerate(loop):
+                    right = loop[(position + 1) % len(loop)]
+                    edge = tuple(sorted((int(left), int(right))))
+                    neighbors = (neighbor_lookup or {}).get(edge, {component_index})
+                    neighbor_ids = set(map(int, neighbors))
+                    if neighbor_ids - subtree_set or len(neighbor_ids) <= 1:
+                        boundary_edges.add(edge)
+        global_loops = boundary_cycles_from_edges(np.asarray(sorted(boundary_edges), dtype=np.int64).reshape((-1, 2)))
+        global_to_local = np.full(vertex_count, -1, dtype=np.int64)
+        global_to_local[global_vertex_ids] = np.arange(len(global_vertex_ids), dtype=np.int64)
+        loops = [global_to_local[np.asarray(loop, dtype=np.int64)] for loop in global_loops]
+        if any(np.any(loop < 0) for loop in loops):
+            raise ValueError("recognized subtree boundary references an absent source vertex")
+    result = (local_faces, global_vertex_ids, loops)
     if context is not None:
         context.layer_boundary_topologies[key] = result
     return result
 
 
 def prepare_layer_seams(vertices, faces, components, parent_index, children,
-                        assembly_children, neighbor_lookup, context):
+                        assembly_children, neighbor_lookup, context,
+                        recognized_boundaries=None):
     if context is None:
         return vertices, faces, context
     # Lazy import avoids the inward builder/module dependency cycle.
-    from .inward import subtree_component_indices, boundary_loop_parent_contact
+    from .part_geometry import subtree_component_indices, boundary_loop_parent_contact
     from .micro_interfaces import filter_micro_interface_loops
     loops = []
     for child in sorted(map(int, children)):
         subtree = subtree_component_indices(child, assembly_children)
         triangles, ids, child_loops = layer_child_boundary_topology(
-            faces, components, subtree, context
+            faces, components, subtree, context, neighbor_lookup,
+            recognized_boundaries,
         )
         points = np.asarray(vertices)[ids]
         records = []

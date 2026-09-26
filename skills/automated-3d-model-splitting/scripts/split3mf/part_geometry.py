@@ -1,0 +1,25 @@
+"""Public geometry service surface assembled from cohesive implementation modules."""
+from __future__ import annotations
+import importlib
+_MODULE_NAMES = ['direction_field', 'assembly_references', 'interface_thickness', 'cap_planning', 'surface_construction', 'connector_building', 'part_mesh_building', 'parent_thickness_probe', 'direction_planner', 'adaptive_cap_planner', 'boundary_triangulator', 'part_mesh_builder']
+_modules = [importlib.import_module(f".{name}", __package__) for name in _MODULE_NAMES]
+_shared = {}
+for _module in _modules:
+    _shared.update({name: value for name, value in vars(_module).items() if not name.startswith("__")})
+_definition_owners = {'visible_top_edge_clearance': 'direction_field', 'recursive_face_geometry_key': 'direction_field', 'finalize_recursive_colored_mesh': 'direction_field', 'component_inward_direction': 'direction_field', 'mesh_vertex_inward_normals': 'direction_field', 'mesh_vertex_conormal_evidence': 'direction_field', 'boundary_loop_interior_conormals': 'direction_field', 'smooth_ordered_loop_interior_conormals': 'direction_field', 'offset_points_along_conormals': 'direction_field', 'smooth_closed_inward_direction_field': 'direction_field', 'tapered_profile_inset_limit': 'direction_field', 'tapered_profile_total_depth_budget': 'direction_field', 'tapered_profile_inset_candidates': 'direction_field', 'select_taper_profile_candidate': 'direction_field', 'smooth_tapered_sweep_profile': 'direction_field', 'normalized_circular_convolution': 'direction_field', 'safe_boundary_inward_directions': 'direction_field', 'reference_loop_inward_directions': 'direction_field', 'reference_loop_interior_conormals': 'direction_field', 'effective_feature_clearance': 'direction_field', 'tapered_lead_depths': 'direction_field', 'tapered_lead_depth_caps': 'direction_field', 'coherent_tapered_lead_ring': 'direction_field', 'build_component_cut_references': 'assembly_references', 'subtree_component_indices': 'assembly_references', 'build_subassembly_component': 'assembly_references', 'boundary_loop_parent_contact': 'assembly_references', 'build_layer_child_cut_references': 'assembly_references', 'best_cut_reference': 'assembly_references', 'classify_body_cut_loop_references': 'assembly_references', 'fit_plane_normal': 'interface_thickness', '_expand_sampled_boundary_minima': 'interface_thickness', 'boundary_cap_distances': 'interface_thickness', 'plan_cap_decision': 'cap_planning', 'cap_decision_patch_quality': 'cap_planning', 'side_quad_triangulation_choice': 'cap_planning', 'cap_side_wall_quality': 'cap_planning', 'cap_decision_patch_quality_preflight': 'cap_planning', 'remap_cap_decision': 'cap_planning', 'reconcile_planned_internal_fit_points': 'cap_planning', 'add_side_faces_between_rings': 'surface_construction', 'boundary_loop_source_color_codes': 'surface_construction', 'side_face_color_codes': 'surface_construction', 'cap_face_color_codes_from_boundary': 'surface_construction', 'local_connector_face_color_codes_from_boundary': 'surface_construction', 'add_loop_extrusion_and_cap': 'surface_construction', 'add_inward_lead_extrusion_and_cap': 'surface_construction', 'matched_socket_bottom_geometry': 'surface_construction', 'reserve_flat_socket_travel_budget': 'surface_construction', '_append_points': 'surface_construction', '_resample_closed_ring': 'surface_construction', '_aligned_ring_indices': 'surface_construction', '_add_faces_between_unequal_rings': 'surface_construction', '_add_constrained_connector_annulus': 'surface_construction', '_connector_record': 'surface_construction', '_rings_coincident': 'surface_construction', '_join_connector_rings': 'surface_construction', '_validate_connector_wedge_faces': 'surface_construction', '_finalize_local_male_record': 'surface_construction', '_orient_new_cap_against_existing_rim': 'surface_construction', 'add_local_male_connector_and_backing': 'connector_building', 'preflight_local_connector_patch': 'connector_building', 'build_local_male_attachment_cutter': 'connector_building', 'add_local_female_socket_and_backing': 'connector_building', 'add_local_female_boolean_closure': 'connector_building', 'make_part_mesh': 'part_mesh_building', 'make_body_cut_mesh': 'part_mesh_building', 'make_layer_child_subassembly_mesh': 'part_mesh_building', 'ParentThicknessProbe': 'parent_thickness_probe', 'InwardDirectionPlanner': 'direction_planner', 'AdaptiveCapPlanner': 'adaptive_cap_planner', 'BoundaryTriangulator': 'boundary_triangulator', 'PartMeshBuilder': 'part_mesh_builder'}
+for _name, _module_name in _definition_owners.items():
+    _shared[_name] = getattr(importlib.import_module(f".{_module_name}", __package__), _name)
+for _module in _modules:
+    vars(_module).update(_shared)
+globals().update(_shared)
+__all__ = [name for name in _shared if not name.startswith("_")]
+
+
+def refresh_runtime_dependencies() -> None:
+    """Refresh lazy geometry dependencies after the CLI dependency preflight."""
+    from . import common as _common
+
+    for _module in _modules:
+        _module.np = _common.np
+        _module.trimesh = _common.trimesh
+        _module.cKDTree = _common.cKDTree

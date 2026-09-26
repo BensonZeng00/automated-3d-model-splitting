@@ -13,7 +13,7 @@ from .package_io import *
 from .selection import *
 from .assembly import *
 from .validation import *
-from .inward import *
+from .part_geometry import *
 from .local_connectors import (
     assembly_interface_policy,
 )

@@ -44,7 +44,7 @@ from split3mf.package_io import (
     load_colored_mesh_objects_3mf,
     validate_colored_parts_3mf,
 )
-from split3mf.inward import (
+from split3mf.part_geometry import (
     build_layer_child_cut_references,
     finalize_recursive_colored_mesh,
     make_layer_child_subassembly_mesh,

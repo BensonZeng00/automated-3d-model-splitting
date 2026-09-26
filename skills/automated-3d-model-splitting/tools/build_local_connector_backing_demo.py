@@ -15,7 +15,7 @@ from split3mf import common  # noqa: E402
 
 common.load_core_dependencies()
 
-from split3mf.inward import (  # noqa: E402
+from split3mf.part_geometry import (  # noqa: E402
     add_local_female_boolean_closure,
     add_local_male_connector_and_backing,
     local_connector_spec_for_interface,

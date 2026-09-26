@@ -19,7 +19,7 @@ from split3mf import common
 common.load_core_dependencies()
 
 from split3mf.common import CORE_NS, trimesh
-from split3mf import inward
+from split3mf import part_geometry as inward
 from split3mf.package_io import export_colored_parts_3mf, validate_colored_parts_3mf
 from split3mf.recognition import recognition_colors_from_exterior
 

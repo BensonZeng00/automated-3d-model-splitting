@@ -37,7 +37,7 @@ from split3mf.connector_planning import (  # noqa: E402
     local_connector_spec_for_interface,
 )
 from split3mf.local_connectors import plan_local_connector  # noqa: E402
-from split3mf.inward import add_local_male_connector_and_backing  # noqa: E402
+from split3mf.part_geometry import add_local_male_connector_and_backing  # noqa: E402
 from split3mf.mesh import point_in_poly, point_on_poly_boundary  # noqa: E402
 
 

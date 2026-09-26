@@ -17,7 +17,7 @@ sys.path.insert(0, str(SCRIPTS))
 from split3mf import common  # noqa: E402
 
 common.load_core_dependencies()
-inward_module = importlib.import_module("split3mf.inward")  # noqa: E402
+inward_module = importlib.import_module("split3mf.part_geometry")  # noqa: E402
 mesh_module = importlib.import_module("split3mf.mesh")  # noqa: E402
 local_connector_module = importlib.import_module("split3mf.local_connectors")  # noqa: E402
 connector_topology_module = importlib.import_module(
@@ -43,7 +43,7 @@ from split3mf.local_connectors import (  # noqa: E402
     subtract_socket_cutters,
 )
 from split3mf.boolean_cutters import assess_source_patch_reentry  # noqa: E402
-from split3mf.inward import (  # noqa: E402
+from split3mf.part_geometry import (  # noqa: E402
     add_local_female_boolean_closure,
     add_local_female_socket_and_backing,
     add_local_male_connector_and_backing,

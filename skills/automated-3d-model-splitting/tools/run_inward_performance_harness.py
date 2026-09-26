@@ -24,7 +24,7 @@ from split3mf import common  # noqa: E402
 
 common.load_core_dependencies()
 
-from split3mf.inward import tapered_profile_inset_candidates  # noqa: E402
+from split3mf.part_geometry import tapered_profile_inset_candidates  # noqa: E402
 from split3mf.mesh import triangulate_polygon_ear_clip  # noqa: E402
 
 

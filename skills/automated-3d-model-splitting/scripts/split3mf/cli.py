@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import uuid
 from pathlib import Path
 
 from .common import *
@@ -25,6 +26,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--hidden-surface-refinement', choices=['preserve', 'refine'],
                         default='preserve', help='Preserve audited hidden annuli or request strict density refinement.')
     parser.add_argument('--recovery-dir', help='Persistent inputs and candidates for local failure replay')
+    parser.add_argument(
+        "--stage-artifacts-dir",
+        default=None,
+        help="Write inspectable JSON/NPZ results after each completed application stage.",
+    )
+    parser.add_argument(
+        "--stop-after-stage",
+        choices=["preflight", "load", "recognize", "assembly", "interfaces", "build", "fit"],
+        default=None,
+        help="Stop after a completed stage artifact is written, for stepwise inspection.",
+    )
     parser.add_argument("--input", required=True, help="Source .3mf file. No other model files are read.")
     parser.add_argument("--output", default=None, help="Final colored .3mf path; defaults beside the source file.")
     parser.add_argument("--post-split-uniform-scale", type=float, default=0.99,
@@ -508,6 +520,25 @@ def main(argv: list[str] | None = None) -> None:
     progress("预检", "检查输入文件和 Python 依赖", input=str(input_path))
     checks = preflight(input_path)
     print("preflight=" + json.dumps(checks, ensure_ascii=False), flush=True)
+    from .application.stage_artifacts import StageArtifactStore
+    output_path = (
+        Path(args.output).expanduser()
+        if args.output
+        else input_path.expanduser().resolve().with_name(
+            f"{sanitize_name(input_path.stem) or 'model'}_split_parts.3mf"
+        )
+    )
+    artifact_root = (
+        Path(args.stage_artifacts_dir).expanduser()
+        if args.stage_artifacts_dir
+        else output_path.with_name(output_path.stem + "_stages")
+    )
+    args.stage_artifacts_run_id = uuid.uuid4().hex
+    artifact_store = StageArtifactStore(artifact_root, run_id=args.stage_artifacts_run_id)
+    artifact_store.write_json(
+        "01_preflight", {"input": str(input_path.resolve()), "checks": checks}
+    )
+    print("stage_artifacts=" + str(artifact_store.run_dir), flush=True)
     failures = preflight_failures(checks)
     if failures:
         print("preflight_failures=" + json.dumps(failures, ensure_ascii=False), file=sys.stderr)
@@ -516,6 +547,8 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit(2)
     progress("预检", "依赖与输入检查通过", python=checks["python"])
     if args.preflight_only:
+        return
+    if args.stop_after_stage == "preflight":
         return
     load_core_dependencies()
     from .print_tolerance import PrintTolerance, tolerance_scope

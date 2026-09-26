@@ -6,7 +6,7 @@
 
 ## Pipeline
 
-`split3mf.pipeline.SplitPipeline` owns one complete split run. It coordinates services in this order:
+`split3mf.pipeline.SplitPipeline` currently coordinates one complete split run and writes a durable artifact after every completed application stage. Its stage order and `--stop-after-stage` controls are documented in [application-stages.md](application-stages.md):
 
 1. read and normalize the source project;
 2. recognize connected painted source regions, review <=100-face noise candidates, 101–999-face small-region candidates, and long strips, then preserve every confirmed noise/part/uncertain region for normal interface planning;
@@ -23,7 +23,7 @@ The pipeline may coordinate policy but must not duplicate geometry, XML, ZIP, or
 
 ## Domain and configuration
 
-`split3mf.domain` contains the cross-stage data contracts:
+`split3mf.domain` is a package with one cross-stage data contract per file:
 
 - `SplitConfig`: validated CLI namespace and paths;
 - `LoadedProject`: normalized mesh and project metadata;
@@ -56,7 +56,7 @@ Prefer these explicit records when data crosses stage boundaries. Do not introdu
   own normal, without filtering by the component-average axis. `local_ray_probe.py`
   provides exact finite ray tests with a conservative spatial broad phase.
   `curved_backing.py` retains front triangles and back-face material provenance.
-  `inward.py` passes accepted replacements through the normal colored finalizer;
+  `part_mesh_building.py` passes accepted replacements through the normal colored finalizer;
   recursion consumes the new full-size solid, not any pre-repair cutter.
 
 - `boolean_parent.py` supplies the complete current recursive source shell for
@@ -188,9 +188,11 @@ Services should be stateless where practical. Inject or replace collaborators th
 - `source_region_review.py`: source-region review rendering, manifest generation, and classification validation;
 - `selection.py`: structural evidence and root-body selection;
 - `assembly.py`: parent inference, cycle repair, recursive layers;
-- `inward.py`: recursive inward orchestration, thickness probing, cap planning,
-  mesh-buffer construction adapters, and translated copies of already-emitted
-  connector attachments used as private backing-clearance cutters;
+- `direction_field.py`, `assembly_references.py`, `interface_thickness.py`,
+  `cap_planning.py`, `surface_construction.py`, `connector_building.py`, and
+  `part_mesh_building.py`: separated geometry algorithms and mesh construction;
+- `part_geometry.py`: explicit import surface for split geometry modules; it
+  contains no geometry implementation;
 - `hidden_interface.py`: pure hidden-interface candidate generation, equal-arc boundary sampling, local-inward projection, and evidence records;
 - `connector_planning.py`: immutable connector depth policy, independent
   backing/engagement budgets, elastic priority allocation, and compact-footprint
@@ -251,7 +253,7 @@ Services should be stateless where practical. Inject or replace collaborators th
 
 Avoid circular imports. A lower-level module must not import `pipeline.py` or `cli.py`.
 
-Performance ownership follows the same boundaries. `inward.py` decides
+Performance ownership follows the same boundaries. `part_mesh_building.py` decides
 whether provisional connector cutters are needed at all; deferred recursive
 parents receive only their source-plane preclosure. `connector_topology.py`
 owns spatial seam lookup, linear candidate ranking, and the unchanged strict

@@ -28,15 +28,22 @@ def component_boundary_loop_neighbors(
     component: Component,
     component_index: int,
     boundary_neighbor_lookup: dict[tuple[int, int], set[int]],
+    recognized_loops: tuple[tuple[int, ...], ...] | None = None,
 ) -> list[dict]:
-    _local_vertices, local_faces, _global_to_local, global_vertex_ids = build_local_mesh(vertices, faces, component)
-    loops = boundary_loops(local_faces)
+    if recognized_loops is None:
+        _local_vertices, local_faces, _global_to_local, global_vertex_ids = build_local_mesh(vertices, faces, component)
+        loops = [
+            [int(global_vertex_ids[int(local_id)]) for local_id in loop]
+            for loop in boundary_loops(local_faces)
+        ]
+    else:
+        loops = recognized_loops
     records = []
     for loop_index, loop in enumerate(loops):
         neighbor_counts: collections.Counter[int] = collections.Counter()
         for position, local_a in enumerate(loop):
             local_b = loop[(position + 1) % len(loop)]
-            global_edge = tuple(sorted((int(global_vertex_ids[local_a]), int(global_vertex_ids[local_b]))))
+            global_edge = tuple(sorted((int(local_a), int(local_b))))
             for neighbor_index in boundary_neighbor_lookup.get(global_edge, set()):
                 if int(neighbor_index) != component_index:
                     neighbor_counts[int(neighbor_index)] += 1
@@ -636,27 +643,16 @@ def reparent_shared_parent_child_loops(
 
 
 def refine_mixed_boundary_parents(
-    vertices: np.ndarray,
-    faces: np.ndarray,
-    components: list[Component],
-    boundary_neighbor_lookup: dict[tuple[int, int], set[int]],
+    boundary_loop_records: list[dict],
     adjacency: dict[tuple[int, int], dict],
     parents: dict[int, int | None],
     records: list[dict],
     min_shared_edges: int,
 ) -> tuple[dict[int, int | None], dict[int, list[int]], list[dict], list[dict], list[dict]]:
-    loop_records = []
+    loop_records = boundary_loop_records
     loop_cache: dict[int, list[dict]] = {}
-    for index, component in enumerate(components, start=1):
-        component_records = component_boundary_loop_neighbors(
-            vertices,
-            faces,
-            component,
-            index,
-            boundary_neighbor_lookup,
-        )
-        loop_cache[index] = component_records
-        loop_records.extend(component_records)
+    for record in boundary_loop_records:
+        loop_cache.setdefault(int(record["component_index"]), []).append(record)
 
     refined_parents = dict(parents)
     record_by_part = {int(record["part_index"]): dict(record) for record in records}

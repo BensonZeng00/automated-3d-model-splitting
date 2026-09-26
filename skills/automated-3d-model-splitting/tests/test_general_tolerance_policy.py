@@ -16,7 +16,7 @@ from split3mf.micro_regions import merge_micro_regions
 from split3mf.micro_openings import seal_micro_openings
 from split3mf.recognition import summarize_components
 from split3mf.mesh import boundary_loops
-from split3mf.inward import (
+from split3mf.part_geometry import (
     boundary_loop_interior_conormals,
     mesh_vertex_conormal_evidence,
     normalized_circular_convolution,

@@ -20,7 +20,7 @@ from split3mf import common  # noqa: E402
 common.load_core_dependencies()
 
 from split3mf.domain import CapDecision  # noqa: E402
-from split3mf.inward import (  # noqa: E402
+from split3mf.part_geometry import (  # noqa: E402
     boundary_cap_distances,
     cap_decision_patch_quality,
     cap_decision_patch_quality_preflight,

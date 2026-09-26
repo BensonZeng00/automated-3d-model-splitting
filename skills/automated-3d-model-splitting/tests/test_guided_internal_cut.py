@@ -19,7 +19,7 @@ from split3mf.guided_internal_cut import (  # noqa: E402
     GuidedInternalCutSpec,
     adaptive_guided_entry_ring,
 )
-from split3mf.inward import cap_side_wall_quality  # noqa: E402
+from split3mf.part_geometry import cap_side_wall_quality  # noqa: E402
 
 
 class LateralSensitiveProbe:

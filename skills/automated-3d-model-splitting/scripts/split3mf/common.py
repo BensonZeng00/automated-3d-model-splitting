@@ -204,6 +204,9 @@ def load_core_dependencies() -> None:
     np = numpy_module
     trimesh = trimesh_module
     cKDTree = scipy_ckdtree
+    geometry_module = sys.modules.get(f"{__package__}.part_geometry")
+    if geometry_module is not None:
+        geometry_module.refresh_runtime_dependencies()
 
 
 class DSU:

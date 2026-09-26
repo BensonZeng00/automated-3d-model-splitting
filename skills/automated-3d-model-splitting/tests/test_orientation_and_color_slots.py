@@ -19,7 +19,7 @@ from split3mf import common
 common.load_core_dependencies()
 
 from split3mf.common import CORE_NS, MATERIAL_NS, VERSION, trimesh
-from split3mf.inward import finalize_recursive_colored_mesh
+from split3mf.part_geometry import finalize_recursive_colored_mesh
 from split3mf.mesh import orient_mesh_faces_consistently
 from split3mf.package_io import export_colored_parts_3mf, validate_colored_parts_3mf
 from split3mf.validation import finalize_large_partition_mesh, validate_mesh_in_memory

@@ -10,7 +10,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from split3mf.common import load_core_dependencies
 load_core_dependencies()
-from split3mf.inward import add_local_male_connector_and_backing
+from split3mf.part_geometry import add_local_male_connector_and_backing
 from split3mf.local_connectors import LocalConnectorSpec
 from split3mf.print_tolerance import PrintTolerance, tolerance_scope
 

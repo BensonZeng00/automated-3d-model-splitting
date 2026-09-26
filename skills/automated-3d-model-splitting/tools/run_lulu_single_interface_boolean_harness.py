@@ -15,7 +15,7 @@ from split3mf import common  # noqa: E402
 common.load_core_dependencies()
 
 from split3mf.connector_planning import local_connector_spec_for_interface  # noqa: E402
-from split3mf.inward import add_local_female_boolean_closure  # noqa: E402
+from split3mf.part_geometry import add_local_female_boolean_closure  # noqa: E402
 from split3mf.local_connectors import subtract_socket_cutters  # noqa: E402
 from split3mf.mesh import (  # noqa: E402
     boundary_loops,
@@ -107,7 +107,7 @@ def main() -> int:
         if int(added) != len(other_loop) - 2:
             raise ValueError(f"failed to close non-target loop {other_index}")
     if abs(float(args.overcut_mm) - 0.02) > 1e-12:
-        from split3mf.inward import build_local_male_attachment_cutter
+        from split3mf.part_geometry import build_local_male_attachment_cutter
 
         cutters[0] = build_local_male_attachment_cutter(
             boundary_points=boundary,

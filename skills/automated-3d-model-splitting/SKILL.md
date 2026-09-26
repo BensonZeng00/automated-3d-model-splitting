@@ -9,7 +9,7 @@ Current release: `2.1.0`, positioned as automated painted-3MF model-part splitti
 
 ## 职责边界
 
-拆件只负责识别 source 区域、确定零件关系、规划双方共用的交接线、生成交接面与装配结构，并导出一个分组 3MF。输入模型已有的小碎片、噪声、小孔、翻转面、退化面、非流形边和断开壳体均属于 source：默认原样保留，不自动合并、删除、补面、焊接或翻面，也不因面积、跨度、面数或比例阻断拆件。
+拆件只负责识别 source 区域、确定零件关系、规划双方共用的交接线、生成交接面与装配结构，并导出一个分组 3MF。识别时自动将总表面积小于 `1 mm²` 的连通涂色区域排除为噪声，不作为独立零件候选；源网格、面和涂色数据不被改写。其他小碎片、小孔、翻转面、退化面、非流形边和断开壳体默认原样保留，不自动补面、焊接或翻面。
 
 只有交接线、交接面或本工具新增的几何可以被调整。source 异常可写入 `source_diagnostics`，但必须标记为非阻断；只有无法形成一致交接线、交接面或必要生成结构时，当前接口才可失败。
 
@@ -17,14 +17,21 @@ Current release: `2.1.0`, positioned as automated painted-3MF model-part splitti
 
 ## 100/1000 面语义审核
 
-面数只筛选审核候选，不决定几何处置：
+先按区域总表面积过滤噪声：
+
+- `<1 mm²`：自动排除为噪声，不进入零件区域、边界和语义审核清单；源网格和涂色数据保持不变。
+- `>=1 mm²`：再按面数与长细形状筛选审核候选。
+
+面数只筛选剩余审核候选，不决定几何处置：
 
 - `<=100` 面：`noise_candidate`；
 - `101–999` 面：`small_region_candidate`；
 - `>=1000` 面：不因面数审核；
 - 长细条候选：不受面数限制，必须审核。
 
-所有候选都必须由用户分类为 `noise`、`part` 或 `uncertain`。分类只改变报告标签；三类都保持完整 source 顶点、面、颜色、方向和组件身份，并进入相同的正常拆件流程。确认成 noise 也不得合并、删除、改色、修复或跳过交接面规划。
+所有剩余候选都必须由用户分类为 `noise`、`part` 或 `uncertain`。分类只改变报告标签；三类都保持完整 source 顶点、面、颜色、方向和组件身份，并进入相同的正常拆件流程。确认成 noise 也不得合并、删除、改色、修复或跳过交接面规划。
+
+阶段 03 完成后，完整拆件流程还必须经过识别结果确认。查看 `03_recognition_boundary_review.md` 与预览；如果识别有误，可在 `03_recognition_review.json` 的 `actions` 中明确写 `delete` 或 `merge`，再通过 `--recognition-review-json PATH` 重跑。应用修改后必须复核新报告，并将新 JSON 中 `user_confirmed` 设为 `true`；只有匹配当前结果指纹的确认才会进入装配。这里的删除/合并是独立的用户明确操作，不由 `noise`/`part`/`uncertain` 分类自动触发。
 
 运行识别：
 
@@ -56,7 +63,7 @@ python scripts/split_painted_3mf.py \
 ## Source 保持约束
 
 - 不运行按 `<=2 mm` 区域归并或小口封闭。
-- 不按 `<1%`、`<=1 mm²`、长度、体积或面数自动修复 source。
+- 除识别阶段 `<1 mm²` 连通涂色区域过滤规则外，不按 `<1%`、长度、体积或面数自动修复 source。
 - 不对 source 执行全局 winding 修复；生成面的朝向由父子关系和共享接口决定。
 - source 小孔远离接口时忽略；碰到接口时重新规划接口，不修补整个 source。
 - 孤立 source shell 原样输出，不虚构连接结构。
@@ -88,6 +95,8 @@ CLI 只负责参数解析、输入校验、调用可测试服务、输出报告�
 source_diagnostics: non_blocking
 interface_validation: blocking_when_invalid
 ```
+
+若本次识别生成 `03_recognition_boundaries.png`，最终回复必须内嵌显示该图片（`![边界预览](绝对路径)`），不能只给文件链接。回复前先确认图片文件存在且可读取；报告仍可另附链接。
 
 ## 开发验证
 

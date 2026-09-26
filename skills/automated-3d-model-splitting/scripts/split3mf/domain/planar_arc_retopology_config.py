@@ -18,7 +18,6 @@ class PlanarArcRetopologyConfig:
     connector_slope_validation: str = "advisory"
     surface_band_validation: str = "strict"
     connector_surface_validation: str = "strict"
-    visible_interface_simplification_tolerance: float = 1.0
     smoothing_policy: SeamSmoothingPolicy = field(
         default_factory=lambda: SeamSmoothingPolicy.named("print-balanced")
     )
@@ -57,9 +56,6 @@ class PlanarArcRetopologyConfig:
             surface_band_validation=surface_band_validation,
             connector_surface_validation=str(
                 getattr(namespace, "connector_surface_validation", "strict")
-            ),
-            visible_interface_simplification_tolerance=float(
-                getattr(namespace, "visible_interface_simplification_tolerance", 1.0)
             ),
             smoothing_policy=smoothing_policy,
         )

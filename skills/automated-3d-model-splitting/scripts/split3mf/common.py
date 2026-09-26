@@ -204,6 +204,18 @@ def load_core_dependencies() -> None:
     np = numpy_module
     trimesh = trimesh_module
     cKDTree = scipy_ckdtree
+    # Package modules use this module's public constants and import the lazy
+    # geometry aliases with ``from .common import *``.  Refresh those aliases
+    # after dependency loading so project parsing and the pipeline do not keep
+    # the initial ``None`` bindings.
+    package_prefix = f"{__package__}."
+    for module in tuple(sys.modules.values()):
+        if module is None or not str(getattr(module, "__name__", "")).startswith(package_prefix):
+            continue
+        for name, value in (("np", numpy_module), ("trimesh", trimesh_module),
+                            ("cKDTree", scipy_ckdtree)):
+            if getattr(module, name, value) is None:
+                setattr(module, name, value)
     geometry_module = sys.modules.get(f"{__package__}.part_geometry")
     if geometry_module is not None:
         geometry_module.refresh_runtime_dependencies()

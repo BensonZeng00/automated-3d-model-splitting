@@ -574,35 +574,25 @@ def topology_safe_planar_inset_ring(
     )
     if abs(float(signed_area(projected))) <= 1e-9:
         return None
-    # Simplify the outer design contour first, then derive the inner contour
-    # by uniform scaling.  These are the blue/red rings of the backing: their
-    # cardinality and cyclic order are identical by construction.  Do not
-    # independently simplify an offset result; that was the root cause of
-    # 28k-to-dozens bridges, projection folds, and very long cross-ring edges.
+    # Recognition owns boundary simplification.  Preserve that ring's full
+    # cardinality here and only construct its paired homothetic inner contour.
     from .contour_simplification import corresponding_scaled_contours
-    # Hidden manufacturing rings need a useful reduction even when callers
-    # elect not to move the visible seam.  Bound the automatic tolerance by
-    # the backing depth; the configured interface tolerance may request a
-    # stronger (still error-bounded) simplification.
-    correspondence_tolerance = max(
-        float(plan.get("visible_interface_simplification_tolerance_mm", 0.0)),
-        min(1.0, 0.25 * distance),
-    )
+    correspondence_tolerance = 0.0
     try:
-        simplified_outer, inset_2d, retained, scale = corresponding_scaled_contours(
+        outer_contour, inset_2d, retained, scale = corresponding_scaled_contours(
             projected,
             correspondence_tolerance,
             distance,
             center=np.zeros(2, dtype=np.float64),
         )
         plan["backing_ring_correspondence"] = "homothetic_one_to_one"
-        plan["backing_ring_outer_vertices"] = int(len(simplified_outer))
+        plan["backing_ring_outer_vertices"] = int(len(outer_contour))
         plan["backing_ring_inner_vertices"] = int(len(inset_2d))
         plan["backing_ring_source_indices"] = [int(value) for value in retained]
         plan["backing_ring_scale"] = float(scale)
-        plan["backing_inset_simplified_input_vertices"] = int(len(simplified_outer))
+        plan["backing_inset_recognized_boundary_vertices"] = int(len(outer_contour))
         plan["backing_inset_input_vertices"] = int(len(projected))
-        plan["backing_inset_method"] = "simplified_homothetic_correspondence"
+        plan["backing_inset_method"] = "recognized_boundary_homothetic_correspondence"
         source_plane = center + axis * float(np.mean(axial))
         return (
             source_plane[None, :]

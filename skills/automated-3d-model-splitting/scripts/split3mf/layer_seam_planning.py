@@ -48,7 +48,7 @@ def layer_child_boundary_topology(faces, components, subtree, context,
         subtree_set = set(subtree_key)
         boundary_edges = set()
         for component_index in subtree_key:
-            for loop in recognized_boundaries.loops_for_component(component_index):
+            for loop in recognized_boundaries.source_loops_for_component(component_index):
                 for position, left in enumerate(loop):
                     right = loop[(position + 1) % len(loop)]
                     edge = tuple(sorted((int(left), int(right))))

@@ -924,9 +924,6 @@ def make_body_cut_mesh(
                 surface_validation_mode=str(
                     interface_retopology.config.connector_surface_validation
                 ),
-                visible_interface_simplification_tolerance=float(
-                    interface_retopology.config.visible_interface_simplification_tolerance
-                ),
             )
             preview_vertex_checkpoint = len(output_vertices)
             preview_face_checkpoint = len(output_faces)
@@ -1426,9 +1423,6 @@ def make_layer_child_subassembly_mesh(
                 ),
                 surface_validation_mode=str(
                     interface_retopology.config.connector_surface_validation
-                ),
-                visible_interface_simplification_tolerance=float(
-                    interface_retopology.config.visible_interface_simplification_tolerance
                 ),
             )
             generated_face_start = len(output_faces)

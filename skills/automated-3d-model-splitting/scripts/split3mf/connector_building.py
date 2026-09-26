@@ -90,60 +90,6 @@ def add_local_male_connector_and_backing(
     heightfield_surface_vertices: set[int] = set()
     for layer_index, ring in enumerate(backing_profile.rings):
         layer_points = np.asarray(ring, dtype=np.float64)
-        if layer_index == len(backing_profile.rings) - 1:
-            tolerance = float(
-                plan.get("visible_interface_simplification_tolerance_mm", 0.0)
-            )
-            original_count = len(layer_points)
-            retained = np.arange(original_count, dtype=np.int64)
-            simplification_skip_reason = None
-            # Source-indexed transition faces are the only safe way to join a
-            # heavily reduced backing contour to a dense visible rim.  If an
-            # earlier profile stage has already changed the ring cardinality,
-            # there is no longer a one-to-one source-index correspondence.
-            # Keep that ring intact instead of feeding a three-point RDP result
-            # into the generic annulus solver, where it would be expanded with
-            # straight chords that erase real concavities.
-            source_index_correspondence = original_count == len(previous_ids)
-            if tolerance > 0.0 and original_count > 3 and source_index_correspondence:
-                from .contour_simplification import simplify_closed_contour
-
-                projected = _project_connector_points(layer_points, plan)
-                retained = simplify_closed_contour(projected, tolerance)
-                candidate = layer_points[retained]
-                candidate_2d = projected[retained]
-                compact_ring = _project_connector_points(
-                    np.asarray(plan["peg_top"], dtype=np.float64), plan
-                )
-                # RDP chords can cut across a deep concavity.  Keep the dense
-                # ring rather than changing annulus/component topology when a
-                # compact connector would cease to be enclosed.
-                if all(
-                    point_in_poly(point, candidate_2d)
-                    or point_on_poly_boundary(point, candidate_2d)
-                    for point in compact_ring
-                ):
-                    layer_points = candidate
-                else:
-                    retained = np.arange(original_count, dtype=np.int64)
-                    simplification_skip_reason = "compact_connector_not_enclosed"
-            elif tolerance > 0.0 and original_count > 3:
-                simplification_skip_reason = "source_index_correspondence_unavailable"
-            plan["visible_interface_simplification_source_indices"] = [
-                int(value) for value in retained
-            ]
-            plan["visible_interface_outer_vertices_before_simplification"] = int(
-                original_count
-            )
-            plan["visible_interface_outer_vertices_after_simplification"] = int(
-                len(layer_points)
-            )
-            plan["visible_interface_simplification_applied"] = bool(
-                len(layer_points) < original_count
-            )
-            plan["visible_interface_simplification_skip_reason"] = (
-                simplification_skip_reason
-            )
         if _rings_coincident(layer_points, previous_points):
             continue
         layer_ids = _append_points(output_vertices, layer_points)
@@ -157,81 +103,15 @@ def add_local_male_connector_and_backing(
             stage_elapsed_seconds=round(time.perf_counter() - build_started, 3),
         )
         strip_face_start = len(output_faces)
-        simplification_applied = bool(
-            float(plan.get("visible_interface_simplification_tolerance_mm", 0.0)) > 0.0
-            and len(layer_ids) < len(previous_ids)
+        added, strip_audit, returned_points = _join_connector_rings(
+            output_vertices,
+            output_faces,
+            previous_ids,
+            layer_ids,
+            first_points=previous_points,
+            second_points=layer_points,
+            plan=plan,
         )
-        retained = plan.get("visible_interface_simplification_source_indices")
-        original_outer_count = int(
-            plan.get("visible_interface_outer_vertices_before_simplification", -1)
-        )
-        if (
-            simplification_applied
-            and isinstance(retained, list)
-            and len(retained) == len(layer_ids)
-            and len(previous_ids) == original_outer_count
-        ):
-            count = len(previous_ids)
-            faces: list[tuple[int, int, int]] = []
-            maximum_fanout_seen = 0
-            for inner_index, start_value in enumerate(retained):
-                start = int(start_value)
-                end = int(retained[(inner_index + 1) % len(retained)])
-                run = (end - start) % count
-                maximum_fanout_seen = max(maximum_fanout_seen, run + 1)
-                for step in range(run):
-                    current = (start + step) % count
-                    following = (current + 1) % count
-                    faces.append((
-                        int(previous_ids[current]),
-                        int(previous_ids[following]),
-                        int(layer_ids[inner_index]),
-                    ))
-                faces.append((
-                    int(previous_ids[end]),
-                    int(layer_ids[(inner_index + 1) % len(layer_ids)]),
-                    int(layer_ids[inner_index]),
-                ))
-            point_lookup = {
-                **{int(i): np.asarray(p, dtype=np.float64) for i, p in zip(previous_ids, previous_points)},
-                **{int(i): np.asarray(p, dtype=np.float64) for i, p in zip(layer_ids, layer_points)},
-            }
-            faces = orient_face_patch_consistently(
-                faces, point_lookup, np.asarray(plan["inward"], dtype=np.float64)
-            )
-            triangles = np.asarray(
-                [[point_lookup[value] for value in face] for face in faces],
-                dtype=np.float64,
-            )
-            double_areas = np.linalg.norm(
-                np.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0]),
-                axis=1,
-            )
-            if np.any(double_areas <= 1e-12):
-                raise ValueError("simplified backing transition contains a degenerate face")
-            output_faces.extend([list(face) for face in faces])
-            edge_lengths = np.linalg.norm(
-                triangles[:, [1, 2, 0]] - triangles[:, [0, 1, 2]], axis=2
-            )
-            added = len(faces)
-            strip_audit = {
-                "valid": True,
-                "reason": "",
-                "strategy": "source_indexed_simplified_profile_transition",
-                "maximum_fanout": int(maximum_fanout_seen),
-                "maximum_cross_edge_mm": float(edge_lengths.max(initial=0.0)),
-            }
-            returned_points = layer_points
-        else:
-            added, strip_audit, returned_points = _join_connector_rings(
-                output_vertices,
-                output_faces,
-                previous_ids,
-                layer_ids,
-                first_points=previous_points,
-                second_points=layer_points,
-                plan=plan,
-            )
         layer_points = returned_points
         if layer_index == 0 and backing_taper_depth > 1e-9:
             refinement_vertex_start = len(output_vertices)

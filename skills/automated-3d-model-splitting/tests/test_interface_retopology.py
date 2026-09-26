@@ -483,7 +483,6 @@ class InterfaceRetopologyTests(unittest.TestCase):
         self.assertEqual(config.smoothing_policy.profile, "print-balanced")
         self.assertEqual(config.smoothing_policy.maximum_displacement_mm, 10.0)
         self.assertEqual(config.smoothing_policy.p95_displacement_mm, 10.0)
-        self.assertEqual(config.visible_interface_simplification_tolerance, 1.0)
         self.assertEqual(config.smoothing_policy.maximum_affected_face_ratio, 0.02)
         self.assertEqual(config.smoothing_policy.maximum_affected_area_ratio, 0.15)
         self.assertEqual(config.smoothing_policy.maximum_affected_vertex_ratio, 0.15)

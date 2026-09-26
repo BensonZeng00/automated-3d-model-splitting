@@ -154,15 +154,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--model-entry", default=None, help="3MF internal .model entry to read; defaults to the mesh entry with most triangles.")
     parser.add_argument("--color-map-json", default=None, help="Optional JSON mapping color codes to hex strings or {name, hex, rgba}.")
-    parser.add_argument(
-        "--recognition-surface-profile",
-        choices=["exterior-visible", "all-faces"],
-        default="exterior-visible",
-        help=(
-            "Use paint visible from outside for part recognition, or retain legacy all-face recognition. "
-            "Geometry generation uses recursive inward extrusion for every non-body part."
-        ),
-    )
     parser.add_argument("--exterior-view-count", type=int, default=32, help="Outside depth-map directions used for recognition.")
     parser.add_argument("--exterior-depth-map-resolution", type=int, default=768, help="Square depth-map resolution per exterior view.")
     parser.add_argument("--exterior-depth-tolerance-mm", type=float, default=0.08, help="Depth tolerance for externally visible recognition faces.")
@@ -214,6 +205,14 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "User-confirmed noise/part/uncertain classifications for every review candidate. "
             "Classifications never change source geometry."
+        ),
+    )
+    parser.add_argument(
+        "--recognition-review-json",
+        default=None,
+        help=(
+            "User-reviewed delete/merge actions and final recognition confirmation. "
+            "Without a matching confirmation, full runs stop before assembly."
         ),
     )
     parser.add_argument(
@@ -318,17 +317,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--boundary-target-samples", type=int, default=384)
     parser.add_argument("--boundary-smooth-passes", type=int, default=28)
-    parser.add_argument(
-        "--visible-interface-simplification-tolerance",
-        type=float,
-        default=1.0,
-        metavar="MM",
-        help=(
-            "Maximum geometric deviation in millimeters when simplifying the "
-            "visible-interface backing contour before annulus triangulation "
-            "(default: 1.0; use 0 to disable)."
-        ),
-    )
     parser.add_argument(
         "--maximum-boundary-displacement-mm",
         type=float,
@@ -458,8 +446,6 @@ def main(argv: list[str] | None = None) -> None:
         parser.error("--boundary-target-samples must be at least 16")
     if args.boundary_smooth_passes < 0:
         parser.error("--boundary-smooth-passes must be non-negative")
-    if args.visible_interface_simplification_tolerance < 0:
-        parser.error("--visible-interface-simplification-tolerance must be non-negative")
     if args.boundary_retopology_band_mm <= 0:
         parser.error("--boundary-retopology-band-mm must be positive")
     if args.maximum_boundary_displacement_mm <= 0:

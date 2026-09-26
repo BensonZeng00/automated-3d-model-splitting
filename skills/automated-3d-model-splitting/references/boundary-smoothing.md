@@ -2,15 +2,20 @@
 
 This is the sole production boundary policy. `smooth` is the default; the source mode has been removed. First apply the area-based local cleanup and completion-first judgment in [completion-first.md](completion-first.md), then fit the shared seam.
 
-Before the final backing annulus is triangulated, its outer contour is reduced
-with topology-checked closed Douglas--Peucker simplification. The independent
-`--visible-interface-simplification-tolerance` parameter defaults to 1.0 mm and
-may be set to zero to disable this trade-off.
-It is a geometric deviation bound rather than a target vertex count. The result
-must retain winding, remain a simple closed polygon, and still contain the
-compact connector; otherwise the original contour is retained. This explicitly
-allows sub-resolution white/green boundary detail to move while leaving the
-more conservative backing/profile tolerances independent.
+Recognized component boundary loops are cleaned once during recognition. Sparse
+isolated spike vertices are removed using a local edge-scale and chord-deviation
+check. Only the largest perimeter loop is considered for each recognized
+component; all secondary loops are removed. The selected loop is also removed
+when its largest axis-aligned span is below 1 mm. If this leaves a component
+without an accepted ring, recognition excludes that component before it creates
+the final region list; plotting receives only that final list. Both simplified
+and unsimplified topology snapshots omit rejected loops, preventing later seam
+planning from restoring them. A surviving ring is simplified by approximately
+5% sampling at equal physical arc-length intervals, with at least three source
+vertices. There is no geometric deviation tolerance. The review image applies
+a light cyclic smooth to the retained samples for readability; source mesh
+vertices are not moved. Later interface construction consumes the frozen
+source-vertex rings and does not simplify them again.
 
 For every production split, use `planar-arc-retopology` for each cut boundary. Canonicalize the closed loop by source vertex id, fit a stable local plane with SVD, project to 2-D, and resample at 384 equal physical arc-length positions. Fit those projected samples with a 24-control least-squares periodic cubic B-spline and fit the stable-plane-normal height independently with an 8-control periodic cubic B-spline.
 

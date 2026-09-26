@@ -383,6 +383,34 @@ def summarize_components(
     return components, ignored
 
 
+def filter_groups_below_area(
+    vertices: np.ndarray,
+    faces: np.ndarray,
+    colors: list[str],
+    groups: Iterable[np.ndarray],
+    minimum_area_mm2: float = 1.0,
+) -> tuple[list[np.ndarray], list[dict]]:
+    """Exclude sub-threshold paint islands before review and part recognition."""
+    triangle_area_mm2 = triangle_areas(vertices, faces)
+    retained: list[np.ndarray] = []
+    excluded: list[dict] = []
+    for group in groups:
+        face_ids = np.asarray(group, dtype=np.int64)
+        area_mm2 = float(triangle_area_mm2[face_ids].sum())
+        if area_mm2 >= float(minimum_area_mm2):
+            retained.append(face_ids)
+            continue
+        excluded.append({
+            "source_min_face_index": int(face_ids.min()) if len(face_ids) else -1,
+            "color_code": representative_color_token(face_ids, colors) if len(face_ids) else "",
+            "faces": int(len(face_ids)),
+            "area_mm2": area_mm2,
+            "reason": "below_minimum_recognition_area",
+            "minimum_area_mm2": float(minimum_area_mm2),
+        })
+    return retained, excluded
+
+
 def make_component_from_global_faces(
     vertices: np.ndarray,
     faces: np.ndarray,

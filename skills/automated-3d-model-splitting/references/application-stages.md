@@ -8,7 +8,7 @@
 |---|---|---|---|
 | 01 预检 | 输入路径、运行环境 | 格式、依赖和参数预检记录 | `01_preflight.json` |
 | 02 读取项目 | 通过预检的 3MF | 毫米坐标顶点/三角面、逐面 paint token、项目设置 | `02_loaded_project.npz`、`02_loaded_project_summary.json` |
-| 03 识别区域 | 已读取网格、识别策略、可选用户确认 | 区域来源面索引、颜色与语义审核记录、冻结后的源边界环 | `03_recognition_regions.npz`、`03_recognized_boundaries.npz`、`03_recognition_summary.json` |
+| 03 识别区域 | 已读取网格、外表面颜色、语义审核与边界简化策略 | 区域来源面索引、简化后的冻结边界环、彩色边界预览与判断摘要 | `03_recognition_regions.npz`、`03_recognized_boundaries.npz`、`03_recognition_summary.json`、`03_recognition_boundaries.png`、`03_recognition_boundary_review.md` |
 | 04 装配规划 | 识别区域、冻结边界、主体策略、连接证据 | 主体索引、父子关系、递归层 | `04_assembly_plan.json` |
 | 05 接口规划与预检 | 装配树、共享边界策略 | 接口预检记录、递归层数、接口策略 | `05_interface_plan.json` |
 | 06 递归构建 | 接口决策、源网格、递归执行计划 | 最终活动零件网格及递归记录 | `06_recursive_build_meshes.npz`、`06_recursive_build_summary.json` |
@@ -17,7 +17,9 @@
 
 NPZ 使用 `numpy.load(path, allow_pickle=False)` 检查。每个 NPZ 旁有同前缀的 manifest JSON，记录数组名、形状、类型和 SHA-256。阶段摘要 JSON 使用 UTF-8，可直接查看。
 
-识别完成后，application 为本次运行创建不可变的 `RecognizedBoundaries`。它按组件保存有序边界环、源网格顶点 ID 和对应坐标；后续装配规划及父子边界关系校正读取同一快照，阶段摘要记录其指纹。NPZ 中 `component_loop_offsets` 索引组件拥有的环，`boundary_loop_offsets` 索引每个环的顶点范围，`boundary_vertex_ids` 和 `boundary_points` 一一对应。后续几何构建可以产生构建网格自己的拓扑边界，但不能改写这份识别快照。
+识别完成后，application 为本次运行创建不可变的 `RecognizedBoundaries`。候选环在识别阶段按约 5% 等距弧长抽样简化，并按区域保存有序源网格顶点 ID 和坐标；后续装配规划及父子边界关系校正读取同一快照，阶段摘要记录其指纹。用于精确共享边拓扑检查的原始源环也保存在同一快照中。NPZ 中 `component_loop_offsets` 索引简化环，`boundary_loop_offsets` 索引每个环的顶点范围，`boundary_vertex_ids` 和 `boundary_points` 一一对应；`source_*` 数组保存原始拓扑环。识别阶段同时输出每环独立颜色的 PNG 和用于判断保留/合并/删除的 Markdown 摘要。后续构建可生成自身拓扑边界，但不再简化接口边界。
+
+连通分组后先按三角面总面积过滤小于 `1 mm²` 的区域，将其作为噪声排除在有效零件、边界与语义审核清单之外；原始网格与涂色数组不改写，排除区域的面数、面积、颜色和原因写入 `03_recognition_summary.json`。剩余区域再进入面数/长细形状审核与边界提取。识别会在正式生成区域清单前删除所有边界环都被过滤的候选区域，并在识别摘要中保留剔除原因。绘图只接收最终有效区域和边界，不改变零件集合。正常完整流程在阶段 03 后必须经过一次识别确认。首次运行会在工件目录生成 `03_recognition_review.json`，并以退出码 4 暂停装配。用户可在 `actions` 中填写 `{"action":"delete","parts":["P06"]}` 或 `{"action":"merge","parts":["P02","P03"],"keep":"P02"}`，然后用 `--recognition-review-json` 重跑。删除/合并应用后会生成修订报告和新的复核 JSON，再次确认该文件中的 `user_confirmed=true` 才继续；结果指纹必须与复核文件一致。没有修改时将 `actions` 保持为空，确认后重跑即可继续。预览图例和区域表使用同一组有效 P 编号。
 
 ## 单步调试
 

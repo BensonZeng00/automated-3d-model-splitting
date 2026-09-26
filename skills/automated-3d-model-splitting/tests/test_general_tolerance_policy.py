@@ -173,7 +173,7 @@ class GeneralToleranceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             parser = build_parser()
             args = parser.parse_args(['--input', str(Path(directory) / 'source.3mf'),
-                '--recognize-only', '--recognition-surface-profile', 'all-faces',
+                '--recognize-only',
                 '--body-strategy', 'largest', '--noise-review-max-faces', '0',
                 '--small-region-review-max-faces', '0'])
             pipeline = SplitPipeline(SplitConfig(args, Path(args.input), {}), parser)

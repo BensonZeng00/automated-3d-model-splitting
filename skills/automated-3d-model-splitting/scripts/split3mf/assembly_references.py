@@ -1562,9 +1562,6 @@ def build_layer_child_cut_references(
                         surface_validation_mode=str(
                             interface_retopology.config.connector_surface_validation
                         ),
-                        visible_interface_simplification_tolerance=float(
-                            interface_retopology.config.visible_interface_simplification_tolerance
-                        ),
                     )
                     initial_cap_quality = preflight_local_connector_patch(
                         source_vertices=planned_vertices,

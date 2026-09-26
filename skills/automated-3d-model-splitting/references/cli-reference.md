@@ -81,7 +81,6 @@ Whole-tree preflight plans every recursive interface before the first expensive 
 
 ## Exterior Recognition
 
-- `--recognition-surface-profile exterior-visible|all-faces`
 - `--exterior-view-count 32`
 - `--exterior-depth-map-resolution 768`
 - `--exterior-depth-tolerance-mm 0.08`
@@ -108,7 +107,7 @@ Automatic body selection records normal coherence, opposite-normal balance, domi
 - `--region-review-dir PATH`
 - `--region-review-resolution 320`
 
-The face thresholds select mandatory semantic-review candidates only. Regions through 100 faces are noise candidates, regions from 101 through 999 faces are small-region candidates, and long strips require review at every face count. Confirm every candidate as `noise`, `part`, or `uncertain`. All classifications remain unchanged source geometry and follow the same normal interface-planning path. No classification merges, deletes, recolors, repairs, or filters a region. The former `--min-faces` and `--tiny-component-*` interface is intentionally unsupported.
+Before face-count review, recognition automatically excludes connected paint regions with total source-triangle area below `1 mm²` from the effective part and boundary candidate sets; source mesh and paint arrays remain unchanged, and exclusions are listed in `03_recognition_summary.json`. For remaining regions, the face thresholds select mandatory semantic-review candidates: through 100 faces are noise candidates, 101 through 999 faces are small-region candidates, and long strips require review at every face count. Confirm every candidate as `noise`, `part`, or `uncertain`. These classifications do not merge, delete, recolor, repair, or filter a region. The former `--min-faces` and `--tiny-component-*` interface is intentionally unsupported.
 
 High-confidence part semantics may include `force_inward_vector: [x,y,z]`, `force_parent_direction: true`, or a `guided_internal_cut` object. A guided cut supplies `entry_direction`, `target_plane_normal`, `target_plane_point_mm`, optional `minimum_depth_mm`, `maximum_depth_mm`, `entry_inset_mm`, and `maximum_parallel_shift_mm`. The entry vector is the front internal transition; the plane is the deeper shared cut. The planner keeps the visible rim locked, localizes the entry inset to measured thin arcs, searches bounded parent-interior variants, reuses one source-id fit ring on both parts, and blocks poor side-wall triangulation. These are audited geometry constraints, not model-axis defaults.
 
@@ -137,7 +136,6 @@ A hidden generated-backing thin patch no larger than 2 mm² is recorded as a pri
 
 - `--boundary-target-samples 384`
 - `--boundary-smooth-passes 28`
-- `--visible-interface-simplification-tolerance 0.4` (millimeters; `0` disables)
 - `--boundary-retopology-band-mm 3.0`
 - `--connector-slope-validation strict|advisory` (default `advisory`)
 - `--surface-band-validation strict|advisory` (default `strict`)

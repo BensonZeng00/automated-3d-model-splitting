@@ -32,6 +32,13 @@ from .stage_cache import (
 )
 from .semantic_partition import apply_semantic_partitions
 from .application import BoundarySnapshotBuilder, StageArtifactStore
+from .application.boundary_review_artifacts import write_boundary_review_artifacts
+from .application.recognition_review import (
+    apply_recognition_actions,
+    load_recognition_review,
+    result_fingerprint as recognition_result_fingerprint,
+    write_recognition_review_template,
+)
 
 
 def uses_layer_child_cut_references(assembly_mode: str, tree_strategy: str) -> bool:
@@ -206,57 +213,33 @@ class SplitPipeline:
             "已按厂商 paint_color 槽位编码解析材料颜色",
             mapping={code: {"hex": info.get("hex"), "slot": info.get("filament_slot"), "source": info.get("mapping_source")} for code, info in COLOR_INFO.items()},
         )
-        if args.recognition_surface_profile == "exterior-visible":
-            runtime_log(
-                "识别",
-                "exterior_visibility_start",
-                "开始外表面多视角深度识别",
-                views=int(args.exterior_view_count),
-                resolution=int(args.exterior_depth_map_resolution),
-            )
-            progress(
-                "识别",
-                "正在从模型外部多方向采样可见表面颜色",
-                views=args.exterior_view_count,
-                resolution=args.exterior_depth_map_resolution,
-                depth_tolerance_mm=args.exterior_depth_tolerance_mm,
-            )
-            visible_faces, exterior_visibility = exterior_visible_face_mask(
-                vertices,
-                faces,
-                view_count=args.exterior_view_count,
-                depth_map_resolution=args.exterior_depth_map_resolution,
-                depth_tolerance_mm=args.exterior_depth_tolerance_mm,
-            )
-            recognition_token_colors, exterior_color_filter = recognition_colors_from_exterior(
-                colors,
-                visible_faces,
-                body_color_override=args.body_color,
-                faces=faces,
-            )
-        else:
-            visible_faces = np.ones(len(faces), dtype=bool)
-            recognition_token_colors = list(colors)
-            exterior_visibility = {
-                "profile": "all-faces",
-                "method": "legacy_all_faces",
-                "view_count": 0,
-                "depth_map_resolution": 0,
-                "depth_tolerance_mm": 0.0,
-                "visible_faces": int(len(faces)),
-                "occluded_faces": 0,
-                "visible_ratio": 1.0,
-                "per_view_visible_faces": [],
-            }
-            exterior_color_filter = {
-                "base_color_token": args.body_color,
-                "base_color_source": "not_applied",
-                "reassigned_occluded_faces": 0,
-                "already_base_occluded_faces": 0,
-                "protected_enclosed_occluded_faces": 0,
-                "protected_enclosed_by_source_token": [],
-                "reassigned_by_source_token": [],
-            }
+        runtime_log(
+            "识别",
+            "exterior_visibility_start",
+            "开始外表面多视角深度识别",
+            views=int(args.exterior_view_count),
+            resolution=int(args.exterior_depth_map_resolution),
+        )
+        progress(
+            "识别",
+            "正在从模型外部多方向采样可见表面颜色",
+            views=args.exterior_view_count,
+            resolution=args.exterior_depth_map_resolution,
+            depth_tolerance_mm=args.exterior_depth_tolerance_mm,
+        )
+        visible_faces, exterior_visibility = exterior_visible_face_mask(
+            vertices,
+            faces,
+            view_count=args.exterior_view_count,
+            depth_map_resolution=args.exterior_depth_map_resolution,
+            depth_tolerance_mm=args.exterior_depth_tolerance_mm,
+        )
+        recognition_token_colors, exterior_color_filter = recognition_colors_from_exterior(
+            colors,
+            visible_faces,
+            body_color_override=args.body_color,
+            faces=faces,
+        )
         runtime_log(
             "识别",
             "exterior_visibility_done",
@@ -290,6 +273,24 @@ class SplitPipeline:
             small_region_review_max_faces=int(args.small_region_review_max_faces),
         )
         groups = connected_components_by_color(faces, recognition_colors)
+        raw_group_count = len(groups)
+        groups, automatic_noise_exclusions = filter_groups_below_area(
+            vertices,
+            faces,
+            recognition_token_colors,
+            groups,
+            minimum_area_mm2=1.0,
+        )
+        if automatic_noise_exclusions:
+            runtime_log(
+                "识别",
+                "subthreshold_regions_filtered",
+                "已将面积小于 1 mm² 的连通区域过滤为噪声",
+                minimum_area_mm2=1.0,
+                filtered_regions=len(automatic_noise_exclusions),
+                filtered_faces=sum(item["faces"] for item in automatic_noise_exclusions),
+                filtered_area_mm2=sum(item["area_mm2"] for item in automatic_noise_exclusions),
+            )
         if len(groups) > 1000:
             # Dense triangle-selector paint commonly leaves thousands of
             # microscopic same-material islands.  Reviewing each island is
@@ -396,6 +397,36 @@ class SplitPipeline:
                 applied=semantic_partition_records["applied"],
                 rejected=semantic_partition_records["rejected"],
             )
+        try:
+            components, recognized_boundaries, recognition_exclusions = (
+                self.boundary_snapshot_builder.build_with_component_filter(
+                    vertices, faces, components
+                )
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
+        original_recognition_components = list(components)
+        try:
+            recognition_review = load_recognition_review(
+                Path(args.recognition_review_json).expanduser()
+                if args.recognition_review_json else None,
+                source_path=input_path,
+                source_face_count=len(faces),
+                components=original_recognition_components,
+            )
+            components = apply_recognition_actions(
+                vertices, faces, original_recognition_components,
+                recognition_review["actions"],
+            )
+            if recognition_review["actions"]:
+                components, recognized_boundaries, action_exclusions = (
+                    self.boundary_snapshot_builder.build_with_component_filter(
+                        vertices, faces, components
+                    )
+                )
+                recognition_exclusions.extend(action_exclusions)
+        except (OSError, ValueError) as exc:
+            parser.error(str(exc))
         source_region_classifications = list(review_decisions.values())
         if not components:
             raise SystemExit("No source components found")
@@ -420,6 +451,24 @@ class SplitPipeline:
             components = merge_result.components
             explicit_body_index = int(merge_result.body_index)
             explicit_body_merge = merge_result.record
+            explicit_body_component = components[explicit_body_index - 1]
+            components, recognized_boundaries, merge_exclusions = (
+                self.boundary_snapshot_builder.build_with_component_filter(
+                    vertices, faces, components
+                )
+            )
+            recognition_exclusions.extend(merge_exclusions)
+            explicit_body_index = next(
+                (
+                    index
+                    for index, component in enumerate(components, start=1)
+                    if component is explicit_body_component
+                ),
+                None,
+            )
+            if explicit_body_index is None:
+                parser.error("recognition boundary filtering removed the explicitly merged body")
+            explicit_body_merge["effective_body_index"] = explicit_body_index
             runtime_log(
                 "主体",
                 "explicit_body_merge_done",
@@ -435,21 +484,35 @@ class SplitPipeline:
             "识别",
             "component_connectivity_done",
             "连通 source 区域识别与语义审核完成",
-            raw_groups=int(len(groups)),
+            raw_groups=int(raw_group_count),
             effective_components=int(len(components)),
+            boundary_filtered_components=int(len(recognition_exclusions)),
             reviewed_source_regions=int(len(source_region_classifications)),
             source_geometry_changed=False,
-        )
-        # This run-scoped immutable snapshot is the only source-mesh boundary
-        # definition consumed by downstream planning stages.
-        recognized_boundaries = self.boundary_snapshot_builder.build(
-            vertices, faces, components
         )
         print("region_review=" + json.dumps({
             "policy": "preserve-source",
             "review": region_review,
             "classifications": source_region_classifications,
+            "automatic_noise_filter": {
+                "minimum_area_mm2": 1.0,
+                "excluded_region_count": len(automatic_noise_exclusions),
+                "excluded_face_count": sum(item["faces"] for item in automatic_noise_exclusions),
+                "excluded_area_mm2": sum(item["area_mm2"] for item in automatic_noise_exclusions),
+            },
         }, ensure_ascii=False, sort_keys=True), flush=True)
+        if automatic_noise_exclusions:
+            print(
+                "recognition_noise_exclusions="
+                + json.dumps(automatic_noise_exclusions, ensure_ascii=False, sort_keys=True),
+                flush=True,
+            )
+        if recognition_exclusions:
+            print(
+                "recognition_excluded_regions="
+                + json.dumps(recognition_exclusions, ensure_ascii=False, sort_keys=True),
+                flush=True,
+            )
         model_center = vertices.mean(axis=0)
         runtime_log(
             "主体",
@@ -504,7 +567,37 @@ class SplitPipeline:
             visual_semantic_min_confidence,
         )
         if interface_retreat_records["applied"]:
-            body_component = components[int(body_index) - 1]
+            requested_body_face_ids = None
+            requested_body_index = (
+                explicit_body_index
+                if explicit_body_index is not None
+                else args.body_index
+            )
+            if requested_body_index is not None and 1 <= int(requested_body_index) <= len(components):
+                requested_body_face_ids = np.asarray(
+                    components[int(requested_body_index) - 1].global_faces,
+                    dtype=np.int64,
+                )
+            previous_component_count = len(components)
+            components, recognized_boundaries, retreat_exclusions = (
+                self.boundary_snapshot_builder.build_with_component_filter(
+                    vertices, faces, components
+                )
+            )
+            recognition_exclusions.extend(retreat_exclusions)
+            if len(components) != previous_component_count and requested_body_face_ids is not None:
+                requested_faces = set(map(int, requested_body_face_ids))
+                overlap_counts = [
+                    len(requested_faces.intersection(map(int, component.global_faces)))
+                    for component in components
+                ]
+                if not overlap_counts or max(overlap_counts) == 0:
+                    parser.error("recognition boundary filtering removed the requested body region")
+                requested_body_index = int(np.argmax(overlap_counts)) + 1
+                if explicit_body_index is not None:
+                    explicit_body_index = requested_body_index
+                    if explicit_body_merge is not None:
+                        explicit_body_merge["effective_body_index"] = explicit_body_index
             body_separator_evidence = body_selection_separator_evidence(
                 vertices=vertices,
                 faces=faces,
@@ -512,6 +605,20 @@ class SplitPipeline:
                 model_center=model_center,
                 min_faces=(args.small_region_review_max_faces + 1),
             )
+            excluded_auto_body_indices = {
+                int(index)
+                for index, record in body_separator_evidence.items()
+                if record.get("exclude_from_automatic_body")
+            }
+            body_component = choose_body_component(
+                components,
+                args.body_strategy,
+                args.body_color,
+                requested_body_index,
+                excluded_auto_indices=excluded_auto_body_indices,
+                auto_selection_evidence=body_separator_evidence,
+            )
+            body_index = component_identity_index(components, body_component)
             runtime_log(
                 "切面内收",
                 "interface_retreat_done",
@@ -573,10 +680,56 @@ class SplitPipeline:
             ),
         )
         for record in recognition:
-            record["recognition_basis"] = args.recognition_surface_profile
-            record["occluded_paint_excluded"] = args.recognition_surface_profile == "exterior-visible"
+            record["recognition_basis"] = "exterior-visible"
+            record["occluded_paint_excluded"] = True
             record.update(processing_classifications[int(record["part_index"])])
-        progress("识别", f"识别到 {len(recognition)} 个有效部件", region_review="preserve-source", reviewed=len(source_region_classifications))
+        # The recognition-stage snapshot already filtered boundaryless regions
+        # before review and body selection; later stages consume this object.
+        boundary_review_artifacts = write_boundary_review_artifacts(
+            stage_artifacts.run_dir,
+            recognized_boundaries,
+            recognition,
+            {"status": region_review.get("status", "unknown"),
+             "candidate_count": region_review.get("candidate_count", 0),
+             "classifications": source_region_classifications},
+            components,
+            stage_artifacts.run_dir / "03_recognition_review.json",
+        )
+        current_result_fingerprint = recognition_result_fingerprint(
+            components, recognized_boundaries
+        )
+        recognition_confirmed = (
+            bool(recognition_review["user_confirmed"])
+            and recognition_review["expected_result_fingerprint"] == current_result_fingerprint
+        )
+        review_template_path = stage_artifacts.run_dir / "03_recognition_review.json"
+        write_recognition_review_template(
+            review_template_path,
+            review=recognition_review,
+            result_fingerprint_value=current_result_fingerprint,
+            components=components,
+            reference_regions=[
+                {
+                    "part": f"P{index:02d}",
+                    "source_min_face_index": int(np.min(component.global_faces)),
+                    "face_count": int(component.face_count),
+                    "color_code": str(component.color_code),
+                }
+                for index, component in enumerate(original_recognition_components, start=1)
+            ],
+            user_confirmed=recognition_confirmed,
+        )
+        stage_artifacts.write_json(
+            "03_recognition_review_status",
+            {
+                "status": "user_confirmed" if recognition_confirmed else "needs_user_confirmation",
+                "decision_file": str(review_template_path),
+                "recognition_fingerprint": recognition_review["recognition_fingerprint"],
+                "result_fingerprint": current_result_fingerprint,
+                "actions": recognition_review["actions"],
+            },
+        )
+        progress("识别", f"识别到 {len(recognition)} 个有效部件", region_review="preserve-source", reviewed=len(source_region_classifications), area_filtered_noise=len(automatic_noise_exclusions))
         stage_artifacts.write_arrays(
             "03_recognition_regions",
             **{f"region_{index:04d}_source_face_ids": np.asarray(component.global_faces, dtype=np.int64)
@@ -590,21 +743,42 @@ class SplitPipeline:
             "03_recognition_summary",
             {"regions": recognition, "region_review": region_review,
              "source_region_classifications": source_region_classifications,
+             "automatic_noise_exclusions": automatic_noise_exclusions,
+             "recognition_excluded_regions": recognition_exclusions,
              "source_geometry_changed": False,
              "recognized_boundaries": {
                  "fingerprint": recognized_boundaries.fingerprint,
                  "component_count": len(recognized_boundaries.component_loops),
                  "loop_count": sum(len(loops) for loops in recognized_boundaries.component_loops),
+                 "filtered_noise_loop_count": sum(
+                     record.get("status") == "filtered"
+                     for record in recognized_boundaries.simplification_records
+                 ),
                  "loop_vertex_counts": [
                      [len(loop) for loop in loops]
                      for loops in recognized_boundaries.component_loops
                  ],
                  "source_vertex_count": recognized_boundaries.source_vertex_count,
                  "source_face_count": recognized_boundaries.source_face_count,
+                 "simplification_retained_fraction": 0.05,
+                 "simplification_records": list(
+                     recognized_boundaries.simplification_records
+                 ),
+                 "review_artifacts": boundary_review_artifacts,
                  "immutable_after_recognition": True,
              }},
         )
         print_recognition(recognition)
+        if not recognition_confirmed and not (
+            args.recognize_only or getattr(args, "stop_after_stage", None) == "recognize"
+        ):
+            print("recognition_review_required=" + json.dumps({
+                "status": "needs_user_confirmation",
+                "review_json": str(review_template_path),
+                "report": boundary_review_artifacts["boundary_review_report"],
+                "actions_applied_for_review": recognition_review["actions"],
+            }, ensure_ascii=False), flush=True)
+            raise SystemExit(4)
         if args.recognize_only or getattr(args, "stop_after_stage", None) == "recognize":
             return
         processing_mode_by_part = {
@@ -625,7 +799,7 @@ class SplitPipeline:
             for index, component in enumerate(components, start=1)
             for record in component_boundary_loop_neighbors(
                 vertices, faces, component, index, boundary_neighbor_lookup,
-                recognized_boundaries.loops_for_component(index),
+                recognized_boundaries.source_loops_for_component(index),
             )
         ]
         recursive_minimal_reparents: list[dict] = []
@@ -1113,7 +1287,7 @@ class SplitPipeline:
             "source": input_path.name,
             "output_3mf": str(output_path),
             "format_profile_requested": args.format_profile,
-            "recognition_surface_profile": args.recognition_surface_profile,
+            "recognition_surface_profile": "exterior-visible",
             "exterior_surface_recognition": exterior_visibility,
             "format_support": project_settings.get("_format_support", {}),
             "vendor_paint_decode": project_settings.get("_vendor_paint_decode", {}),
@@ -1163,9 +1337,6 @@ class SplitPipeline:
             "interface_retopology_mode": "planar-arc-retopology",
             "boundary_target_samples": args.boundary_target_samples,
             "boundary_smooth_passes": args.boundary_smooth_passes,
-            "visible_interface_simplification_tolerance_mm": float(
-                args.visible_interface_simplification_tolerance
-            ),
             "boundary_retopology_band_mm": args.boundary_retopology_band_mm,
             "boundary_target_slope_deg": interface_retopology.config.target_slope_degrees,
             "boundary_min_slope_deg": interface_retopology.config.minimum_slope_degrees,
@@ -1637,8 +1808,8 @@ class SplitPipeline:
                        ('face_color_hexes', 'face_filament_slot_indices', 'face_color_codes')
                        if field in strict_entry},
                     "annotation": {
-                        "recognition_basis": args.recognition_surface_profile,
-                        "occluded_paint_excluded": args.recognition_surface_profile == "exterior-visible",
+                        "recognition_basis": "exterior-visible",
+                        "occluded_paint_excluded": True,
                         "processing_mode": stats["processing_mode"],
                         "selected_processing_mode": selected_processing_mode,
                         "suggested_processing_mode": classification["suggested_processing_mode"],
@@ -1670,9 +1841,6 @@ class SplitPipeline:
                         "interface_retopology_mode": "planar-arc-retopology",
                         "boundary_target_samples": int(args.boundary_target_samples),
                         "boundary_smooth_passes": int(args.boundary_smooth_passes),
-                        "visible_interface_simplification_tolerance_mm": float(
-                            args.visible_interface_simplification_tolerance
-                        ),
                         "boundary_retopology_band_mm": float(args.boundary_retopology_band_mm),
                         "boundary_target_slope_deg": float(interface_retopology.config.target_slope_degrees),
                         "boundary_min_slope_deg": float(interface_retopology.config.minimum_slope_degrees),
@@ -2109,7 +2277,7 @@ class SplitPipeline:
                 processing_classifications[index] for index in sorted(processing_classifications)
             ],
             "inward_depth_audit": inward_depth_audit,
-            "recognition_surface_profile": args.recognition_surface_profile,
+            "recognition_surface_profile": "exterior-visible",
             "exterior_surface_recognition": exterior_visibility,
             "recursive_minimal_layers": recursive_minimal_layers,
             "strict_recursive_execution": report["strict_recursive_execution"],

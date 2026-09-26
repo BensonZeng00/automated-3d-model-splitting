@@ -685,6 +685,10 @@ class SplitPipeline:
             record.update(processing_classifications[int(record["part_index"])])
         # The recognition-stage snapshot already filtered boundaryless regions
         # before review and body selection; later stages consume this object.
+        source_boundary_color_map = {
+            str(token): str(COLOR_INFO.get(str(token), {}).get("hex", "#A8A8AC"))
+            for token in set(str(value) for value in colors)
+        }
         boundary_review_artifacts = write_boundary_review_artifacts(
             stage_artifacts.run_dir,
             recognized_boundaries,
@@ -694,6 +698,10 @@ class SplitPipeline:
              "classifications": source_region_classifications},
             components,
             stage_artifacts.run_dir / "03_recognition_review.json",
+            source_vertices=vertices,
+            source_faces=faces,
+            source_face_color_tokens=colors,
+            source_color_map=source_boundary_color_map,
         )
         current_result_fingerprint = recognition_result_fingerprint(
             components, recognized_boundaries

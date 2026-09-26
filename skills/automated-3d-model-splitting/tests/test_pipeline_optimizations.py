@@ -23,7 +23,6 @@ from split3mf.common import Component
 from split3mf.explicit_merge import merge_body_components, parse_part_group
 from split3mf.cap_template import fit_affine_cap_inside_parent
 from split3mf.part_geometry import ParentThicknessProbe
-from split3mf.pipeline import uses_layer_child_cut_references
 
 
 class _Decision:
@@ -38,12 +37,6 @@ class _Decision:
 
 
 class PipelineOptimizationTests(unittest.TestCase):
-    def test_only_recursive_minimal_uses_exclusive_layer_cut_references(self) -> None:
-        self.assertTrue(uses_layer_child_cut_references("tree", "recursive-minimal"))
-        self.assertTrue(uses_layer_child_cut_references("flat", "recursive-minimal"))
-        self.assertFalse(uses_layer_child_cut_references("legacy-flat", "recursive-minimal"))
-        self.assertFalse(uses_layer_child_cut_references("tree", "strongest-path"))
-
     def test_affine_cap_backoff_can_converge_after_four_measurements(self) -> None:
         template = np.array(
             [
@@ -184,11 +177,11 @@ class PipelineOptimizationTests(unittest.TestCase):
         self.assertEqual(result.original_to_effective, {1: 1, 2: 1})
         self.assertTrue(result.record["per_face_materials_preserved"])
 
-    def test_cli_enables_full_tree_preflight_without_enabling_cache(self) -> None:
-        args = build_parser().parse_args(["--input", "placeholder.3mf"])
-        self.assertTrue(args.full_tree_preflight)
-        self.assertEqual(args.resume, "off")
-        self.assertIsNone(args.cache_dir)
+    def test_cli_removes_recursive_pipeline_switches(self) -> None:
+        parser = build_parser()
+        for option in ("--full-tree-preflight", "--resume", "--debug-recursive-3mf"):
+            with self.subTest(option=option), self.assertRaises(SystemExit):
+                parser.parse_args(["--input", "placeholder.3mf", option])
 
     def test_preflight_toggle_does_not_change_geometry_cache_arguments(self) -> None:
         enabled = normalized_run_arguments(

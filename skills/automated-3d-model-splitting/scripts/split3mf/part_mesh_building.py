@@ -17,6 +17,7 @@ from .selection import *
 from .assembly import *
 from .validation import *
 from .interface_retopology import InterfaceRetopologyService, generated_geometry_boundary_vertices
+from .mesh import homothetic_loop_points
 from .domain import PlanarArcRetopologyContext, CapDecision
 from .hidden_interface import HIDDEN_INTERFACE_MINIMUM_LOAD_BEARING_DEPTH_MM, MAX_BOUNDARY_THICKNESS_PROBES, HiddenInterfacePlanner, boundary_screening_indices
 from .guided_internal_cut import GuidedInternalCutPlanner, GuidedInternalCutSpec, adaptive_guided_entry_ring
@@ -54,6 +55,10 @@ def make_part_mesh(
     cap_mode: str,
     planar_extra_limit_mm: float,
     parent_contact_only: bool = False,
+    interface_scale_ratio: float = 1.0,
+    interface_axis_by_loop: dict[int, np.ndarray] | None = None,
+    interface_id_by_loop: dict[int, str] | None = None,
+    exact_interface_clearance: bool = False,
 ) -> tuple[trimesh.Trimesh, dict]:
     parent_thickness_probe = ParentThicknessProbe(vertices, faces)
     local_vertices, local_faces, _, global_vertex_ids = build_local_mesh(vertices, faces, component)
@@ -113,6 +118,8 @@ def make_part_mesh(
         0.0,
     )
     child_cut_refs = child_cut_refs or []
+    interface_axis_by_loop = interface_axis_by_loop or {}
+    interface_id_by_loop = interface_id_by_loop or {}
     child_component_indices = {int(ref["component_index"]) for ref in child_cut_refs}
     socket_flat_clearance_mm = max(float(flat_clearance_mm), 0.0)
     sibling_clearance_mm = max(float(sibling_clearance_mm), 0.0)
@@ -175,6 +182,11 @@ def make_part_mesh(
         }
 
     for loop_index, loop in enumerate(loops):
+        loop_scale_ratio = (
+            float(interface_scale_ratio)
+            if loop_index in interface_axis_by_loop
+            else 1.0
+        )
         loop_array = np.array(loop, dtype=np.int64)
         source_boundary_points = visible_source_vertices[loop_array]
         internal_boundary_points = hidden_geometry_vertices[loop_array]
@@ -238,14 +250,26 @@ def make_part_mesh(
                 )
             else:
                 socket_u, socket_v = orthonormal_basis(socket_inward)
-                socket_points = internal_boundary_points
+                interface_axis = np.asarray(
+                    socket_ref.get("interface_axis", interface_axis_by_loop.get(loop_index, socket_inward)),
+                    dtype=np.float64,
+                )
+                socket_points = homothetic_loop_points(
+                    internal_boundary_points,
+                    interface_axis,
+                    loop_scale_ratio,
+                )
                 effective_socket_overcut_mm = max(
                     float(socket_ref.get("socket_overcut_mm", socket_overcut_mm)), 0.0
                 )
                 if effective_socket_overcut_mm > 1e-9:
-                    socket_points = offset_points_along_conormals(
-                        internal_boundary_points,
-                        loop_interior_conormals,
+                    socket_u, socket_v = orthonormal_basis(interface_axis)
+                    socket_points = radial_offset_points(
+                        socket_points,
+                        socket_points.mean(axis=0),
+                        socket_u,
+                        socket_v,
+                        interface_axis,
                         effective_socket_overcut_mm,
                     )
                 socket_directions = reference_loop_inward_directions(
@@ -285,9 +309,9 @@ def make_part_mesh(
                         f"{part_id} loop {int(loop_index)} matching child "
                         f"P{int(socket_ref['component_index']):02d}"
                     ),
-                    child_interior_conormals=reference_loop_interior_conormals(
-                        socket_ref, loop_global_ordered
-                    ),
+                    child_interior_conormals=None,
+                    interface_scale_ratio=loop_scale_ratio,
+                    interface_axis=interface_axis,
                 )
                 added_side, added_cap, extension_record = add_inward_lead_extrusion_and_cap(
                     output_vertices=output_vertices,
@@ -356,25 +380,56 @@ def make_part_mesh(
             continue
 
         top_points = source_boundary_points.copy()
-        effective_profile_inset_mm, taper_profile_record = tapered_profile_inset_limit(
-            top_points,
-            fit_clearance_mm=insert_shrink_mm,
-            maximum_taper_depth_mm=lead_in_mm,
-            maximum_total_depth_mm=tapered_profile_total_depth_budget(
-                max_extension_mm,
-                insert_planar_extra_limit_mm,
-            ),
+        if exact_interface_clearance and loop_index in interface_axis_by_loop:
+            effective_profile_inset_mm = insert_shrink_mm
+            taper_profile_record = {
+                "profile_strategy": "stage04_exact_half_clearance",
+                "requested_half_clearance_mm": insert_shrink_mm,
+                "effective_profile_inset_mm": insert_shrink_mm,
+            }
+        else:
+            effective_profile_inset_mm, taper_profile_record = tapered_profile_inset_limit(
+                top_points,
+                fit_clearance_mm=insert_shrink_mm,
+                maximum_taper_depth_mm=lead_in_mm,
+                maximum_total_depth_mm=tapered_profile_total_depth_budget(
+                    max_extension_mm,
+                    insert_planar_extra_limit_mm,
+                ),
+            )
+        if (
+            loop_index in interface_axis_by_loop
+            and effective_profile_inset_mm + 1e-7 < insert_shrink_mm
+        ):
+            raise ValueError(
+                f"{interface_id_by_loop.get(loop_index, part_id)} "
+                f"{part_id} loop {loop_index}: available tenon inset "
+                f"{effective_profile_inset_mm:.6g} mm is below the requested "
+                f"half-clearance {insert_shrink_mm:.6g} mm"
+            )
+        interface_axis = np.asarray(
+            interface_axis_by_loop.get(loop_index, inward), dtype=np.float64
         )
-        fit_points = offset_points_along_conormals(
+        scaled_interface_points = homothetic_loop_points(
             internal_boundary_points,
-            loop_interior_conormals,
-            effective_profile_inset_mm,
+            interface_axis,
+            loop_scale_ratio,
+        )
+        interface_u, interface_v = orthonormal_basis(interface_axis)
+        fit_points = radial_offset_points(
+            scaled_interface_points,
+            scaled_interface_points.mean(axis=0),
+            interface_u,
+            interface_v,
+            interface_axis,
+            -effective_profile_inset_mm,
         )
         loop_fit_points.append(fit_points)
         insert_loop_records.append(
             {
                 "loop_index": loop_index,
                 "loop": [int(i) for i in loop],
+                "interface_scale_ratio": loop_scale_ratio,
                 "top_points": top_points,
                 "source_boundary_points": source_boundary_points,
                 "fit_points": fit_points,
@@ -389,6 +444,7 @@ def make_part_mesh(
             {
                 "loop_index": loop_index,
                 "vertices": len(loop),
+                "interface_scale_ratio": loop_scale_ratio,
                 "insert_shrink_mm": insert_shrink_mm,
                 "effective_profile_inset_mm": effective_profile_inset_mm,
                 **taper_profile_record,
@@ -565,6 +621,7 @@ def make_part_mesh(
         "flat_clearance_mm": flat_clearance_mm,
         "clearance_mode": clearance_mode,
         "fit_clearance_mm": max(float(fit_clearance_mm), 0.0),
+        "interface_scale_ratio": float(interface_scale_ratio),
         "insert_shrink_mm": insert_shrink_mm,
         "socket_overcut_mm": 0.0,
         "child_socket_overcut_mm": socket_overcut_mm,
@@ -579,7 +636,11 @@ def make_part_mesh(
         "visible_boundary_retopologized": True,
         "interface_retopology_surface_role": "shared_visible_boundary_and_surface_band",
         "inward_direction": inward.round(6).tolist(),
-        "inward_direction_source": "assembly_parent" if inward_override is not None else "model_center",
+        "inward_direction_source": (
+            "stage04_interface_relation"
+            if inward_override is not None and interface_id_by_loop
+            else "assembly_parent" if inward_override is not None else "model_center"
+        ),
         "local_inward_direction_records": local_inward_direction_records,
         "local_inward_outward_vertices_before": int(
             sum(record["global_outward_vertices_before"] for record in local_inward_direction_records)

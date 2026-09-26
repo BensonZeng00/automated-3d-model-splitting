@@ -2,21 +2,20 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 import uuid
 from pathlib import Path
 
 from .common import *
 from .domain import SplitConfig
-from .uniform_fit import configure_uniform_fit
-from .overlap_policy import DEFAULT_IGNORE_OVERLAP_RATIO
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Recognize parts from externally visible per-triangle paint, use structural evidence "
-            "to choose the root body, then recursively inward-extrude every non-body part."
+            "Recognize externally painted parts, plan pairwise tenon/mortise interfaces, "
+            "and construct matching interfaces from the Stage 04 boundary relations."
         )
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
@@ -33,43 +32,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--stop-after-stage",
-        choices=["preflight", "load", "recognize", "assembly", "interfaces", "build", "fit"],
+        choices=["preflight", "load", "recognize", "assembly", "interface-assembly"],
         default=None,
         help="Stop after a completed stage artifact is written, for stepwise inspection.",
     )
+    parser.add_argument(
+        "--interface-scale-ratio",
+        type=float,
+        default=0.50,
+        help="Homothetic scale for the inner ring of each Stage 04 interface (default: 0.50).",
+    )
+    parser.add_argument(
+        "--interface-clearance-mm",
+        type=float,
+        default=0.20,
+        help="Extra side and bottom clearance added to each mortise relative to its tenon (default: 0.20 mm).",
+    )
     parser.add_argument("--input", required=True, help="Source .3mf file. No other model files are read.")
     parser.add_argument("--output", default=None, help="Final colored .3mf path; defaults beside the source file.")
-    parser.add_argument("--post-split-uniform-scale", type=float, default=0.99,
-                        help="Subtract exact full-size child solids with no added clearance, then scale complete inserts about their own bbox centers, e.g. 0.99.")
-    parser.add_argument(
-        "--allow-coupled-seating",
-        action="store_true",
-        help=(
-            "Apply a user-confirmed bounded rigid seating correction to an inward "
-            "subassembly and all of its descendants as one unit."
-        ),
-    )
-    parser.add_argument(
-        "--seating-overlap-tolerance-mm3",
-        type=float,
-        default=1e-8,
-        help=(
-            "Maximum measured parent/insert overlap accepted as numerical roundoff "
-            "during final seating validation (default: 1e-8 mm^3)."
-        ),
-    )
-    parser.add_argument('--assembly-ignore-overlap-ratio', type=float,
-                        default=DEFAULT_IGNORE_OVERLAP_RATIO,
-                        help='Silently accept pair overlap / original actual cutting volume strictly below this fraction (default: 0.01 = 1%%; 0 disables).')
-    parser.add_argument('--seating-penetration-tolerance-mm', type=float, default=0.0,
-                        help='Accepted local intersection slab thickness bound in millimeters.')
-    parser.add_argument('--post-fit-parent-difference', action=argparse.BooleanOptionalAction,
-                        default=True,
-                        help='Subtract final ancestor solids from scaled inserts before seating (enabled by default); retain topology, thickness and visual gates.')
-    parser.add_argument('--repair-thin-backing', action='store_true',
-                        help='Rebuild failed hidden backing along source-local inward normals before exact parent subtraction.')
-    parser.add_argument('--assembly-fit-validation', choices=['manual', 'strict'], default='manual',
-                        help='Export valid parts with measured assembly issues for manual adjustment (default), or block on unresolved fit.')
     parser.add_argument("--boundary-review-json", default=None,
                         help="Fingerprint-bound user-approved boundary ownership decisions.")
     parser.add_argument("--boundary-check-only", action="store_true",
@@ -86,50 +66,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Replace the final .3mf when it already exists.",
     )
     parser.add_argument(
-        "--full-tree-preflight",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help=(
-            "Plan and safety-check every recursive interface before the first "
-            "expensive Boolean (enabled by default)."
-        ),
-    )
-    parser.add_argument(
-        "--resume",
-        choices=["off", "auto", "strict"],
-        default="off",
-        help=(
-            "Reuse validated content-addressed recursive stages. auto treats an "
-            "invalid entry as a miss; strict stops on invalid cache data."
-        ),
-    )
-    parser.add_argument(
-        "--cache-dir",
-        default=None,
-        help="Persistent recursive-stage cache directory used by --resume.",
-    )
-    parser.add_argument(
-        "--debug-recursive-3mf",
-        dest="debug_recursive_3mf",
-        action="store_true",
-        help="Write every changed part as a colored 3MF, feed parent-emitted child 3MF files into later recursion, and retain cumulative audit 3MF files under <output-stem>_debug/recursive_layers/.",
-    )
-    parser.add_argument(
-        "--debug-recursive-stl",
-        dest="debug_recursive_3mf",
-        action="store_true",
-        help=argparse.SUPPRESS,
-    )
-    parser.add_argument(
-        "--debug-recursive-steps",
-        type=int,
-        default=None,
-        help=(
-            "Stop successfully after this many strict recursive debug steps. "
-            "Requires --debug-recursive-3mf and intentionally produces no final deliverable."
-        ),
-    )
-    parser.add_argument(
         "--diagnostic-preview",
         action="store_true",
         help=(
@@ -137,34 +73,11 @@ def build_parser() -> argparse.ArgumentParser:
             "The result is for visual diagnosis, not a validated printable deliverable."
         ),
     )
-    parser.add_argument(
-        "--validation-profile",
-        choices=["ratio", "strict"],
-        default="ratio",
-        help=(
-            "ratio accepts localized topology defects whose combined edge ratio stays within the configured limit; "
-            "strict requires zero open and over-shared edges."
-        ),
-    )
-    parser.add_argument(
-        "--max-topology-defect-ratio",
-        type=float,
-        default=0.001,
-        help="Maximum per-part (open + over-shared edges) / unique edges ratio in ratio validation mode.",
-    )
     parser.add_argument("--model-entry", default=None, help="3MF internal .model entry to read; defaults to the mesh entry with most triangles.")
     parser.add_argument("--color-map-json", default=None, help="Optional JSON mapping color codes to hex strings or {name, hex, rgba}.")
     parser.add_argument("--exterior-view-count", type=int, default=32, help="Outside depth-map directions used for recognition.")
     parser.add_argument("--exterior-depth-map-resolution", type=int, default=768, help="Square depth-map resolution per exterior view.")
     parser.add_argument("--exterior-depth-tolerance-mm", type=float, default=0.08, help="Depth tolerance for externally visible recognition faces.")
-    parser.add_argument(
-        "--interface-geometry",
-        choices=["local-connector"],
-        default="local-connector",
-        help=(
-            "Build male backing/peg solids, subtract them at full size, then scale the emitted inserts."
-        ),
-    )
     parser.add_argument(
         "--noise-review-max-faces",
         type=int,
@@ -239,12 +152,6 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--nested-cap-mode",
-        choices=["inherit", "adaptive", "flat", "tilted", "offset"],
-        default="adaptive",
-        help="Cap mode for inserts whose parent is another insert and for matching child sockets.",
-    )
-    parser.add_argument(
         "--planar-extra-limit-mm",
         type=float,
         default=None,
@@ -252,21 +159,6 @@ def build_parser() -> argparse.ArgumentParser:
             "Compatibility override for travel between the preferred minimum and safety ceiling. "
             "When omitted, derive it from --max-planar-travel-mm."
         ),
-    )
-    parser.add_argument(
-        "--force-flat-parts",
-        default="",
-        help="Comma/space separated recognized part ids or indices, e.g. P06, to force flat caps for user-confirmed planar parts.",
-    )
-    parser.set_defaults(flat_clearance_mm=0.0, fit_clearance_mm=0.0,
-                        clearance_profile="fixed", clearance_feature_ratio=0.08,
-                        clearance_min_mm=0.0, bottom_clearance_mm=0.0,
-                        sibling_clearance_mm=0.0, clearance_mode="insert-shrink")
-    parser.add_argument(
-        "--lead-in-mm",
-        type=float,
-        default=0.60,
-        help="Maximum entry-taper depth; actual depth follows the local lateral shrink for an approximately 45-degree slope.",
     )
     parser.add_argument(
         "--output-layout",
@@ -347,38 +239,6 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--visual-semantic-min-confidence", default="MED", help="Minimum confidence for applying semantic parent hints: LOW, MED, HIGH, or 0-1.")
-    parser.add_argument(
-        "--visual-validation-profile",
-        choices=["strict", "report", "off"],
-        default="strict",
-        help="Block, report, or skip deterministic multi-view surface/depth consistency validation.",
-    )
-    parser.add_argument("--visual-validation-view-count", type=int, default=32)
-    parser.add_argument("--visual-validation-resolution", type=int, default=384)
-    parser.add_argument("--visual-depth-tolerance-mm", type=float, default=0.12)
-    parser.add_argument(
-        "--visual-max-intrusion-ratio",
-        type=float,
-        default=0.04,
-        help=(
-            "Blocking generated-surface intrusion ratio. Ratios above 2%% but not above "
-            "this default 4%% limit are retained as advisory findings."
-        ),
-    )
-    parser.add_argument("--visual-max-material-mismatch-ratio", type=float, default=0.03)
-    parser.add_argument(
-        "--visual-max-local-material-mismatch-ratio",
-        type=float,
-        default=0.10,
-        help="Maximum generated-material coverage of any one source part across all validation views.",
-    )
-    parser.add_argument(
-        "--visual-max-local-material-mismatch-pixels",
-        type=int,
-        default=64,
-        help="Maximum absolute mismatched pixels for one source/generated material pair across all validation views.",
-    )
-    parser.add_argument("--visual-min-coverage-ratio", type=float, default=0.65)
     parser.add_argument("--recognize-only", action="store_true", help="Only parse and print recognized parts; do not export the final 3MF.")
     parser.add_argument("--preflight-only", action="store_true", help="Only run preflight checks.")
     return parser
@@ -387,10 +247,6 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
-    try:
-        configure_uniform_fit(args)
-    except ValueError as exc:
-        parser.error(str(exc))
     if args.boundary_target_samples < 16:
         parser.error("--boundary-target-samples must be at least 16")
     if args.boundary_smooth_passes < 0:
@@ -399,10 +255,10 @@ def main(argv: list[str] | None = None) -> None:
         parser.error("--boundary-retopology-band-mm must be positive")
     if args.maximum_boundary_displacement_mm <= 0:
         parser.error("--maximum-boundary-displacement-mm must be positive")
-    if args.fit_clearance_mm < 0 or args.lead_in_mm < 0 or args.sibling_clearance_mm < 0:
-        parser.error("clearance and lead-in values must be non-negative")
-    if args.clearance_feature_ratio <= 0 or args.clearance_min_mm < 0:
-        parser.error("adaptive clearance ratio must be positive and minimum must be non-negative")
+    if not math.isfinite(args.interface_scale_ratio) or not 0.0 < args.interface_scale_ratio < 1.0:
+        parser.error("--interface-scale-ratio must be greater than 0 and less than 1")
+    if not math.isfinite(args.interface_clearance_mm) or args.interface_clearance_mm < 0:
+        parser.error("--interface-clearance-mm must be non-negative")
     if args.exterior_view_count < 6:
         parser.error("--exterior-view-count must be at least 6")
     if args.exterior_depth_map_resolution < 64:
@@ -419,29 +275,6 @@ def main(argv: list[str] | None = None) -> None:
         parser.error("--max-planar-travel-mm must be at least the effective target inward depth")
     if args.planar_extra_limit_mm is not None and args.planar_extra_limit_mm < 0:
         parser.error("--planar-extra-limit-mm must be non-negative")
-    if not 0.0 <= args.max_topology_defect_ratio <= 0.001:
-        parser.error("--max-topology-defect-ratio must be between 0 and 0.001 (0.10%)")
-    if args.visual_validation_view_count < 6 or args.visual_validation_resolution < 64:
-        parser.error("visual validation requires at least 6 views and 64-pixel depth maps")
-    if args.visual_depth_tolerance_mm < 0:
-        parser.error("--visual-depth-tolerance-mm must be non-negative")
-    for value, option in (
-        (args.visual_max_intrusion_ratio, "--visual-max-intrusion-ratio"),
-        (args.visual_max_material_mismatch_ratio, "--visual-max-material-mismatch-ratio"),
-        (
-            args.visual_max_local_material_mismatch_ratio,
-            "--visual-max-local-material-mismatch-ratio",
-        ),
-        (args.visual_min_coverage_ratio, "--visual-min-coverage-ratio"),
-    ):
-        if not 0 <= value <= 1:
-            parser.error(f"{option} must be between 0 and 1")
-    if args.visual_max_local_material_mismatch_pixels < 0:
-        parser.error("--visual-max-local-material-mismatch-pixels must be non-negative")
-    if args.resume != "off" and not args.cache_dir:
-        parser.error("--resume requires --cache-dir")
-    if args.debug_recursive_3mf and args.resume != "off":
-        parser.error("--resume cannot be combined with --debug-recursive-3mf")
     input_path = Path(args.input).expanduser()
     progress("预检", "检查输入文件和 Python 依赖", input=str(input_path))
     checks = preflight(input_path)
@@ -488,9 +321,7 @@ def main(argv: list[str] | None = None) -> None:
         recovery = Path(args.recovery_dir) if args.recovery_dir else input_path.parent / (input_path.stem + '_split_recovery')
         with tolerance_scope(PrintTolerance(args.micro_defect_area_mm2,
                                             args.print_surface_tolerance_mm, recovery,
-                                            args.hidden_surface_refinement == 'preserve',
-                                            args.repair_thin_backing,
-                                            args.post_split_uniform_scale)):
+                                            args.hidden_surface_refinement == 'preserve')):
             SplitPipeline(config, parser).run()
     except BoundaryReviewRequired as exc:
         print("boundary_review=" + json.dumps(dict(status="needs_user_confirmation",

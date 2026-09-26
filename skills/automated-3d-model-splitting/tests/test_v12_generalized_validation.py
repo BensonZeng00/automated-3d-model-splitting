@@ -171,8 +171,6 @@ class GeneralizedV12Tests(unittest.TestCase):
         self.assertEqual(args.max_extension_mm, 3.0)
         self.assertEqual(args.max_planar_travel_mm, 10.0)
         self.assertIsNone(args.planar_extra_limit_mm)
-        self.assertEqual(args.validation_profile, "ratio")
-        self.assertEqual(args.max_topology_defect_ratio, 0.001)
 
     def test_adaptive_cap_uses_total_planar_travel_budget(self) -> None:
         inward = np.array([0.0, 0.0, 1.0])

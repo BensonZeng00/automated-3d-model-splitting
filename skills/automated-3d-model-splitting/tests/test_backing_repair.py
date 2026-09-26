@@ -133,13 +133,11 @@ class BackingRepairTests(unittest.TestCase):
                 {'actual_backing_validation':record},interface_geometry='local-connector')
         self.assertTrue(report[0]['original_plan_superseded'])
 
-    def test_repair_cannot_disable_visual_validation(self):
+    def test_legacy_backing_repair_switch_removed_from_cli(self):
         from split3mf.cli import build_parser
-        from split3mf.uniform_fit import configure_uniform_fit
-        args=build_parser().parse_args(['--input','example.3mf',
-            '--repair-thin-backing','--visual-validation-profile','off'])
-        with self.assertRaises(ValueError):
-            configure_uniform_fit(args)
+        options = build_parser()._option_string_actions
+        self.assertNotIn('--repair-thin-backing', options)
+        self.assertNotIn('--visual-validation-profile', options)
 
 
 if __name__=='__main__':

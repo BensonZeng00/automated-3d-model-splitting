@@ -59,33 +59,13 @@ class PostFitDifferenceTests(unittest.TestCase):
         overlap.volume.return_value = .100004
         self.assertFalse(audit_volume_partition(child, result, overlap)['valid'])
 
-    def test_cli_difference_defaults_on_and_supports_explicit_override(self):
+    def test_cli_removes_post_fit_and_seating_switches(self):
         from split3mf.cli import build_parser
-        for options, expected in (([], True), (['--post-fit-parent-difference'], True),
-                                  (['--no-post-fit-parent-difference'], False)):
-            with self.subTest(options=options):
-                args = build_parser().parse_args(['--input', 'example.3mf', *options])
-                self.assertEqual(args.post_fit_parent_difference, expected)
-                self.assertFalse(args.allow_coupled_seating)
-                self.assertFalse(args.repair_thin_backing)
-
-    def test_cli_cannot_silently_skip_default_or_requested_repair(self):
-        from split3mf.cli import build_parser
-        from split3mf.uniform_fit import configure_uniform_fit
-        for options in ([], ['--post-fit-parent-difference']):
-            with self.subTest(options=options):
-                args = build_parser().parse_args(['--input', 'example.3mf', *options,
-                                                 '--visual-validation-profile', 'off'])
-                with self.assertRaisesRegex(ValueError, 'requires final visual'):
-                    configure_uniform_fit(args)
-
-    def test_cli_explicit_difference_opt_out_allows_visual_off_diagnostics(self):
-        from split3mf.cli import build_parser
-        from split3mf.uniform_fit import configure_uniform_fit
-        args = build_parser().parse_args(['--input', 'example.3mf',
-                '--no-post-fit-parent-difference', '--visual-validation-profile', 'off'])
-        configure_uniform_fit(args)
-        self.assertFalse(args.post_fit_parent_difference)
+        options = build_parser()._option_string_actions
+        for option in ('--post-fit-parent-difference', '--no-post-fit-parent-difference',
+                       '--allow-coupled-seating', '--assembly-fit-validation',
+                       '--visual-validation-profile'):
+            self.assertNotIn(option, options)
 
     def test_difference_removes_overlap_without_moving_parent(self):
         insert = trimesh.creation.box(extents=[3, 3, 3])

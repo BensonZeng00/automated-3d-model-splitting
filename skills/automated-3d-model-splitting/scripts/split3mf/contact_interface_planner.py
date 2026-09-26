@@ -23,6 +23,8 @@ def plan_contact_interfaces(
     part index breaks an exact size tie. No root body or parent tree is used.
     """
     sample_owners: dict[int, dict[tuple[int, int], np.ndarray]] = defaultdict(dict)
+    ordered_loop_vertices: dict[tuple[int, int], list[int]] = {}
+    simplified_loop_points: dict[tuple[int, int], np.ndarray] = {}
     for component_index in range(1, len(components) + 1):
         loops = recognized_boundaries.loops_for_component(component_index)
         point_loops = recognized_boundaries.component_loop_points[component_index - 1]
@@ -31,6 +33,12 @@ def plan_contact_interfaces(
         for loop_index, (loop, points) in enumerate(zip(loops, point_loops)):
             if len(loop) != len(points):
                 raise ValueError(f"boundary sample mismatch for P{component_index:02d}")
+            ordered_loop_vertices[(component_index, loop_index)] = [
+                int(vertex_id) for vertex_id in loop
+            ]
+            simplified_loop_points[(component_index, loop_index)] = np.asarray(
+                points, dtype=np.float64
+            )
             for vertex_id, point in zip(loop, points):
                 sample_owners[int(vertex_id)][(component_index, loop_index)] = np.asarray(
                     point, dtype=np.float64
@@ -153,6 +161,37 @@ def plan_contact_interfaces(
                 ],
                 "shared_boundary_sample_count": len(samples),
                 "contact_center_mm": contact_center.round(6).tolist(),
+                "shared_boundary_loops": [
+                    {
+                        "tenon_loop_index": int(
+                            left_loop if tenon == left else right_loop
+                        ),
+                        "mortise_loop_index": int(
+                            right_loop if mortise == right else left_loop
+                        ),
+                        "boundary_vertex_ids": [
+                            int(vertex_id) for vertex_id in ordered_loop_vertices[
+                                (tenon, left_loop if tenon == left else right_loop)
+                            ]
+                        ],
+                        "boundary_points_mm": [
+                            point.round(6).tolist()
+                            for point in simplified_loop_points[
+                                (tenon, left_loop if tenon == left else right_loop)
+                            ]
+                        ],
+                    }
+                    for left_loop, right_loop in sorted(
+                        loop_contacts[(left, right)]
+                    )
+                    if (
+                        len(
+                            set(ordered_loop_vertices[(left, left_loop)])
+                            & set(ordered_loop_vertices[(right, right_loop)])
+                        )
+                        >= 2
+                    )
+                ],
             },
             "tenon_part": f"P{tenon:02d}",
             "mortise_part": f"P{mortise:02d}",

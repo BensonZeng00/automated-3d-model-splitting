@@ -31,7 +31,7 @@ from .reporting import runtime_log
 from .part_mesh_building import make_part_mesh, make_body_cut_mesh, make_layer_child_subassembly_mesh
 
 class PartMeshBuilder:
-    """Build final insert, body-cut, and recursive subassembly meshes."""
+    """Expose mesh-building services used by interface assembly and diagnostics."""
 
     build_part = staticmethod(make_part_mesh)
     build_body_cut = staticmethod(make_body_cut_mesh)

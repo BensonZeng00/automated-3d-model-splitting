@@ -3,6 +3,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from .spatial_intersections import count_nonincident_mesh_edge_intersections_3d
+
 
 def _cross(a, b):
     return a[..., 0] * b[..., 1] - a[..., 1] * b[..., 0]
@@ -54,7 +56,14 @@ class AnnulusProjectionAudit:
     reason: str
 
 
-def audit_projection(faces, points, outer_ids, inner_ids):
+def audit_projection(
+    faces,
+    points,
+    outer_ids,
+    inner_ids,
+    *,
+    intersection_points_3d=None,
+):
     """Require one oriented, noncrossing cover of the projected annulus.
 
     Accept either global winding direction, never a mixture. This is a
@@ -82,7 +91,14 @@ def audit_projection(faces, points, outer_ids, inner_ids):
     if abs(total - expected) > tolerance:
         reasons.append('projected_area_mismatch')
     # Fail cheap invalid candidates before the complete edge-intersection pass.
-    crossings = None if reasons else _crossing_count(faces, points)
+    if reasons:
+        crossings = None
+    elif intersection_points_3d is not None:
+        crossings = count_nonincident_mesh_edge_intersections_3d(
+            faces, intersection_points_3d
+        )
+    else:
+        crossings = _crossing_count(faces, points)
     if crossings:
         reasons.append('projected_edge_crossing')
     return AnnulusProjectionAudit(not reasons, len(faces), len(reversed_areas),

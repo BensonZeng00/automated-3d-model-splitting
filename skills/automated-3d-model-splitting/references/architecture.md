@@ -76,7 +76,7 @@ Prefer these explicit records when data crosses stage boundaries. Do not introdu
 - `VendorPaintDecoder` restores composite `paint_color` subdivision streams.
 - `PartRecognizer` groups material-equivalent, edge-connected exterior paint.
 - `source_region_review.py` renders deterministic whole-model and local-zoom PNG sheets for every face-count or long-strip candidate, writes the classification manifest/template, and validates complete user-confirmed noise/part/uncertain decisions without changing source geometry.
-- `contact_interface_planner.py` reads only retained simplified boundary loops, recovers the represented source-edge chains, and emits one independent tenon/mortise relation per contacting pair. It does not select a body or infer a tree.
+- `contact_interface_planner.py` reads the retained simplified boundary loops and emits one independent tenon/mortise relation per contacting pair. It does not select a body or infer a tree. Stage 05 consumes the ordered frozen boundary from that relation directly; it must not remap the contour to source-edge chains or expand it by arc length.
 - `assembly.py` still contains legacy consumers for later stages; Stage 04 does not call its parent-tree planner.
 - `InwardDirectionPlanner` creates locally safe, smoothed inward directions.
 - `HiddenInterfacePlanner` proposes deterministic parent-interior direction fields only when the baseline interface is thinner than the 0.45 mm load-bearing minimum. Parent-thickness ray checks use at most 768 equal-arc samples from the ordered boundary inputs; cap geometry still uses the complete boundary. No complete-boundary thickness audit follows the sampled depth decision.

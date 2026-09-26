@@ -454,25 +454,38 @@ def matched_socket_bottom_geometry(
     boundary_reconciliation_tolerance_mm: float = 0.001,
     error_context: str | None = None,
     child_interior_conormals: np.ndarray | None = None,
+    interface_scale_ratio: float = 1.0,
+    interface_axis: np.ndarray | None = None,
 ) -> tuple[np.ndarray, dict]:
     """Reuse the child's actual cap field, then place the socket bottom behind it."""
     inward = np.asarray(inward, dtype=np.float64)
     inward /= max(float(np.linalg.norm(inward)), 1e-12)
+    fit_axis = (
+        inward.copy()
+        if interface_axis is None
+        else np.asarray(interface_axis, dtype=np.float64)
+    )
+    fit_axis /= max(float(np.linalg.norm(fit_axis)), 1e-12)
     source_boundary_points = np.asarray(source_boundary_points, dtype=np.float64)
     socket_top_points = np.asarray(socket_top_points, dtype=np.float64)
+    child_fit_points = homothetic_loop_points(
+        source_boundary_points,
+        fit_axis,
+        interface_scale_ratio,
+    )
     if child_interior_conormals is None:
-        u, v = orthonormal_basis(inward)
+        u, v = orthonormal_basis(fit_axis)
         child_fit_points = radial_offset_points(
-            source_boundary_points,
+            child_fit_points,
             source_boundary_points.mean(axis=0),
             u,
             v,
-            inward,
+            fit_axis,
             -max(float(child_insert_shrink_mm), 0.0),
         )
     else:
         child_fit_points = offset_points_along_conormals(
-            source_boundary_points,
+            child_fit_points,
             child_interior_conormals,
             max(float(child_insert_shrink_mm), 0.0),
         )

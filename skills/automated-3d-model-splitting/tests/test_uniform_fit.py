@@ -9,25 +9,17 @@ import trimesh
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from split3mf.cli import build_parser
-from split3mf.uniform_fit import configure_uniform_fit, exact_unscaled_cutter, scale_finished_insert
+from split3mf.uniform_fit import exact_unscaled_cutter, scale_finished_insert
 
 
 class UniformFitTests(unittest.TestCase):
-    def test_only_fit_policy_disables_all_old_clearances(self):
-        args = build_parser().parse_args(['--input', 'example.3mf'])
-        configure_uniform_fit(args)
-        self.assertEqual(args.post_split_uniform_scale, .99)
-        self.assertEqual(args.clearance_profile, 'fixed')
-        for key in ['fit_clearance_mm', 'bottom_clearance_mm', 'flat_clearance_mm',
-                    'clearance_min_mm', 'sibling_clearance_mm']:
-            self.assertEqual(getattr(args, key), 0)
-
-    def test_old_fit_switches_removed(self):
+    def test_legacy_fit_switches_are_removed_from_cli(self):
         parser = build_parser()
         options = parser._option_string_actions
-        for key in ['--fit-clearance-mm', '--clearance-mode', '--bottom-clearance-mm']:
+        for key in ['--fit-clearance-mm', '--clearance-mode', '--bottom-clearance-mm',
+                    '--post-split-uniform-scale']:
             self.assertNotIn(key, options)
-        self.assertIn('--post-split-uniform-scale', parser.format_help())
+        self.assertIn('--interface-clearance-mm', options)
 
     def test_scale_preserves_own_center_and_triangles(self):
         mesh = trimesh.creation.box(extents=[10, 12, 8])

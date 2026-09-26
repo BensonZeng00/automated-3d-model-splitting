@@ -736,6 +736,49 @@ def radial_offset_points(
     return origin + shifted[:, 0, None] * u + shifted[:, 1, None] * v + normal_s[:, None] * normal
 
 
+def homothetic_loop_points(
+    points: np.ndarray, axis: np.ndarray, scale_ratio: float
+) -> np.ndarray:
+    """Scale a 3D closed loop in its plane while preserving axial height."""
+    values = np.asarray(points, dtype=np.float64)
+    normal = np.asarray(axis, dtype=np.float64)
+    length = float(np.linalg.norm(normal))
+    ratio = float(scale_ratio)
+    if values.ndim != 2 or values.shape[1:] != (3,) or len(values) < 3:
+        raise ValueError("homothetic loop scaling requires at least three 3D points")
+    if not np.isfinite(values).all() or normal.shape != (3,) or not np.isfinite(normal).all():
+        raise ValueError("homothetic loop scaling requires finite points and axis")
+    if length <= 1e-10:
+        raise ValueError("homothetic loop scaling axis is degenerate")
+    if not 0.0 < ratio <= 1.0:
+        raise ValueError("homothetic loop scale ratio must be greater than 0 and at most 1")
+    if abs(ratio - 1.0) <= 1e-12:
+        return values.copy()
+    normal = normal / length
+    origin = values.mean(axis=0)
+    u, v = orthonormal_basis(normal)
+    projected = project_points(values, origin, u, v)
+    area = signed_area(projected)
+    if abs(float(area)) <= 1e-12:
+        raise ValueError("homothetic loop has near-zero projected area")
+    cross = (
+        projected[:, 0] * np.roll(projected[:, 1], -1)
+        - np.roll(projected[:, 0], -1) * projected[:, 1]
+    )
+    center = np.array(
+        [
+            np.sum((projected[:, 0] + np.roll(projected[:, 0], -1)) * cross),
+            np.sum((projected[:, 1] + np.roll(projected[:, 1], -1)) * cross),
+        ],
+        dtype=np.float64,
+    ) / (6.0 * area)
+    scaled = center + ratio * (projected - center)
+    if np.sign(signed_area(scaled)) != np.sign(area):
+        raise ValueError("homothetic loop scaling reversed orientation")
+    axial = (values - origin) @ normal
+    return origin + scaled[:, 0, None] * u + scaled[:, 1, None] * v + axial[:, None] * normal
+
+
 def clearance_offsets(clearance_mode: str, fit_clearance_mm: float) -> tuple[float, float]:
     clearance = max(float(fit_clearance_mm), 0.0)
     if clearance_mode == "insert-shrink":

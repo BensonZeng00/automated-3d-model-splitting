@@ -72,11 +72,13 @@ python scripts/split_painted_3mf.py \
 
 识别完成后，第 04 阶段以冻结的简化边界为准，逐对规划接触零件的榫件、卯件和方向，不选择主体，也不建立父子树。接触两侧引用同一条识别边界。允许处理范围限于接口局部和新生成几何；不得以生成可打印实体为由改写无关 source。
 
-交接验证至少包括：共享边界一致、生成面非退化、生成面方向正确、接口不明显穿出、必要装配间隙、材料槽保持，以及输出 3MF 可重新读取。source 自身的开边、翻面或非流形只记录。
+交接审计至少记录：共享边界、生成面退化与方向、接口穿出、装配间隙、材料槽保持，以及输出 3MF 回读状态。Stage 05 的几何质量审计仅作诊断，不因翻折、面积差、自交、碰撞、余量偏差或闭合/绕序问题中止接口批次。缺少第 04 阶段关系或必需方向等导致无法构造的输入仍作为执行错误；不得猜测补榫。source 自身的缺陷只在远离本次交接面的范围内记录，不自动修复。
 
-边界统一使用 `--boundary-shape smooth`。阅读 [boundary-smoothing.md](references/boundary-smoothing.md)、[assembly-algorithm.md](references/assembly-algorithm.md) 和 [architecture.md](references/architecture.md) 后再修改接口算法。
+边界统一使用 `--boundary-shape smooth`。阅读 [boundary-smoothing.md](references/boundary-smoothing.md)、[assembly-algorithm.md](references/assembly-algorithm.md) 和 [application-stages.md](references/application-stages.md) 后再修改接口算法。
 
 拆件流程阶段、输入输出和单步调试工件见 [application-stages.md](references/application-stages.md)。开发或诊断时可使用 `--stop-after-stage` 和 `--stage-artifacts-dir` 查看每个阶段的 JSON/NPZ 结果。
+
+已存在 02/03/04 阶段工件时，若只需重跑 05，使用 `scripts/run_stage05_from_artifacts.py --source-run-dir RUN_DIR --output-root OUTPUT_DIR`；该入口直接校验并读取既有 NPZ/JSON，不重读 3MF，也不重建识别边界。
 
 ## CLI 与执行
 
@@ -88,11 +90,11 @@ python scripts/split_painted_3mf.py --input model.3mf --preflight-only
 
 CLI 只负责参数解析、输入校验、调用可测试服务、输出报告和退出码。不要把审核、分类或几何逻辑复制到 CLI。退出码 `4` 仅表示等待 source 区域语义确认；退出码 `3` 表示交接面、生成结构或包输出失败，不能用它表示无关 source 缺陷。
 
-当前迁移目标是可审阅的第 04 阶段规划工件，运行时使用 `--stop-after-stage assembly`。第 05 阶段之后仍待接入榫卯关系清单。最终发布恢复后，保留原始颜色槽与逐面材料。诊断报告必须区分：
+当前后续构建阶段直接消费第 04 阶段的榫方、卯方、方向和冻结共享边界；不得恢复主体推断或父子树递归。原 05/06/07 合并为 `interface-assembly`，早停参数为 `--stop-after-stage interface-assembly`。05 阶段将冻结边界投影到接口平面，以面积质心按默认 0.50 缩小内环；沿卯方内向方向最多探测 10 mm，发生外壳碰撞或穿越时将榫深减半，最小尝试深度为 0.2 mm。到达最小深度仍碰撞时保留该深度并记录。先构造榫并尝试封闭内端，再按榫的轮廓和深度生成卯的负形；卯侧向轮廓与底深都额外增加完整配置余量，并记录对卯壳的碰撞探测结果。接口质量诊断不拦截 05 阶段。最终发布保留原始颜色槽与逐面材料。诊断报告必须区分：
 
 ```text
 source_diagnostics: non_blocking
-interface_validation: blocking_when_invalid
+interface_validation: diagnostic_only
 ```
 
 若本次识别生成 `03_recognition_boundaries.png`，最终回复必须内嵌显示该图片（`![边界预览](绝对路径)`），不能只给文件链接。回复前先确认图片文件存在且可读取；报告仍可另附链接。

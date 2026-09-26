@@ -14,10 +14,8 @@ from split3mf.assembly_overlap import measure_overlap, union_mesh
 from split3mf.assembly_review import measure_manual_adjustment, annotate_manual_adjustment
 from split3mf.assembly_seating import seat_insert_outward
 from split3mf.assembly_visibility import validate_and_seat_assembly
-from split3mf.cli import build_parser
 from split3mf.overlap_policy import overlap_is_ignored
 from split3mf.post_fit_difference import subtract_parent
-from split3mf.uniform_fit import configure_uniform_fit
 
 
 def box_pair(volume):
@@ -36,14 +34,6 @@ def assembly(volume):
 
 
 class OverlapVolumePolicyTests(unittest.TestCase):
-    def test_cli_default_and_override_leave_numerical_epsilon_unchanged(self):
-        for flags, expected in [([], .01), (['--assembly-ignore-overlap-ratio', '0'], 0)]:
-            args = build_parser().parse_args(['--input', 'test.3mf', *flags])
-            configure_uniform_fit(args)
-            self.assertEqual(args.assembly_ignore_overlap_ratio, expected)
-            self.assertEqual(args.seating_overlap_tolerance_mm3, 1e-8)
-            self.assertTrue(args.post_fit_parent_difference)
-
     def test_strict_boundary_and_invalid_thresholds(self):
         self.assertTrue(overlap_is_ignored(.999999, 1))
         self.assertFalse(overlap_is_ignored(np.nextafter(1., 0.), 1))
@@ -51,10 +41,6 @@ class OverlapVolumePolicyTests(unittest.TestCase):
         for value in [-1, float('nan'), float('inf')]:
             with self.subTest(value=value), self.assertRaises(ValueError):
                 overlap_is_ignored(.5, value)
-            args = build_parser().parse_args(['--input', 'test.3mf'])
-            args.assembly_ignore_overlap_ratio = value
-            with self.assertRaises(ValueError):
-                configure_uniform_fit(args)
 
     def test_real_intersections_below_equal_and_above_limit(self):
         for volume, expected in [(.999, True), (1., False), (1.001, False)]:

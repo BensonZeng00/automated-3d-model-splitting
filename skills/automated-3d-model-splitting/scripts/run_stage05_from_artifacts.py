@@ -17,7 +17,7 @@ from split3mf.resume_interface_stage import resume_interface_stage
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Build Stage 05 interfaces from completed Stage 02/03/04 artifacts; "
+            "Build complete Stage 05 mortise-and-tenon parts from completed Stage 02/03/04 artifacts; "
             "the source 3MF is not reread and boundaries are not recomputed."
         )
     )

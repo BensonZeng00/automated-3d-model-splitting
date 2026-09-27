@@ -595,32 +595,9 @@ class SplitPipeline:
             stage_artifacts.write_arrays(
                 "05_interface_surfaces", **interface_arrays
             )
-        if getattr(args, "stop_after_stage", None) == "interface-assembly":
-            interface_summary.update({
-                "stage_status": "interface_surfaces_constructed",
-                "part_mesh_build_status": "pending_direct_frozen_boundary_integration",
-                "frozen_boundary_fingerprint": recognized_boundaries.fingerprint,
-            })
-            stage_artifacts.write_json(
-                "05_interface_assembly_summary",
-                interface_summary,
-                inputs={
-                    "interface_plan_schema": contact_interface_plan["schema"],
-                    "recognized_boundary_fingerprint": recognized_boundaries.fingerprint,
-                    "scale_ratio": args.interface_scale_ratio,
-                    "clearance_mm": args.interface_clearance_mm,
-                },
-            )
-            return
-        built_parts, part_mesh_summary = build_pairwise_part_meshes(
-            vertices=vertices,
-            faces=faces,
-            components=components,
-            model_center=model_center,
-            interface_plan=contact_interface_plan,
-            recognized_boundaries=recognized_boundaries,
-            interface_retopology=interface_retopology,
-            args=args,
+        built_parts, part_records = build_pairwise_part_meshes(
+            contact_interface_plan, interface_arrays, interface_summary,
+            vertices=vertices, faces=faces, components=components,
         )
         mesh_audits = [
             {"part_id": part["part_id"], **self.validator.validate_mesh(part["mesh"])}
@@ -644,8 +621,10 @@ class SplitPipeline:
         if part_arrays:
             stage_artifacts.write_arrays("05_interface_assembly_meshes", **part_arrays)
         interface_summary.update({
-            "part_mesh_build": part_mesh_summary,
-            "part_meshes_closed": True,
+            "stage_status": "complete_parts_built",
+            "part_mesh_build_status": "complete_from_frozen_boundaries",
+            "exported_part_count": len(built_parts),
+            "parts": part_records,
             "frozen_boundary_fingerprint": recognized_boundaries.fingerprint,
         })
         stage_artifacts.write_json(
@@ -658,12 +637,14 @@ class SplitPipeline:
                 "clearance_mm": args.interface_clearance_mm,
             },
         )
+        if getattr(args, "stop_after_stage", None) == "interface-assembly":
+            return
         temporary_output = output_path.with_name(output_path.name + ".tmp")
         try:
             export_summary = self.writer.write(
                 temporary_output,
                 built_parts,
-                title=f"{input_path.stem} pairwise interface assembly",
+                title=f"{input_path.stem} complete mortise and tenon parts",
                 source_application=project_settings.get("_source_application"),
                 source_filament_colors=source_filament_colors,
                 source_project_settings=project_settings,
@@ -682,6 +663,10 @@ class SplitPipeline:
                     "08 final 3MF validation failed: "
                     + json.dumps(package_validation.get("errors", []), ensure_ascii=False)
                 )
+            from .interface_package_validation import validate_reloaded_interface_parts
+            reloaded_part_audits = validate_reloaded_interface_parts(
+                temporary_output, built_parts, part_records
+            )
             temporary_output.replace(output_path)
         except Exception:
             temporary_output.unlink(missing_ok=True)
@@ -694,6 +679,7 @@ class SplitPipeline:
                 "interface_count": int(contact_interface_plan["interface_count"]),
                 "mesh_validation": mesh_audits,
                 "package_validation": package_validation,
+                "reloaded_part_audits": reloaded_part_audits,
                 "export": export_summary,
                 "recognized_boundary_fingerprint": recognized_boundaries.fingerprint,
             },
@@ -701,6 +687,7 @@ class SplitPipeline:
         print("split_summary=" + json.dumps({
             "output_3mf": str(output_path),
             "part_count": len(built_parts),
+            "output_kind": "complete_parts",
             "interface_count": int(contact_interface_plan["interface_count"]),
             "mesh_validation": mesh_audits,
             "package_validation": package_validation,

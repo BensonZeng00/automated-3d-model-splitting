@@ -11,9 +11,8 @@
 1. read and normalize the source project;
 2. recognize connected painted source regions, review <=100-face noise candidates, 101–999-face small-region candidates, and long strips, then preserve every confirmed noise/part/uncertain region for normal interface planning;
 3. use the recognition-frozen simplified boundaries to enumerate every contacting part pair and plan tenon/mortise sides plus inward directions;
-4. stop after the Stage 04 relation artifact until later stages are migrated to the pairwise relation contract;
-Stages 05 and later are not invoked until their consumers are migrated from
-the removed parent-tree contract to `contact-interface-plan/v1`.
+4. consume the Stage 04 pairwise relation contract to construct complementary interfaces and complete source-preserving part meshes in Stage 05;
+5. serialize and read back the complete colored multi-part 3MF.
 
 The pipeline may coordinate policy but must not duplicate geometry, XML, ZIP, or validation algorithms.
 

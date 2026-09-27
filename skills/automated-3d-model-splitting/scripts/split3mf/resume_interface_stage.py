@@ -8,7 +8,13 @@ import numpy as np
 
 from .application import RecognizedBoundaries, StageArtifactStore
 from .common import Component
+from .common import COLOR_CATALOG
 from .interface_assembly import build_pairwise_interface_surfaces
+from .interface_assembly import build_pairwise_part_meshes
+from .interface_package_validation import validate_reloaded_interface_parts
+from .package_io import ThreeMFWriter
+from .project import build_color_info_map
+from .validation import ValidationService
 
 
 def _read_stage_json(run_dir: Path, stage: str) -> dict:
@@ -136,6 +142,10 @@ def resume_interface_stage(
         raise ValueError("04 assembly artifact is not a contact-interface-plan/v1 plan")
     if interface_plan.get("recognized_boundary_fingerprint") != boundaries.fingerprint:
         raise ValueError("04 plan and 03 frozen-boundary fingerprints do not match")
+    project_settings = loaded_summary.get("project_settings", {})
+    face_color_tokens = loaded_arrays.get("face_color_tokens", np.asarray([], dtype="U"))
+    color_info, color_order = build_color_info_map(project_settings, face_color_tokens, None)
+    COLOR_CATALOG.replace(color_info, color_order)
 
     store = StageArtifactStore(Path(output_root).expanduser())
     arrays, summary = build_pairwise_interface_surfaces(
@@ -148,12 +158,69 @@ def resume_interface_stage(
     )
     if arrays:
         store.write_arrays("05_interface_surfaces", **arrays)
+    completed_parts, part_records = build_pairwise_part_meshes(
+        interface_plan, arrays, summary,
+        vertices=vertices, faces=faces, components=components,
+    )
+    store.write_arrays(
+        "05_interface_assembly_meshes",
+        **{
+            f"{part['part_id'].lower()}_{field}": np.asarray(
+                getattr(part["mesh"], field),
+                dtype=np.float64 if field == "vertices" else np.int64,
+            )
+            for part in completed_parts
+            for field in ("vertices", "faces")
+        },
+    )
+    output_3mf = store.run_dir / "05_complete_parts.3mf"
+    temporary_output = output_3mf.with_name(output_3mf.name + ".tmp")
+    source_filament_colors = project_settings.get("filament_colour") or []
+    if not isinstance(source_filament_colors, list):
+        source_filament_colors = []
+    writer = ThreeMFWriter()
+    validator = ValidationService()
+    try:
+        export_summary = writer.write(
+            temporary_output,
+            completed_parts,
+            title="Stage 05 complete mortise and tenon parts",
+            source_application=project_settings.get("_source_application"),
+            source_filament_colors=source_filament_colors,
+            source_project_settings=project_settings,
+            output_layout="assembly",
+        )
+        package_validation = validator.validate_package(
+            temporary_output,
+            completed_parts,
+            source_filament_colors=source_filament_colors,
+            source_application=project_settings.get("_source_application"),
+            source_project_settings=project_settings,
+            output_layout="assembly",
+        )
+        if not package_validation.get("valid"):
+            raise ValueError("Stage 05 3MF validation failed: " + json.dumps(
+                package_validation.get("errors", []), ensure_ascii=False
+            ))
+        reloaded_part_audits = validate_reloaded_interface_parts(
+            temporary_output, completed_parts, part_records
+        )
+        temporary_output.replace(output_3mf)
+    except Exception:
+        temporary_output.unlink(missing_ok=True)
+        raise
     summary.update({
-        "stage_status": "interface_surfaces_constructed",
-        "part_mesh_build_status": "pending_direct_frozen_boundary_integration",
+        "stage_status": "complete_parts_exported",
+        "part_mesh_build_status": "complete_from_frozen_boundaries",
         "frozen_boundary_fingerprint": boundaries.fingerprint,
         "quality_gates_blocking": False,
         "resumed_from_stage_artifacts": str(source_run_dir),
+        "output_3mf": str(output_3mf),
+        "exported_part_count": len(completed_parts),
+        "parts": part_records,
+        "export": export_summary,
+        "package_validation": package_validation,
+        "reloaded_part_audits": reloaded_part_audits,
     })
     store.write_json(
         "05_interface_assembly_summary",

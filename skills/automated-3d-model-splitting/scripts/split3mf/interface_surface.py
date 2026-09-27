@@ -19,7 +19,7 @@ from .mesh import (
 )
 from .spatial_intersections import count_polyline_self_intersections_3d
 
-MAX_INTERFACE_EXTENSION_MM = 10.0
+MAX_INTERFACE_EXTENSION_MM = 5.0
 MIN_INTERFACE_EXTENSION_MM = 0.2
 
 
@@ -69,6 +69,83 @@ def _polygon_centroid(points: np.ndarray) -> np.ndarray:
         ],
         dtype=np.float64,
     ) / (3.0 * twice_area)
+
+
+def _simple_planar_inner_contour(
+    desired_xy: np.ndarray, outer_xyz: np.ndarray
+) -> tuple[np.ndarray, dict]:
+    """Untangle a projected inset while retaining its cyclic correspondence.
+
+    A winding 3D Stage 04 boundary can project to a crossed 2D inset.  A
+    planar cap cannot use that outline.  In that case, parameterize a smooth
+    ellipse by the original 3D boundary arclength, keeping one inner point for
+    each outer point and matching the inset's center and principal spans.
+    """
+    desired = np.asarray(desired_xy, dtype=np.float64)
+    projected_ring = np.column_stack((desired, np.zeros(len(desired))))
+    crossings = int(count_polyline_self_intersections_3d(
+        projected_ring
+    )["segment_intersection_count"])
+    if not crossings:
+        return desired, {
+            "strategy": "exact_homothetic_projection",
+            "original_projection_crossings": 0,
+            "max_xy_adjustment_mm": 0.0,
+        }
+
+    center = desired.mean(axis=0)
+    covariance = np.cov((desired - center).T, bias=True)
+    eigenvalues, eigenvectors = np.linalg.eigh(covariance)
+    eigenvalues = np.maximum(eigenvalues[::-1], 1e-8)
+    axes = eigenvectors[:, ::-1]
+    if np.linalg.det(axes) < 0.0:
+        axes[:, 1] *= -1.0
+    radii = np.sqrt(2.0 * eigenvalues)
+    relative_first = (desired[0] - center) @ axes
+    phase = float(np.arctan2(
+        relative_first[1] / radii[1], relative_first[0] / radii[0]
+    ))
+    edges = np.linalg.norm(
+        np.roll(outer_xyz, -1, axis=0) - outer_xyz, axis=1
+    )
+    edges = np.maximum(edges, 1e-9)
+    progress = np.concatenate(([0.0], np.cumsum(edges[:-1]))) / edges.sum()
+    orientation = 1.0 if signed_area(desired) >= 0.0 else -1.0
+    angles = phase + orientation * (2.0 * np.pi * progress)
+    repaired = center + np.column_stack((
+        radii[0] * np.cos(angles), radii[1] * np.sin(angles)
+    )) @ axes.T
+    return repaired, {
+        "strategy": "arclength_parameterized_planar_ellipse",
+        "original_projection_crossings": crossings,
+        "max_xy_adjustment_mm": float(np.max(np.linalg.norm(repaired - desired, axis=1))),
+    }
+
+
+def densify_closed_contour(points: np.ndarray, subdivisions: int = 3) -> np.ndarray:
+    """Add smooth periodic Catmull–Rom samples while retaining each Stage 04 anchor."""
+    values = np.asarray(points, dtype=np.float64)
+    if values.ndim != 2 or values.shape[1] != 3 or len(values) < 3:
+        raise ValueError("closed contour needs at least three XYZ points")
+    steps = max(1, int(subdivisions))
+    result = []
+    count = len(values)
+    for index in range(count):
+        p0 = values[(index - 1) % count]
+        p1 = values[index]
+        p2 = values[(index + 1) % count]
+        p3 = values[(index + 2) % count]
+        for sample in range(steps):
+            t = sample / steps
+            t2, t3 = t * t, t * t * t
+            point = 0.5 * (
+                (2.0 * p1)
+                + (-p0 + p2) * t
+                + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2
+                + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3
+            )
+            result.append(point)
+    return np.asarray(result, dtype=np.float64)
 
 
 def _curved_cap_triangulation(
@@ -149,6 +226,7 @@ def build_pairwise_interface_surfaces(
     clearance_mm: float,
     mortise_shell_probe: LocalRayProbe,
     interface_id: str,
+    extension_depth_limit_mm: float = MAX_INTERFACE_EXTENSION_MM,
 ) -> PairedInterfaceSurfaces:
     """Build a capped annular interface with collision-limited socket depth."""
     outer = np.asarray(boundary_points_mm, dtype=np.float64)
@@ -171,6 +249,23 @@ def build_pairwise_interface_surfaces(
         raise ValueError(f"{interface_id}: Stage 04 mating direction is degenerate")
     tenon_axis = tenon_axis / tenon_axis_length
     mortise_axis = mortise_axis / mortise_axis_length
+    # Stage 04 identifies which side is the mortise.  The extrusion direction
+    # itself comes from the area normal of the simplified 3D boundary, so the
+    # wall is approximately perpendicular to the interface instead of merely
+    # following the Stage 04 side-classification vector.
+    centered_outer = outer - outer.mean(axis=0)
+    boundary_normal = np.cross(
+        centered_outer, np.roll(centered_outer, -1, axis=0)
+    ).sum(axis=0)
+    boundary_normal_length = float(np.linalg.norm(boundary_normal))
+    if boundary_normal_length <= 1e-10:
+        raise ValueError(f"{interface_id}: simplified boundary has no stable area normal")
+    boundary_normal /= boundary_normal_length
+    if float(np.dot(boundary_normal, mortise_axis)) < 0.0:
+        boundary_normal = -boundary_normal
+    stage04_axis = mortise_axis.copy()
+    tenon_axis = boundary_normal
+    mortise_axis = boundary_normal
     ratio = float(scale_ratio)
     clearance = float(clearance_mm)
     if not np.isfinite(ratio) or not 0.0 < ratio < 1.0:
@@ -184,7 +279,20 @@ def build_pairwise_interface_surfaces(
     outer_area = signed_area(outer_2d)
     outer_area_valid = abs(outer_area) > 1e-12
     center_2d = _polygon_centroid(outer_2d)
+    # The Stage 04 boundary may be curved in XYZ. Build the inset in its
+    # interface plane before extending it, so the inner wall follows the
+    # Stage 04 mating axis and every terminal cap is planar.
     inner = homothetic_loop_points(outer, tenon_axis, ratio)
+    desired_inner_2d = project_points(inner, origin, u, v)
+    repaired_inner_2d, inner_contour_record = _simple_planar_inner_contour(
+        desired_inner_2d, outer
+    )
+    inner += (
+        (repaired_inner_2d[:, 0] - desired_inner_2d[:, 0])[:, None] * u
+        + (repaired_inner_2d[:, 1] - desired_inner_2d[:, 1])[:, None] * v
+    )
+    inner_axial = inner @ mortise_axis
+    inner += (float(np.mean(inner_axial)) - inner_axial)[:, None] * mortise_axis
     inner_2d = project_points(inner, origin, u, v)
     inner_orientation_consistent = (
         np.sign(signed_area(inner_2d)) == np.sign(outer_area)
@@ -217,8 +325,25 @@ def build_pairwise_interface_surfaces(
     mortise_orientation_consistent = (
         np.sign(signed_area(mortise_inner_2d)) == np.sign(outer_area)
     )
-    cap_triangles, cap_triangulation, cap_center = _curved_cap_triangulation(
-        inner, tenon_axis
+    if inner_contour_record["strategy"] == "arclength_parameterized_planar_ellipse":
+        # A convex replacement has a reliable centre fan.  Ear clipping its
+        # thousands of nearly collinear samples creates sliver triangles.
+        cap_triangles = [
+            (index, (index + 1) % len(inner), len(inner))
+            for index in range(len(inner))
+        ]
+        cap_center = inner.mean(axis=0)
+        cap_triangulation = {
+            "geometry": "planar_convex_inner_ring",
+            "strategy": "convex_center_fan",
+            "projection_crossing_count": 0,
+        }
+    else:
+        cap_triangles, cap_triangulation, cap_center = _curved_cap_triangulation(
+            inner, tenon_axis
+        )
+    outer_cap_triangles, outer_cap_triangulation, outer_cap_center = (
+        _curved_cap_triangulation(outer, tenon_axis)
     )
     mortise_cap_points = (
         np.vstack((mortise_inner, mortise_inner.mean(axis=0)))
@@ -254,7 +379,10 @@ def build_pairwise_interface_surfaces(
     )
     probe_points = np.vstack((inner, edge_samples, cap_points, cap_edge_points))
     probe_directions = np.broadcast_to(mortise_axis, probe_points.shape).copy()
-    extension_depth = MAX_INTERFACE_EXTENSION_MM
+    depth_limit = min(MAX_INTERFACE_EXTENSION_MM, float(extension_depth_limit_mm))
+    if not np.isfinite(depth_limit) or depth_limit < MIN_INTERFACE_EXTENSION_MM:
+        raise ValueError(f"{interface_id}: mortise shell has less than {MIN_INTERFACE_EXTENSION_MM} mm available depth")
+    extension_depth = depth_limit
     depth_attempts: list[dict] = []
     while True:
         hit_distances, hit_faces = mortise_shell_probe.exits(
@@ -281,45 +409,21 @@ def build_pairwise_interface_surfaces(
         if not np.any(hit_mask):
             break
         if extension_depth <= MIN_INTERFACE_EXTENSION_MM + 1e-9:
-            # Keep the minimum-depth candidate and report its collision. Stage 05
-            # is diagnostic-only: geometric quality checks must not cancel the run.
-            break
+            raise ValueError(
+                f"{interface_id}: mortise shell intersects the inner ring at the "
+                f"minimum {MIN_INTERFACE_EXTENSION_MM} mm tenon depth"
+            )
         extension_depth = max(extension_depth * 0.5, MIN_INTERFACE_EXTENSION_MM)
 
     count = len(outer)
-    ring_faces: list[tuple[int, int, int]] = []
+    connection_faces: list[tuple[int, int, int]] = []
     for index in range(count):
         following = (index + 1) % count
-        ring_faces.extend((
+        connection_faces.extend((
             (index, following, count + index),
             (following, count + following, count + index),
         ))
-    faces = np.asarray(ring_faces, dtype=np.int64).reshape((-1, 3))
-    annulus_mesh = trimesh.Trimesh(
-        vertices=np.vstack((outer, inner)), faces=faces, process=False
-    )
-    annulus_edge_counts = np.bincount(
-        np.asarray(annulus_mesh.edges_unique_inverse, dtype=np.int64),
-        minlength=len(annulus_mesh.edges_unique),
-    )
-    annulus_double_areas = np.linalg.norm(
-        np.cross(
-            annulus_mesh.triangles[:, 1] - annulus_mesh.triangles[:, 0],
-            annulus_mesh.triangles[:, 2] - annulus_mesh.triangles[:, 0],
-        ),
-        axis=1,
-    )
-    audit = SimpleNamespace(
-        valid=bool(
-            len(faces) == count * 2
-            and np.count_nonzero(annulus_edge_counts == 1) == count * 2
-            and not np.any(annulus_edge_counts > 2)
-        ),
-        face_count=int(len(faces)),
-        boundary_edge_count=int(np.count_nonzero(annulus_edge_counts == 1)),
-        degenerate_face_count=int(np.count_nonzero(annulus_double_areas <= 1e-12)),
-        strategy="xyz_corresponding_triangle_strip",
-    )
+    faces = np.asarray(connection_faces, dtype=np.int64).reshape((-1, 3))
     mortise_projection_audit = audit_projection(
         faces,
         np.vstack((outer_2d, mortise_inner_2d)),
@@ -338,53 +442,79 @@ def build_pairwise_interface_surfaces(
     ) -> InterfaceSurface:
         inner_base_2d = project_points(inner_base, origin, u, v)
         inner_end = inner_base + mortise_axis * surface_depth
-        placed_vertices = np.vstack((outer, inner_base, inner_end))
-        cap_center_index = 3 * count
+        # One tapered side joins the frozen outer ring directly to the
+        # extended inner ring.  There is no intermediate annulus or wall.
+        placed_vertices = np.vstack((outer, inner_end))
+        cap_center_index = 2 * count
         if cap_center is not None:
             placed_vertices = np.vstack((placed_vertices, inner_end.mean(axis=0)))
+        outer_cap_center_index = len(placed_vertices)
+        if outer_cap_center is not None:
+            placed_vertices = np.vstack((placed_vertices, outer_cap_center))
         projected_vertices = np.vstack((outer_2d, inner_base_2d))
         projection_audit = audit_projection(
-            faces[: len(ring_faces)],
+            faces,
             projected_vertices,
             list(range(count)),
             list(range(count, 2 * count)),
-            intersection_points_3d=np.vstack((outer, inner_base)),
+            intersection_points_3d=np.vstack((outer, inner_end)),
         )
-        triangles = placed_vertices[faces[: len(ring_faces)]]
+        side_mesh = trimesh.Trimesh(
+            vertices=placed_vertices, faces=faces, process=False
+        )
+        side_edge_counts = np.bincount(
+            np.asarray(side_mesh.edges_unique_inverse, dtype=np.int64),
+            minlength=len(side_mesh.edges_unique),
+        )
+        triangles = placed_vertices[faces]
         face_normals = np.cross(
             triangles[:, 1] - triangles[:, 0],
             triangles[:, 2] - triangles[:, 0],
+        )
+        double_areas = np.linalg.norm(face_normals, axis=1)
+        audit = SimpleNamespace(
+            valid=bool(
+                len(faces) == count * 2
+                and np.count_nonzero(side_edge_counts == 1) == count * 2
+                and not np.any(side_edge_counts > 2)
+            ),
+            face_count=int(len(faces)),
+            boundary_edge_count=int(np.count_nonzero(side_edge_counts == 1)),
+            degenerate_face_count=int(np.count_nonzero(double_areas <= 1e-12)),
+            strategy="xyz_direct_outer_to_extended_inner_strip",
         )
         oriented_areas = face_normals @ tenon_axis
         area_epsilon = max(float(np.ptp(outer, axis=0).max()) ** 2 * 1e-14, 1e-14)
         degenerate_band_face_count = int(np.count_nonzero(np.abs(oriented_areas) <= area_epsilon))
         reversed_band_face_count = int(np.count_nonzero(oriented_areas < -area_epsilon))
-        side_faces: list[tuple[int, int, int]] = []
-        for index in range(count):
-            next_index = (index + 1) % count
-            first = count + index
-            next_first = count + next_index
-            first_end = 2 * count + index
-            next_end = 2 * count + next_index
-            side_faces.extend((
-                (first, next_first, next_end),
-                (first, next_end, first_end),
-            ))
         cap_faces = np.asarray([
             tuple(
                 cap_center_index if cap_center is not None and int(value) == count
-                else 2 * count + int(value)
+                else count + int(value)
                 for value in triangle
             )
             for triangle in cap_profile_triangles
         ], dtype=np.int64).reshape((-1, 3))
-        complete_faces = np.vstack((faces, np.asarray(side_faces, dtype=np.int64).reshape((-1, 3)), cap_faces))
+        outer_cap_faces = np.asarray([
+            tuple(
+                outer_cap_center_index if outer_cap_center is not None and int(value) == count
+                else int(value)
+                for value in triangle
+            )
+            for triangle in outer_cap_triangles
+        ], dtype=np.int64).reshape((-1, 3))
+        complete_faces = np.vstack((
+            faces,
+            cap_faces,
+            outer_cap_faces,
+        ))
         collision_mesh = trimesh.Trimesh(
             vertices=placed_vertices,
             faces=complete_faces,
             process=False,
         )
         trimesh.repair.fix_winding(collision_mesh)
+        trimesh.repair.fix_inversion(collision_mesh, multibody=True)
         edge_counts = np.bincount(
             np.asarray(collision_mesh.edges_unique_inverse, dtype=np.int64),
             minlength=len(collision_mesh.edges_unique),
@@ -394,13 +524,9 @@ def build_pairwise_interface_surfaces(
             tuple(sorted(map(int, edge)))
             for edge in unique_edges[edge_counts == 1]
         }
-        expected_outer_edges = {
-            tuple(sorted((index, (index + 1) % count)))
-            for index in range(count)
-        }
         over_shared_edge_count = int(np.count_nonzero(edge_counts > 2))
         closure_valid = (
-            open_edges == expected_outer_edges
+            not open_edges
             and over_shared_edge_count == 0
             and bool(collision_mesh.is_winding_consistent)
         )
@@ -426,6 +552,7 @@ def build_pairwise_interface_surfaces(
                 ),
                 "boundary_vertex_count": count,
                 "scale_ratio": ratio,
+                "inner_planar_contour": inner_contour_record,
                 "clearance_mm": clearance,
                 "inner_ring_offset_mm": float(sign * clearance),
                 "quality_gates_blocking": False,
@@ -445,11 +572,17 @@ def build_pairwise_interface_surfaces(
                 "outer_boundary_shift_mm": 0.0,
                 "clearance_direction": "mortise_only_outward_profile_and_depth",
                 "extension_direction": mortise_axis.round(8).tolist(),
+                "stage04_mating_direction": stage04_axis.round(8).tolist(),
+                "stage04_to_boundary_normal_angle_deg": float(
+                    np.degrees(np.arccos(np.clip(
+                        np.dot(stage04_axis, mortise_axis), -1.0, 1.0
+                    )))
+                ),
                 "extension_depth_mm": float(surface_depth),
                 "tenon_extension_depth_mm": float(extension_depth),
                 "mortise_recess_depth_mm": float(extension_depth + clearance),
                 "additional_mortise_depth_mm": float(clearance),
-                "extension_depth_limit_mm": float(MAX_INTERFACE_EXTENSION_MM),
+                "extension_depth_limit_mm": float(depth_limit),
                 "extension_depth_minimum_mm": float(MIN_INTERFACE_EXTENSION_MM),
                 "extension_depth_attempts": depth_attempts,
                 "minimum_depth_collision_remaining": bool(
@@ -458,8 +591,13 @@ def build_pairwise_interface_surfaces(
                     and extension_depth <= MIN_INTERFACE_EXTENSION_MM + 1e-9
                 ),
                 "inner_cap_face_count": int(len(cap_faces)),
-                "annular_band_face_count": int(len(ring_faces)),
-                "inner_wall_face_count": int(len(side_faces)),
+                "inner_cap_geometry": "plane",
+                "inner_cap_max_plane_error_mm": float(np.ptp(inner_end @ mortise_axis)),
+                "inner_ring_max_travel_mm": float(np.max((inner_end - inner_base) @ mortise_axis)),
+                "outer_boundary_cap_face_count": int(len(outer_cap_faces)),
+                "outer_boundary_cap_triangulation": outer_cap_triangulation,
+                "outer_boundary_closed_from_frozen_simplified_loop": True,
+                "outer_to_extended_inner_face_count": int(len(connection_faces)),
                 "stage04_side_direction": side_axis.round(8).tolist(),
                 "center_mm": (origin + center_2d[0] * u + center_2d[1] * v).round(8).tolist(),
                 "outer_projected_area_mm2": abs(float(outer_area)),
@@ -486,13 +624,14 @@ def build_pairwise_interface_surfaces(
                     },
                     "inner_cap_closed": bool(len(cap_faces) > 0),
                     "curved_cap_geometry": cap_triangulation["geometry"],
-                    "inner_band_cap_closure_valid": bool(closure_valid),
+                    "direct_connection_cap_closure_valid": bool(closure_valid),
                     "closure_diagnostics_only": True,
                     "open_outer_interface_edges": int(len(open_edges)),
                     "over_shared_edges": over_shared_edge_count,
                     "winding_consistent": bool(collision_mesh.is_winding_consistent),
                     "degenerate_face_count": degenerate_face_count,
                     "outer_interface_boundary_edge_count": int(count),
+                    "outer_boundary_capped": True,
                 },
             },
         )

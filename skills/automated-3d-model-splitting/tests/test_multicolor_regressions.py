@@ -19,7 +19,6 @@ from split3mf import common
 common.load_core_dependencies()
 
 from split3mf.common import CORE_NS, trimesh
-from split3mf import part_geometry as inward
 from split3mf.package_io import export_colored_parts_3mf, validate_colored_parts_3mf
 from split3mf.recognition import recognition_colors_from_exterior
 
@@ -112,63 +111,6 @@ class ExteriorRecognitionRegressionTests(unittest.TestCase):
         self.assertEqual(recognized[0], "DETAIL")
         self.assertEqual(report["protected_enclosed_occluded_faces"], 1)
         self.assertEqual(report["reassigned_occluded_faces"], 0)
-
-
-class RecursiveCapColorRegressionTests(unittest.TestCase):
-    def test_generated_boundary_uses_local_multicolor_surface_not_root_default(self) -> None:
-        # The pending wrapper defaults to ORANGE, but the actual source faces
-        # touching this parent-contact loop are BEIGE.
-        local_faces = np.array(
-            [[0, 1, 4], [1, 2, 4], [2, 3, 4], [3, 0, 4]],
-            dtype=np.int64,
-        )
-        source_codes = ["BEIGE", "BEIGE", "BEIGE", "BEIGE"]
-
-        edge_codes = inward.boundary_loop_source_color_codes(
-            local_faces,
-            source_codes,
-            [0, 1, 2, 3],
-            fallback_color_code="ORANGE",
-        )
-
-        self.assertEqual(edge_codes, ["BEIGE"] * 4)
-        self.assertNotIn("ORANGE", edge_codes)
-
-    def test_local_connector_generated_faces_inherit_boundary_material(self) -> None:
-        boundary = np.asarray(
-            [
-                [-2.0, -2.0, 0.0],
-                [2.0, -2.0, 0.0],
-                [2.0, 2.0, 0.0],
-                [-2.0, 2.0, 0.0],
-            ],
-            dtype=np.float64,
-        )
-        vertices = np.vstack(
-            (
-                boundary,
-                np.asarray(
-                    [
-                        [-1.5, -1.5, -1.0],
-                        [1.5, -1.5, -1.0],
-                        [0.0, 0.0, -3.0],
-                    ]
-                ),
-            )
-        )
-        generated_faces = [[0, 1, 4], [4, 5, 6]]
-
-        codes = inward.local_connector_face_color_codes_from_boundary(
-            vertices,
-            generated_faces,
-            boundary,
-            ["BEIGE"] * 4,
-            backing_face_count=1,
-            fallback_color_code="ORANGE",
-        )
-
-        self.assertEqual(codes, ["BEIGE", "BEIGE"])
-        self.assertNotIn("ORANGE", codes)
 
 
 class BambuRecursivePaintRegressionTests(unittest.TestCase):

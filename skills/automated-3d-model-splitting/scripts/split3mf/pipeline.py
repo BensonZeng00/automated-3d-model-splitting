@@ -1,21 +1,41 @@
 from __future__ import annotations
 
-from dataclasses import replace
+import json
+import re
+import zipfile
+from pathlib import Path
+from xml.etree import ElementTree as ET
 
-from .common import *
-from .project import *
-from .recognition import *
+import numpy as np
+
+from .common import COLOR_CATALOG, COLOR_INFO, progress
+from .project import ThreeMFReader, build_color_info_map, material_connectivity_labels
+from .recognition import (
+    classify_review_groups_semantically,
+    connected_components_by_color,
+    exterior_visible_face_mask,
+    filter_groups_below_area,
+    material_identity,
+    recognition_colors_from_exterior,
+    summarize_components,
+)
 from .recognition import _merge_partitioned_groups_into_components
-from .mesh import *
-from .package_io import *
-from .selection import *
-from .assembly import *
-from .validation import *
-from .part_geometry import *
-from .debug_export import export_retopology_failure_diagnostics
-from .reporting import *
-from .source_region_review import *
-from .domain import PlanarArcRetopologyConfig, PlanarArcRetopologyContext, SplitConfig
+from .package_io import ThreeMFWriter, default_output_3mf, prepare_output_3mf
+from .validation import ValidationService
+from .reporting import runtime_log
+from .source_region_review import (
+    build_source_region_review,
+    default_region_review_dir,
+    load_confirmed_region_decisions,
+)
+from .recognition_metadata import (
+    annotate_recognition_with_visual_semantics,
+    component_recognition_records,
+    confidence_score,
+    load_visual_semantics,
+    print_recognition,
+)
+from .domain import SplitConfig
 from .boundary_review import BoundaryReviewService
 from .stage_cache import sha256_file
 from .semantic_partition import apply_semantic_partitions
@@ -43,24 +63,6 @@ class SplitPipeline:
         args = self.config.namespace
         input_path = self.config.input_path
         parser = self.parser
-        requested_max_extension_mm = float(args.max_extension_mm)
-        args.max_extension_mm = max(
-            requested_max_extension_mm,
-            0.4,
-        )
-        maximum_planar_travel_mm = min(
-            max(float(args.max_planar_travel_mm), args.max_extension_mm),
-            MAXIMUM_SAFE_INWARD_DEPTH_MM,
-        )
-        available_planar_extra_mm = max(0.0, maximum_planar_travel_mm - args.max_extension_mm)
-        requested_planar_extra_limit_mm = (
-            None if args.planar_extra_limit_mm is None else float(args.planar_extra_limit_mm)
-        )
-        args.planar_extra_limit_mm = (
-            available_planar_extra_mm
-            if requested_planar_extra_limit_mm is None
-            else min(requested_planar_extra_limit_mm, available_planar_extra_mm)
-        )
         output_path = default_output_3mf(input_path, args.output)
         artifact_root = (
             Path(getattr(args, "stage_artifacts_dir", None)).expanduser()
@@ -111,22 +113,6 @@ class SplitPipeline:
         )
         if getattr(args, "stop_after_stage", None) == "load":
             return
-        retopology_failure_sink = None
-        if bool(args.diagnostic_preview):
-            failure_output_dir = output_path.parent / (
-                output_path.stem + "_diagnostics"
-            )
-
-            def retopology_failure_sink(payload: dict) -> None:
-                export_retopology_failure_diagnostics(
-                    payload,
-                    failure_output_dir,
-                )
-
-        interface_retopology = PlanarArcRetopologyContext(
-            config=PlanarArcRetopologyConfig.from_namespace(args),
-            failure_sink=retopology_failure_sink,
-        )
         new_color_info, new_color_order = build_color_info_map(
             project_settings,
             colors,
@@ -137,8 +123,6 @@ class SplitPipeline:
             output_path.with_name(output_path.stem + "_boundary_review"),
             getattr(args, "boundary_review_json", None),
         )
-        interface_retopology = replace(interface_retopology,
-            curve_review_sink=boundary_review.review_curve)
         source_owners, _ = material_connectivity_labels(colors)
         boundary_display_colors = {
             owner: COLOR_INFO.get(color, {}).get("hex", "#aaaaaa")

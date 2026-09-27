@@ -4,7 +4,17 @@ from collections import defaultdict
 
 import numpy as np
 
-from .direction_field import component_inward_direction
+from .mesh import average_outward_normal, build_local_mesh
+
+
+def _component_inward_direction(
+    vertices: np.ndarray, faces: np.ndarray, component, model_center: np.ndarray
+) -> np.ndarray:
+    local_vertices, local_faces, _, _ = build_local_mesh(vertices, faces, component)
+    component_center = local_vertices[local_faces.reshape(-1)].mean(axis=0)
+    return -average_outward_normal(
+        local_vertices, local_faces, component_center, model_center
+    )
 
 
 def plan_contact_interfaces(
@@ -117,7 +127,7 @@ def plan_contact_interfaces(
         return f"{part_id} {label}" if label else part_id
 
     inward = {
-        index: component_inward_direction(
+        index: _component_inward_direction(
             vertices, faces, component, np.asarray(model_center, dtype=np.float64)
         )
         for index, component in enumerate(components, start=1)

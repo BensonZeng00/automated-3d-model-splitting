@@ -74,7 +74,7 @@ python scripts/split_painted_3mf.py \
 
 交接审计至少记录：共享边界、生成面退化与方向、接口穿出、装配间隙、材料槽保持，以及输出 3MF 回读状态。接口外观诊断保留在报告中；无法闭合、绕序错误、装配余量错误、新增退化面或导出回读失败时不得把零件标记为完成。缺少第 04 阶段关系或必需方向等导致无法构造的输入仍作为执行错误；不得猜测补榫。source 自身的缺陷只在远离本次交接面的范围内记录，不自动修复。
 
-边界统一使用 `--boundary-shape smooth`。阅读 [boundary-smoothing.md](references/boundary-smoothing.md)、[assembly-algorithm.md](references/assembly-algorithm.md) 和 [application-stages.md](references/application-stages.md) 后再修改接口算法。
+简化边界由阶段 03 冻结。修改接口算法前阅读 [boundary-smoothing.md](references/boundary-smoothing.md)、[assembly-algorithm.md](references/assembly-algorithm.md) 和 [application-stages.md](references/application-stages.md)。
 
 拆件流程阶段、输入输出和单步调试工件见 [application-stages.md](references/application-stages.md)。开发或诊断时可使用 `--stop-after-stage` 和 `--stage-artifacts-dir` 查看每个阶段的 JSON/NPZ 结果。
 
@@ -99,6 +99,4 @@ interface_validation: diagnostic_only
 
 若本次识别生成 `03_recognition_boundaries.png`，最终回复必须内嵌显示该图片（`![边界预览](绝对路径)`），不能只给文件链接。回复前先确认图片文件存在且可读取；报告仍可另附链接。
 
-## 开发验证
-
-修改后至少运行区域审核、CLI、最终整理和端到端测试。关键不变量：对同一候选分别选择 `noise`、`part`、`uncertain` 时，source 顶点、面、颜色和组件成员必须一致；只有语义 metadata 可以不同。
+关键不变量：对同一候选分别选择 `noise`、`part`、`uncertain` 时，source 顶点、面、颜色和组件成员必须一致；只有语义 metadata 可以不同。

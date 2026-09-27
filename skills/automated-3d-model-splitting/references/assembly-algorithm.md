@@ -1,6 +1,6 @@
 # Pairwise interface assembly
 
-Stage 04 is the sole source of interface ownership and direction. Stage 05 consumes its pairwise relations and the immutable simplified-boundary snapshot. It has no root-part selection, parent tree, or recursive layer scheduler.
+Stage 04 is the sole source of interface ownership and the direction toward the mortise. Stage 05 derives the construction axis from the frozen simplified boundary and uses Stage 04 to orient its sign. It has no root-part selection, parent tree, or recursive layer scheduler.
 
 ## Per-interface construction
 
@@ -17,6 +17,6 @@ The default inner-ring scale is `0.50`; the default additional mortise side and 
 
 ## Stage transaction and publication
 
-Stage 05 builds candidates in memory. It writes interface-surface NPZ data, complete colored-part meshes, and a JSON summary only after construction succeeds. A full run then performs closed-mesh checks and serializes a temporary 3MF. Stage 08 reloads and validates that package; only a passing package replaces the final output path. Failure removes the temporary 3MF and leaves no final package marked successful.
+Stage 05 writes interface-surface and complete-mesh artifacts under the current run ID. A full run checks the complete part meshes and serializes a temporary 3MF. The publication step reloads and validates that package; only a passing package replaces the requested output path. Failure removes the temporary 3MF and does not mark the final package successful.
 
 Source mesh defects away from a planned interface are outside this stage's repair scope. They are not silently patched to make interface generation pass.

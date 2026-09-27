@@ -1,140 +1,50 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:openai:skill:automated-3d-model-splitting:visual-semantics:1.2",
-  "title": "Visual semantics for recognized 3MF parts",
+  "title": "Painted part visual semantics",
   "type": "object",
   "properties": {
     "parts": {
+      "description": "P## part labels and optional visual evidence.",
       "oneOf": [
-        {
-          "type": "object",
-          "additionalProperties": {"$ref": "#/$defs/part"}
-        },
-        {
-          "type": "array",
-          "items": {
-            "allOf": [
-              {"$ref": "#/$defs/part"},
-              {
-                "type": "object",
-                "properties": {"part": {"$ref": "#/$defs/partId"}},
-                "required": ["part"]
-              }
-            ]
-          }
-        }
+        {"type": "object", "additionalProperties": {"$ref": "#/$defs/part"}},
+        {"type": "array", "items": {"$ref": "#/$defs/part"}}
       ]
     },
-    "parent_relations": {
+    "physical_partitions": {
       "type": "array",
-      "items": {"$ref": "#/$defs/relation"}
-    },
-    "interface_retreats": {
-      "type": "array",
-      "items": {"$ref": "#/$defs/interfaceRetreat"}
+      "items": {"$ref": "#/$defs/partition"}
     }
   },
   "additionalProperties": false,
   "$defs": {
-    "partId": {"oneOf": [{"type": "integer", "minimum": 1}, {"type": "string", "pattern": "^[Pp]?0*[1-9][0-9]*$"}]},
-    "confidence": {"oneOf": [{"type": "number", "minimum": 0, "maximum": 1}, {"enum": ["VERYLOW", "LOW", "MED", "MEDIUM", "HIGH", "UNKNOWN"]}]},
     "part": {
       "type": "object",
       "properties": {
+        "part": {"type": ["string", "integer"]},
+        "part_id": {"type": ["string", "integer"]},
+        "part_index": {"type": ["string", "integer"]},
         "label": {"type": "string"},
         "description": {"type": "string"},
-        "confidence": {"$ref": "#/$defs/confidence"},
+        "confidence": {"type": ["string", "number"]},
         "visual_evidence": {"type": "string"},
-        "source_views": {"type": "array", "items": {"type": "string"}}
-        ,"force_inward_vector": {
-          "type": "array",
-          "items": {"type": "number"},
-          "minItems": 3,
-          "maxItems": 3
-        },
-        "force_parent_direction": {"type": "boolean"},
-        "guided_internal_cut": {"$ref": "#/$defs/guidedInternalCut"}
+        "source_views": {"type": "array"}
       },
       "additionalProperties": true
     },
-    "guidedInternalCut": {
+    "partition": {
       "type": "object",
       "properties": {
-        "entry_direction": {
-          "type": "array",
-          "items": {"type": "number"},
-          "minItems": 3,
-          "maxItems": 3
-        },
-        "target_plane_normal": {
-          "type": "array",
-          "items": {"type": "number"},
-          "minItems": 3,
-          "maxItems": 3
-        },
-        "target_plane_point_mm": {
-          "type": "array",
-          "items": {"type": "number"},
-          "minItems": 3,
-          "maxItems": 3
-        },
-        "minimum_depth_mm": {"type": "number", "exclusiveMinimum": 0},
-        "maximum_depth_mm": {"type": "number", "exclusiveMinimum": 0},
-        "entry_inset_mm": {"type": "number", "minimum": 0},
-        "maximum_parallel_shift_mm": {"type": "number", "minimum": 0},
-        "require_planar": {"type": "boolean"}
+        "part": {"type": ["string", "integer"]},
+        "part_index": {"type": ["string", "integer"]},
+        "scope": {"enum": ["part", "all_components"]},
+        "label": {"type": "string"},
+        "origin": {"type": "array", "prefixItems": [{"type": "number"}, {"type": "number"}, {"type": "number"}], "minItems": 3, "maxItems": 3},
+        "normal": {"type": "array", "prefixItems": [{"type": "number"}, {"type": "number"}, {"type": "number"}], "minItems": 3, "maxItems": 3},
+        "confidence": {"type": ["string", "number"]},
+        "user_confirmed": {"type": "boolean"},
+        "source_views": {"type": "array"}
       },
-      "required": [
-        "entry_direction",
-        "target_plane_normal",
-        "target_plane_point_mm"
-      ],
-      "additionalProperties": false
-    },
-    "relation": {
-      "type": "object",
-      "properties": {
-        "child": {"$ref": "#/$defs/partId"},
-        "parent": {"$ref": "#/$defs/partId"},
-        "relation": {"type": "string"},
-        "confidence": {"$ref": "#/$defs/confidence"},
-        "reason": {"type": "string"},
-        "source_views": {"type": "array", "items": {"type": "string"}},
-        "apply": {"type": "boolean"}
-      },
-      "required": ["child", "parent"],
       "additionalProperties": true
-    },
-    "interfaceRetreat": {
-      "type": "object",
-      "properties": {
-        "child": {"$ref": "#/$defs/partId"},
-        "parent": {"$ref": "#/$defs/partId"},
-        "seed_point_mm": {
-          "type": "array",
-          "items": {"type": "number"},
-          "minItems": 3,
-          "maxItems": 3
-        },
-        "seed_radius_mm": {"type": "number", "exclusiveMinimum": 0},
-        "retreat_distance_mm": {"type": "number", "exclusiveMinimum": 0},
-        "maximum_parent_face_fraction": {
-          "type": "number",
-          "exclusiveMinimum": 0,
-          "exclusiveMaximum": 1
-        },
-        "confidence": {"$ref": "#/$defs/confidence"},
-        "reason": {"type": "string"},
-        "source_views": {"type": "array", "items": {"type": "string"}},
-        "apply": {"type": "boolean"}
-      },
-      "required": [
-        "child",
-        "parent",
-        "seed_point_mm",
-        "retreat_distance_mm"
-      ],
-      "additionalProperties": false
     }
   }
 }

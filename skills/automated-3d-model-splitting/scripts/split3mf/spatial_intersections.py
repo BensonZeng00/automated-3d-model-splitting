@@ -3,6 +3,173 @@ from __future__ import annotations
 import numpy as np
 
 
+def _segment_hits_triangle_batch(starts, ends, targets, shared_points, tolerance, contact_tolerance):
+    direction = ends - starts
+    edge1 = targets[:, 1] - targets[:, 0]
+    edge2 = targets[:, 2] - targets[:, 0]
+    p = np.cross(direction, edge2)
+    determinant = np.einsum("ij,ij->i", edge1, p)
+    normal_length = np.linalg.norm(np.cross(edge1, edge2), axis=1)
+    direction_length = np.linalg.norm(direction, axis=1)
+    usable = np.abs(determinant) > np.maximum(
+        tolerance * tolerance, 1e-9 * normal_length * direction_length
+    )
+    inverse = np.divide(1.0, determinant, out=np.zeros_like(determinant), where=usable)
+    offset = starts - targets[:, 0]
+    bary_u = np.einsum("ij,ij->i", offset, p) * inverse
+    q = np.cross(offset, edge1)
+    bary_v = np.einsum("ij,ij->i", direction, q) * inverse
+    segment_t = np.einsum("ij,ij->i", edge2, q) * inverse
+    hit_points = starts + segment_t[:, None] * direction
+    away_from_shared_vertex = (
+        ~np.isfinite(shared_points[:, 0])
+        | (np.linalg.norm(hit_points - shared_points, axis=1) > contact_tolerance)
+    )
+    return (usable & away_from_shared_vertex
+            & (segment_t > 1e-9) & (segment_t < 1.0 - 1e-9)
+            & (bary_u >= -1e-9) & (bary_v >= -1e-9)
+            & (bary_u + bary_v <= 1.0 + 1e-9))
+
+
+def count_local_strip_penetrations_3d(
+    faces: np.ndarray, points: np.ndarray, *, maximum_face_gap: int = 8,
+    return_pairs: bool = False,
+) -> int | list[tuple[int, int]]:
+    """Fast phase-screen for nearby nonincident ribbon triangles in XYZ."""
+    triangles = np.asarray(faces, dtype=np.int64).reshape((-1, 3))
+    xyz = np.asarray(points, dtype=np.float64)[triangles]
+    low, high = xyz.min(axis=1), xyz.max(axis=1)
+    scale = max(float(np.linalg.norm(np.ptp(points, axis=0))), 1.0)
+    tolerance = max(1e-8, scale * 1e-10)
+    contact_tolerance = max(1e-6, scale * 1e-8)
+    total = 0
+    pairs: list[tuple[int, int]] = []
+    for gap in range(2, min(maximum_face_gap + 1, len(triangles))):
+        left = np.arange(len(triangles) - gap)
+        right = left + gap
+        nonincident = ~(
+            triangles[left, :, None] == triangles[right, None, :]
+        ).any(axis=(1, 2))
+        nearby = np.all(low[left] <= high[right] + tolerance, axis=1)
+        nearby &= np.all(low[right] <= high[left] + tolerance, axis=1)
+        left, right = left[nonincident & nearby], right[nonincident & nearby]
+        if not len(left):
+            continue
+        first, second = xyz[left], xyz[right]
+        no_shared = np.full((len(left), 3), np.nan)
+        hits = np.zeros(len(left), dtype=bool)
+        for edge_index in range(3):
+            hits |= _segment_hits_triangle_batch(
+                first[:, edge_index], first[:, (edge_index + 1) % 3],
+                second, no_shared, tolerance, contact_tolerance,
+            )
+            hits |= _segment_hits_triangle_batch(
+                second[:, edge_index], second[:, (edge_index + 1) % 3],
+                first, no_shared, tolerance, contact_tolerance,
+            )
+        total += int(np.count_nonzero(hits))
+        if return_pairs:
+            pairs.extend((int(a), int(b)) for a, b in zip(left[hits], right[hits]))
+    return pairs if return_pairs else total
+
+
+def first_nonincident_triangle_intersection_3d(
+    faces: np.ndarray, points: np.ndarray
+) -> dict:
+    """Find a genuine XYZ triangle overlap, ignoring shared topological edges.
+
+    The sweep only compares overlapping 3D bounding boxes. Edge/triangle
+    penetration tests cover non-coplanar pairs; a separating-axis test covers
+    positive-area coplanar overlap. A 2D projection is never used as proof of
+    a 3D intersection.
+    """
+    triangles = np.asarray(faces, dtype=np.int64).reshape((-1, 3))
+    vertices = np.asarray(points, dtype=np.float64)
+    xyz = vertices[triangles]
+    low, high = xyz.min(axis=1), xyz.max(axis=1)
+    order = np.argsort(low[:, 0], kind="stable")
+    scale = max(float(np.linalg.norm(np.ptp(vertices, axis=0))), 1.0)
+    tolerance = max(1e-8, scale * 1e-10)
+    tested = 0
+
+    shared_contact_tolerance = max(1e-6, scale * 1e-8)
+
+    def coplanar_overlap(first, second):
+        normal = np.cross(first[1] - first[0], first[2] - first[0])
+        coordinate = int(np.argmax(np.abs(normal)))
+        a = np.delete(first, coordinate, axis=1)
+        b = np.delete(second, coordinate, axis=1)
+        for polygon in (a, b):
+            for index in range(3):
+                edge = polygon[(index + 1) % 3] - polygon[index]
+                axis = np.array([-edge[1], edge[0]])
+                pa, pb = a @ axis, b @ axis
+                if min(pa.max(), pb.max()) - max(pa.min(), pb.min()) <= tolerance:
+                    return False
+        return True
+
+    for position, first_index in enumerate(order):
+        last = int(np.searchsorted(low[order, 0], high[first_index, 0] + tolerance, side="right"))
+        candidates = order[position + 1:last]
+        if not len(candidates):
+            continue
+        candidates = candidates[
+            np.all(low[candidates] <= high[first_index] + tolerance, axis=1)
+            & np.all(high[candidates] >= low[first_index] - tolerance, axis=1)
+        ]
+        if not len(candidates):
+            continue
+        # A shared edge is an intentional adjacency; shared vertices alone
+        # do not exempt two faces from an interior-overlap check.
+        common_vertices = [
+            set(triangles[first_index]) & set(triangles[other])
+            for other in candidates
+        ]
+        edge_shared = np.array([len(common) >= 2 for common in common_vertices])
+        candidates = candidates[~edge_shared]
+        common_vertices = [common for common, omitted in zip(common_vertices, edge_shared) if not omitted]
+        if not len(candidates):
+            continue
+        tested += len(candidates)
+        base = xyz[first_index]
+        other = xyz[candidates]
+        repeats = np.broadcast_to(base, other.shape)
+        shared_points = np.full((len(candidates), 3), np.nan)
+        for local, common in enumerate(common_vertices):
+            if len(common) == 1:
+                shared_points[local] = vertices[next(iter(common))]
+        hits = np.zeros(len(candidates), dtype=bool)
+        for edge_index in range(3):
+            hits |= _segment_hits_triangle_batch(
+                repeats[:, edge_index], repeats[:, (edge_index + 1) % 3], other,
+                shared_points, tolerance, shared_contact_tolerance,
+            )
+            hits |= _segment_hits_triangle_batch(
+                other[:, edge_index], other[:, (edge_index + 1) % 3], repeats,
+                shared_points, tolerance, shared_contact_tolerance,
+            )
+        if np.any(hits):
+            other_index = int(candidates[np.flatnonzero(hits)[0]])
+            return {"valid": False, "face_pair": [int(first_index), other_index],
+                    "shared_vertex_count": int(len(set(triangles[first_index]) & set(triangles[other_index]))),
+                    "face_vertices": [triangles[first_index].tolist(), triangles[other_index].tolist()],
+                    "face_points_mm": [xyz[first_index].round(8).tolist(), xyz[other_index].round(8).tolist()],
+                    "tested_pairs": int(tested), "reason": "triangle_penetration"}
+        first_normal = np.cross(base[1] - base[0], base[2] - base[0])
+        first_norm = float(np.linalg.norm(first_normal))
+        other_normals = np.cross(other[:, 1] - other[:, 0], other[:, 2] - other[:, 0])
+        parallel = np.linalg.norm(np.cross(other_normals, first_normal), axis=1) <= (
+            tolerance * first_norm * np.maximum(np.linalg.norm(other_normals, axis=1), 1e-30)
+        )
+        plane_distance = np.max(np.abs((other - base[0]) @ first_normal), axis=1)
+        coplanar = parallel & (plane_distance <= tolerance * first_norm)
+        for local in np.flatnonzero(coplanar):
+            if coplanar_overlap(base, other[local]):
+                return {"valid": False, "face_pair": [int(first_index), int(candidates[local])],
+                        "tested_pairs": int(tested), "reason": "coplanar_overlap"}
+    return {"valid": True, "face_pair": None, "tested_pairs": int(tested), "reason": None}
+
+
 def count_nonincident_mesh_edge_intersections_3d(
     faces: np.ndarray,
     points: np.ndarray,

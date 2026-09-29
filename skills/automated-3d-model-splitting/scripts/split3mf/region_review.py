@@ -66,3 +66,40 @@ def select_region_review_groups(vertices, faces, groups, noise_max_faces,
         else:
             ordinary.append(group)
     return ordinary, review
+
+
+def limit_region_review_candidates(vertices, faces, candidates, maximum=10):
+    """Keep the largest candidates for human review and record the rest as noise."""
+    maximum = int(maximum)
+    if maximum < 1:
+        raise ValueError("maximum region review candidates must be at least 1")
+
+    vertices = np.asarray(vertices, dtype=np.float64)
+    faces = np.asarray(faces, dtype=np.int64)
+    ranked = []
+    for group, category in candidates:
+        group = np.asarray(group, dtype=np.int64)
+        triangles = vertices[faces[group]]
+        area_mm2 = float(
+            np.linalg.norm(
+                np.cross(triangles[:, 1] - triangles[:, 0],
+                         triangles[:, 2] - triangles[:, 0]),
+                axis=1,
+            ).sum() * 0.5
+        )
+        ranked.append((group, str(category), area_mm2, int(group.min())))
+
+    ranked.sort(key=lambda item: (-item[2], item[3]))
+    selected = [(group, category) for group, category, _area, _min_id in ranked[:maximum]]
+    automatic_noise = [
+        {
+            "source_min_face_index": min_id,
+            "faces": int(len(group)),
+            "area_mm2": area_mm2,
+            "review_category": category,
+            "classification": "noise",
+            "classification_source": "review_candidate_area_limit",
+        }
+        for group, category, area_mm2, min_id in ranked[maximum:]
+    ]
+    return selected, automatic_noise

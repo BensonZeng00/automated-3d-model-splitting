@@ -17,7 +17,7 @@ The active path has five stages: preflight, vendor 3MF loading, painted-region r
 | `split3mf/validation.py`, `interface_package_validation.py` | Check completed meshes and read the written 3MF back. |
 | `split3mf/application/stage_artifacts.py` | Write inspectable JSON/NPZ artifacts with manifests. |
 
-`scripts/run_stage05_from_artifacts.py` and `split3mf/resume_interface_stage.py` replay Stage 05 from completed 02–04 artifacts. They do not reopen the input 3MF or recalculate recognized boundaries.
+`scripts/run_stage04_from_artifacts.py` and `split3mf/resume_assembly_stage.py` build Stage 04 from completed 02/03 artifacts, preserving confirmed source classifications and accepting later semantic labels without reopening the input 3MF. `scripts/run_stage05_from_artifacts.py` and `split3mf/resume_interface_stage.py` replay Stage 05 from completed 02–04 artifacts. They do not reopen the input 3MF or recalculate recognized boundaries.
 
 ## Geometry contract
 

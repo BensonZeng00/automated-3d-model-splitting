@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import hashlib
 import json
 from pathlib import Path
 
 import numpy as np
 
-from .application import RecognizedBoundaries, StageArtifactStore
+from .application import StageArtifactStore
 from .common import Component
 from .common import COLOR_CATALOG
 from .interface_assembly import build_pairwise_interface_surfaces
@@ -14,82 +13,14 @@ from .interface_assembly import build_pairwise_part_meshes
 from .interface_package_validation import validate_reloaded_interface_parts
 from .package_io import ThreeMFWriter
 from .project import build_color_info_map
+from .source_face_ownership import complete_component_face_ownership, confirmed_part_ids
 from .validation import ValidationService
-
-
-def _read_stage_json(run_dir: Path, stage: str) -> dict:
-    path = run_dir / f"{stage}.json"
-    if not path.is_file():
-        raise FileNotFoundError(f"missing required stage artifact: {path}")
-    record = json.loads(path.read_text(encoding="utf-8"))
-    if record.get("stage") != stage or record.get("status") != "completed":
-        raise ValueError(f"stage artifact is not completed: {path}")
-    return record.get("result", {})
-
-
-def _read_stage_arrays(run_dir: Path, stage: str) -> dict[str, np.ndarray]:
-    archive_path = run_dir / f"{stage}.npz"
-    manifest = _read_stage_json(run_dir, f"{stage}_manifest")
-    expected_name = manifest.get("artifact")
-    expected_digest = manifest.get("sha256")
-    if expected_name != archive_path.name or not archive_path.is_file():
-        raise ValueError(f"stage artifact manifest does not match {archive_path}")
-    actual_digest = hashlib.sha256(archive_path.read_bytes()).hexdigest()
-    if actual_digest != expected_digest:
-        raise ValueError(f"stage artifact checksum mismatch: {archive_path}")
-    with np.load(archive_path, allow_pickle=False) as archive:
-        arrays = {name: archive[name] for name in archive.files}
-    declared = manifest.get("arrays", {})
-    if set(arrays) != set(declared):
-        raise ValueError(f"stage artifact arrays do not match manifest: {archive_path}")
-    for name, value in arrays.items():
-        record = declared[name]
-        if list(value.shape) != record.get("shape") or str(value.dtype) != record.get("dtype"):
-            raise ValueError(f"stage artifact array metadata mismatch: {archive_path}:{name}")
-    return arrays
-
-
-def _restore_boundaries(
-    arrays: dict[str, np.ndarray], summary: dict
-) -> RecognizedBoundaries:
-    required = {
-        "boundary_vertex_ids", "boundary_points", "boundary_loop_offsets",
-        "component_loop_offsets",
-    }
-    if not required.issubset(arrays):
-        raise ValueError("03 boundary artifact is missing required arrays")
-    ids = arrays["boundary_vertex_ids"]
-    points = arrays["boundary_points"]
-    loop_offsets = arrays["boundary_loop_offsets"]
-    component_offsets = arrays["component_loop_offsets"]
-    if len(ids) != len(points) or points.ndim != 2 or points.shape[1:] != (3,):
-        raise ValueError("03 boundary artifact has inconsistent point and vertex arrays")
-    if len(loop_offsets) == 0 or len(component_offsets) == 0:
-        raise ValueError("03 boundary artifact has empty offsets")
-    loops: list[tuple[tuple[int, ...], ...]] = []
-    point_loops: list[tuple[tuple[tuple[float, float, float], ...], ...]] = []
-    for component_index in range(len(component_offsets) - 1):
-        component_loops = []
-        component_points = []
-        for loop_index in range(
-            int(component_offsets[component_index]),
-            int(component_offsets[component_index + 1]),
-        ):
-            start, end = map(int, loop_offsets[loop_index : loop_index + 2])
-            component_loops.append(tuple(map(int, ids[start:end])))
-            component_points.append(tuple(tuple(map(float, point)) for point in points[start:end]))
-        loops.append(tuple(component_loops))
-        point_loops.append(tuple(component_points))
-    boundary_summary = summary.get("recognized_boundaries", {})
-    return RecognizedBoundaries(
-        component_loops=tuple(loops),
-        component_loop_points=tuple(point_loops),
-        source_vertex_count=int(boundary_summary["source_vertex_count"]),
-        source_face_count=int(boundary_summary["source_face_count"]),
-        fingerprint=str(boundary_summary["fingerprint"]),
-        simplification_records=tuple(boundary_summary.get("simplification_records", [])),
-        excluded_components=tuple(summary.get("recognition_excluded_regions", [])),
-    )
+from .stage_cache import sha256_file
+from .stage_reuse_provenance import validate_provenance
+from .assembly_review import ensure_assembly_review
+from .stage_table_report import interface_table, write_markdown_table
+from .semantic_review_artifacts import ensure_semantic_review_confirmed
+from .application.stage_artifact_reader import read_stage_arrays, read_stage_json, restore_boundaries
 
 
 def resume_interface_stage(
@@ -98,15 +29,51 @@ def resume_interface_stage(
     *,
     scale_ratio: float = 0.50,
     clearance_mm: float = 0.20,
+    expected_source: Path | None = None,
+    assembly_review_path: Path | None = None,
+    semantic_review_path: Path | None = None,
+    remove_detached_micro_shells_part_ids: frozenset[str] = frozenset(),
 ) -> Path:
     """Run Stage 05 from completed 02/03/04 artifacts without rereading the 3MF."""
     source_run_dir = Path(source_run_dir).expanduser().resolve()
-    loaded_summary = _read_stage_json(source_run_dir, "02_loaded_project_summary")
-    recognition_summary = _read_stage_json(source_run_dir, "03_recognition_summary")
-    assembly_record = _read_stage_json(source_run_dir, "04_assembly_plan")
-    loaded_arrays = _read_stage_arrays(source_run_dir, "02_loaded_project")
-    region_arrays = _read_stage_arrays(source_run_dir, "03_recognition_regions")
-    boundary_arrays = _read_stage_arrays(source_run_dir, "03_recognized_boundaries")
+    loaded_summary = read_stage_json(source_run_dir, "02_loaded_project_summary")
+    provenance_path = source_run_dir / "04_reuse_provenance.json"
+    if provenance_path.is_file():
+        validate_provenance(
+            read_stage_json(source_run_dir, "04_reuse_provenance"),
+            str(loaded_summary.get("source_sha256", "")),
+        )
+    if expected_source is not None:
+        expected_source = Path(expected_source).expanduser().resolve()
+        recorded_source = Path(str(loaded_summary.get("source", ""))).resolve()
+        if expected_source != recorded_source:
+            raise ValueError(
+                f"stage artifacts belong to {recorded_source}, not {expected_source}"
+            )
+        recorded_sha256 = loaded_summary.get("source_sha256")
+        if not recorded_sha256 or sha256_file(expected_source) != recorded_sha256:
+            raise ValueError("source 3MF changed since Stage 02; rerun recognition")
+    recognition_summary = read_stage_json(source_run_dir, "03_recognition_summary")
+    assembly_record = read_stage_json(source_run_dir, "04_assembly_plan")
+    table_path = source_run_dir / "04_interface_table.md"
+    if not table_path.is_file():
+        write_markdown_table(
+            table_path, "04 榫卯接口表",
+            assembly_record.get("interface_table") or interface_table(assembly_record),
+        )
+    ensure_assembly_review(
+        assembly_record,
+        source_sha256=str(loaded_summary.get("source_sha256", "")),
+        template_path=source_run_dir / "04_assembly_review.json",
+        table_path=table_path,
+        review_path=assembly_review_path,
+    )
+    ensure_semantic_review_confirmed(
+        source_run_dir, semantic_review_path, recognition_summary
+    )
+    loaded_arrays = read_stage_arrays(source_run_dir, "02_loaded_project")
+    region_arrays = read_stage_arrays(source_run_dir, "03_recognition_regions")
+    boundary_arrays = read_stage_arrays(source_run_dir, "03_recognized_boundaries")
 
     vertices = loaded_arrays.get("vertices")
     faces = loaded_arrays.get("faces")
@@ -136,7 +103,7 @@ def resume_interface_stage(
         ))
     if len(components) != len(regions):
         raise ValueError("03 recognition summary and region arrays are inconsistent")
-    boundaries = _restore_boundaries(boundary_arrays, recognition_summary)
+    boundaries = restore_boundaries(boundary_arrays, recognition_summary)
     interface_plan = assembly_record
     if interface_plan.get("schema") != "contact-interface-plan/v1":
         raise ValueError("04 assembly artifact is not a contact-interface-plan/v1 plan")
@@ -158,9 +125,16 @@ def resume_interface_stage(
     )
     if arrays:
         store.write_arrays("05_interface_surfaces", **arrays)
+    output_components, source_face_ownership = complete_component_face_ownership(
+        vertices, faces, components,
+        protected_part_ids=confirmed_part_ids(interface_plan),
+    )
     completed_parts, part_records = build_pairwise_part_meshes(
         interface_plan, arrays, summary,
-        vertices=vertices, faces=faces, components=components,
+        vertices=vertices, faces=faces, components=output_components,
+        recognized_components=components,
+        face_color_tokens=face_color_tokens,
+        remove_detached_micro_shells_part_ids=remove_detached_micro_shells_part_ids,
     )
     store.write_arrays(
         "05_interface_assembly_meshes",
@@ -218,6 +192,7 @@ def resume_interface_stage(
         "output_3mf": str(output_3mf),
         "exported_part_count": len(completed_parts),
         "parts": part_records,
+        "source_face_ownership": source_face_ownership,
         "export": export_summary,
         "package_validation": package_validation,
         "reloaded_part_audits": reloaded_part_audits,

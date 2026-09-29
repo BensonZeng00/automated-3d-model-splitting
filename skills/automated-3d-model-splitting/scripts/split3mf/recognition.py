@@ -340,6 +340,8 @@ def summarize_components(
     groups: Iterable[np.ndarray],
     min_faces: int,
     display_colors: list[str] | None = None,
+    retained_source_min_face_ids: set[int] | None = None,
+    excluded_source_min_face_ids: set[int] | None = None,
 ) -> tuple[list[Component], list[dict]]:
     areas = triangle_areas(vertices, faces)
     components: list[Component] = []
@@ -359,7 +361,16 @@ def summarize_components(
             "bbox_min": bbox_min.round(6).tolist(),
             "bbox_max": bbox_max.round(6).tolist(),
         }
-        if len(group) >= min_faces:
+        source_min_face_id = int(np.min(group))
+        explicitly_retained = (
+            retained_source_min_face_ids is not None
+            and source_min_face_id in retained_source_min_face_ids
+        )
+        explicitly_excluded = (
+            excluded_source_min_face_ids is not None
+            and source_min_face_id in excluded_source_min_face_ids
+        )
+        if not explicitly_excluded and (len(group) >= min_faces or explicitly_retained):
             components.append(
                 Component(
                     color_code=color,

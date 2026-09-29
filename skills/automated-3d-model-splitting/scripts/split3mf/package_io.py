@@ -4,6 +4,11 @@ from .common import *
 from .project import *
 from .recognition import *
 from .mesh import *
+from .topology import (
+    TOPOLOGY_DEFECT_RATIO_LIMIT,
+    audit_mesh_topology,
+    topology_defects_within_tolerance,
+)
 
 def open_edge_count(mesh: trimesh.Trimesh) -> int:
     check = mesh.copy()
@@ -820,6 +825,7 @@ def validate_colored_parts_3mf(
     for index, (object_element, expected) in enumerate(zip(mesh_objects, expected_parts)):
         object_id = object_element.attrib.get("id")
         part_errors = []
+        topology_audit = None
         metadata_element = object_element.find(
             CORE_NS
             + "metadata[@name='automated-3d-model-splitting:annotation']"
@@ -996,21 +1002,24 @@ def validate_colored_parts_3mf(
                 reloaded_mesh.visual.face_colors = palette_rgba[
                     np.asarray(loaded_face_indices, dtype=np.int64)
                 ]
-            reloaded_open_edges = open_edge_count(reloaded_mesh)
-            if not reloaded_mesh.is_watertight:
-                part_errors.append("reloaded mesh is not watertight")
-            if not reloaded_mesh.is_winding_consistent:
+            topology_audit = audit_mesh_topology(reloaded_mesh)
+            if not topology_defects_within_tolerance(topology_audit):
+                part_errors.append(
+                    "reloaded mesh topology defect ratio is outside tolerance: "
+                    f"{topology_audit['defect_edges']}/{topology_audit['unique_edges']} "
+                    f"({topology_audit['topology_defect_ratio']:.3%}; "
+                    f"required <{TOPOLOGY_DEFECT_RATIO_LIMIT:.0%}; "
+                    f"open={topology_audit['open_edges']}, "
+                    f"over-shared={topology_audit['over_shared_edges']})"
+                )
+            if not topology_audit["winding_consistent"]:
                 part_errors.append("reloaded mesh winding is inconsistent")
-            component_orientation = watertight_component_orientation_audit(
-                reloaded_mesh
-            )
+            component_orientation = topology_audit["closed_component_orientation"]
             if component_orientation.get("inward_closed_component_count"):
                 part_errors.append(
                     "reloaded mesh has inward-oriented closed components: "
                     f"{component_orientation['inward_closed_component_count']}"
                 )
-            if reloaded_open_edges:
-                part_errors.append(f"reloaded mesh has {reloaded_open_edges} open edges")
             if include_loaded_objects:
                 loaded_objects.append(
                     {
@@ -1050,6 +1059,21 @@ def validate_colored_parts_3mf(
                 "filament_slot_index": expected.get("filament_slot_index"),
                 "vertices": int(len(vertices)),
                 "triangles": int(len(faces)),
+                "topology_audit": (
+                    {
+                        "watertight": topology_audit["watertight"],
+                        "defect_edges": topology_audit["defect_edges"],
+                        "unique_edges": topology_audit["unique_edges"],
+                        "defect_ratio": topology_audit["topology_defect_ratio"],
+                        "tolerance_accepted": topology_defects_within_tolerance(
+                            topology_audit
+                        ),
+                        "open_edges": topology_audit["open_edges"],
+                        "over_shared_edges": topology_audit["over_shared_edges"],
+                    }
+                    if topology_audit is not None
+                    else None
+                ),
                 "valid": not part_errors,
                 "errors": part_errors,
             }

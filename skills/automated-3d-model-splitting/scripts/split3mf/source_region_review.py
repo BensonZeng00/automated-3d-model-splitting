@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .common import *
 from .recognition import classify_review_groups_semantically
+from .recognition_metadata import meaningful_semantic_label
 
 
 REVIEW_SCHEMA_VERSION = 2
@@ -232,26 +233,40 @@ def build_source_region_review(
     view_count: int,
     depth_map_resolution: int,
     image_resolution: int,
+    max_review_candidates: int = 10,
+    selected_candidates: list[tuple[np.ndarray, str]] | None = None,
+    automatic_noise_candidates: list[dict] | None = None,
+    classified_records: list[dict] | None = None,
 ) -> dict:
     normalized_groups = [np.asarray(group, dtype=np.int64) for group in groups]
-    from .region_review import select_region_review_groups
-    _, review_candidates = select_region_review_groups(
-        vertices, faces, normalized_groups, noise_max_faces,
-        small_region_max_faces, visible_faces)
+    from .region_review import (
+        limit_region_review_candidates,
+        select_region_review_groups,
+    )
+    if selected_candidates is None or automatic_noise_candidates is None:
+        _, candidates = select_region_review_groups(
+            vertices, faces, normalized_groups, noise_max_faces,
+            small_region_max_faces, visible_faces)
+        review_candidates, automatic_noise_candidates = limit_region_review_candidates(
+            vertices, faces, candidates, max_review_candidates)
+    else:
+        review_candidates = selected_candidates
     review_groups = [group for group, _ in review_candidates]
     review_categories = [category for _, category in review_candidates]
-    records = classify_review_groups_semantically(
-        vertices=vertices,
-        faces=faces,
-        connectivity_colors=connectivity_colors,
-        display_colors=display_colors,
-        all_groups=normalized_groups,
-        review_groups=review_groups,
-        min_faces=small_region_max_faces + 1,
-        visible_faces=visible_faces,
-        view_count=view_count,
-        depth_map_resolution=depth_map_resolution,
-    )
+    records = classified_records
+    if records is None:
+        records = classify_review_groups_semantically(
+            vertices=vertices,
+            faces=faces,
+            connectivity_colors=connectivity_colors,
+            display_colors=display_colors,
+            all_groups=normalized_groups,
+            review_groups=review_groups,
+            min_faces=small_region_max_faces + 1,
+            visible_faces=visible_faces,
+            view_count=view_count,
+            depth_map_resolution=depth_map_resolution,
+        )
     review_dir.mkdir(parents=True, exist_ok=True)
     manifest_items = []
     decision_items = []
@@ -294,11 +309,18 @@ def build_source_region_review(
         "source_face_count": int(len(faces)),
         "noise_max_faces": int(noise_max_faces),
         "small_region_max_faces": int(small_region_max_faces),
+        "max_review_candidates": int(max_review_candidates),
+        "total_candidate_count": len(review_candidates) + len(automatic_noise_candidates),
+        "automatic_noise_count": len(automatic_noise_candidates),
+        "automatic_noise_faces": sum(int(item["faces"]) for item in automatic_noise_candidates),
+        "automatic_noise_area_mm2": sum(float(item["area_mm2"]) for item in automatic_noise_candidates),
+        "automatic_noise": automatic_noise_candidates,
         "review_required": bool(manifest_items),
         "instruction": (
-            "Regions through the small-region threshold and long-thin regions require "
-            "semantic classification. Set classification to noise, part, or uncertain. "
-            "Classification never merges, deletes, recolors, or repairs source geometry."
+            f"Up to the {int(max_review_candidates)} largest candidates by total source "
+            "surface area are presented for semantic classification. Remaining candidates are "
+            "automatically classified as noise. Classification never merges, deletes, "
+            "recolors, or repairs source geometry."
         ),
         "items": manifest_items,
     }
@@ -311,6 +333,7 @@ def build_source_region_review(
         "source_face_count": int(len(faces)),
         "noise_max_faces": int(noise_max_faces),
         "small_region_max_faces": int(small_region_max_faces),
+        "max_review_candidates": int(max_review_candidates),
         "user_confirmed": False,
         "items": decision_items,
     }
@@ -331,6 +354,7 @@ def load_confirmed_region_decisions(
     noise_max_faces: int,
     small_region_max_faces: int,
     expected_records: list[dict],
+    max_review_candidates: int = 10,
 ) -> dict[int, dict]:
     payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
@@ -345,6 +369,8 @@ def load_confirmed_region_decisions(
         raise ValueError("region review JSON noise_max_faces does not match --noise-review-max-faces")
     if int(payload.get("small_region_max_faces", -1)) != int(small_region_max_faces):
         raise ValueError("region review JSON small_region_max_faces does not match --small-region-review-max-faces")
+    if int(payload.get("max_review_candidates", -1)) != int(max_review_candidates):
+        raise ValueError("region review JSON max_review_candidates does not match --max-region-review-candidates")
     if payload.get("user_confirmed") is not True:
         raise ValueError("region review JSON requires user_confirmed=true")
 
@@ -373,13 +399,19 @@ def load_confirmed_region_decisions(
                 f"F{fragment_id:03d} classification must be noise, part, or uncertain"
             )
         label = str(item.get("semantic_label", "")).strip()
-        if not label:
-            raise ValueError(f"F{fragment_id:03d} requires a semantic_label from image review")
+        if not meaningful_semantic_label(label):
+            raise ValueError(
+                f"F{fragment_id:03d} requires a descriptive body-part label "
+                "from image review; an F/P number is only an identifier"
+            )
+        confidence = str(item.get("visual_confidence", "UNKNOWN")).upper()
+        if confidence not in {"LOW", "MED", "MEDIUM", "HIGH"}:
+            raise ValueError(f"F{fragment_id:03d} requires image-review confidence")
         decisions[fragment_id] = {
             "fragment_id": fragment_id,
             "source_min_face_index": source_min_face_index,
             "semantic_label": label,
-            "visual_confidence": str(item.get("visual_confidence", "UNKNOWN")),
+            "visual_confidence": confidence,
             "classification": classification,
         }
     if set(decisions) != set(expected):

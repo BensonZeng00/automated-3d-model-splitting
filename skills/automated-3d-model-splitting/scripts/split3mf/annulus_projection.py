@@ -3,9 +3,6 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .spatial_intersections import count_nonincident_mesh_edge_intersections_3d
-
-
 def _cross(a, b):
     return a[..., 0] * b[..., 1] - a[..., 1] * b[..., 0]
 
@@ -13,35 +10,6 @@ def _cross(a, b):
 def _area(points):
     points = points - points[0]
     return float(_cross(points, np.roll(points, -1, axis=0)).sum() * 0.5)
-
-
-def _crossing_count(faces, points):
-    """Count proper nonincident edge crossings using a bounding-box sweep."""
-    edges = np.asarray(sorted({tuple(sorted((int(a), int(b))))
-                              for face in faces
-                              for a, b in zip(face, np.roll(face, -1))}))
-    if not len(edges):
-        return 0
-    segments = np.asarray([[points[a], points[b]] for a, b in edges])
-    low, high = segments.min(axis=1), segments.max(axis=1)
-    order = np.argsort(low[:, 0], kind='stable')
-    edges, segments, low, high = (x[order] for x in (edges, segments, low, high))
-    count = 0
-    for i in range(len(edges) - 1):
-        stop = np.searchsorted(low[:, 0], high[i, 0], side='right')
-        candidates = np.arange(i + 1, stop)
-        candidates = candidates[(low[candidates, 1] < high[i, 1])
-                                & (high[candidates, 1] > low[i, 1])]
-        if not len(candidates):
-            continue
-        other = edges[candidates]
-        candidates = candidates[~np.any(other[:, :, None] == edges[i], axis=(1, 2))]
-        a, b = segments[i]
-        c, d = segments[candidates, 0], segments[candidates, 1]
-        count += int(np.count_nonzero(
-            (_cross(b-a, c-a) * _cross(b-a, d-a) < -1e-20)
-            & (_cross(d-c, a-c) * _cross(d-c, b-c) < -1e-20)))
-    return count
 
 
 @dataclass(frozen=True)
@@ -61,15 +29,12 @@ def audit_projection(
     points,
     outer_ids,
     inner_ids,
-    *,
-    intersection_points_3d=None,
 ):
-    """Require one oriented, noncrossing cover of the projected annulus.
+    """Measure projected area and winding consistency for a connector strip.
 
     Accept either global winding direction, never a mixture. This is a
-    structural audit; cosmetic resolution and print-area budgets do not relax
-    it. A caller restoring proven source projection ears audits its simple
-    core separately, while retaining the complete strip's 3-D topology audit.
+    structural diagnostic. It deliberately does not search for projected
+    edge crossings; generated geometry is checked by the 3D audit instead.
     """
     triangles = np.asarray([[points[int(i)] for i in f] for f in faces])
     expected = abs(_area(np.asarray([points[i] for i in outer_ids]))) - abs(
@@ -90,16 +55,6 @@ def audit_projection(
         reasons.append('projected_fold')
     if abs(total - expected) > tolerance:
         reasons.append('projected_area_mismatch')
-    # Fail cheap invalid candidates before the complete edge-intersection pass.
-    if reasons:
-        crossings = None
-    elif intersection_points_3d is not None:
-        crossings = count_nonincident_mesh_edge_intersections_3d(
-            faces, intersection_points_3d
-        )
-    else:
-        crossings = _crossing_count(faces, points)
-    if crossings:
-        reasons.append('projected_edge_crossing')
+    crossings = None
     return AnnulusProjectionAudit(not reasons, len(faces), len(reversed_areas),
                                   total, expected, excess, crossings, ','.join(reasons))

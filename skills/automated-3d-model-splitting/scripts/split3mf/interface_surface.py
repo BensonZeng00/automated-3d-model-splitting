@@ -17,10 +17,19 @@ from .mesh import (
     signed_area,
     triangulate_polygon_ear_clip,
 )
-from .spatial_intersections import count_polyline_self_intersections_3d
+from .spatial_intersections import (
+    first_nonincident_triangle_intersection_3d,
+)
 
 MAX_INTERFACE_EXTENSION_MM = 5.0
 MIN_INTERFACE_EXTENSION_MM = 0.2
+# Disjoint distance bands, each measured against every probe ray.
+# Contact at or below 0.1 mm remains ignored; equality at a ratio is accepted.
+MORTISE_COLLISION_DISTANCE_THRESHOLD_MM = 0.1
+MORTISE_COLLISION_RATIO_THRESHOLD = 0.40
+MORTISE_FAR_COLLISION_DISTANCE_MM = 1.0
+MORTISE_FAR_COLLISION_RATIO_THRESHOLD = 0.05
+MORTISE_RAY_NUMERICAL_EPSILON_MM = 1e-7
 
 
 @dataclass(frozen=True)
@@ -36,19 +45,59 @@ class PairedInterfaceSurfaces:
     mortise: InterfaceSurface
 
 
+def _mortise_collision_statistics(hit_distances: np.ndarray) -> dict:
+    """Summarize blocked construction probes using the configured thresholds."""
+    distances = np.asarray(hit_distances, dtype=np.float64).reshape(-1)
+    finite_mask = np.isfinite(distances)
+    blocking_mask = finite_mask & (
+        distances > MORTISE_COLLISION_DISTANCE_THRESHOLD_MM
+    )
+    probe_count = int(len(distances))
+    blocking_count = int(np.count_nonzero(blocking_mask))
+    raw_hit_count = int(np.count_nonzero(finite_mask))
+    ratio = blocking_count / probe_count if probe_count else 0.0
+    hit_ratio = blocking_count / raw_hit_count if raw_hit_count else 0.0
+    blocking_distances = distances[blocking_mask]
+    bands = {}
+    for name, mask, threshold in (
+        ("short", blocking_mask & (distances <= MORTISE_FAR_COLLISION_DISTANCE_MM),
+         MORTISE_COLLISION_RATIO_THRESHOLD),
+        ("far", blocking_mask & (distances > MORTISE_FAR_COLLISION_DISTANCE_MM),
+         MORTISE_FAR_COLLISION_RATIO_THRESHOLD),
+    ):
+        count = int(np.count_nonzero(mask))
+        band_ratio = count / probe_count if probe_count else 0.0
+        bands[name] = {
+            "hit_count": count, "ratio": float(band_ratio),
+            "ratio_threshold": threshold, "collision": band_ratio > threshold,
+        }
+    return {
+        "probe_count": probe_count,
+        "raw_hit_count": raw_hit_count,
+        "near_surface_hit_count": int(
+            np.count_nonzero(finite_mask & ~blocking_mask)
+        ),
+        "blocking_hit_count": blocking_count,
+        "blocking_ratio": float(ratio),
+        "blocking_ratio_of_hit_rays": float(hit_ratio),
+        "nearest_blocking_hit_mm": (
+            float(np.min(blocking_distances)) if blocking_count else None
+        ),
+        "distance_bands": bands,
+        "collision": any(band["collision"] for band in bands.values()),
+    }
+
+
 def build_mortise_shell_probe(mortise_shell_triangles: np.ndarray) -> LocalRayProbe:
     triangles = np.asarray(mortise_shell_triangles, dtype=np.float64)
     if triangles.ndim != 3 or triangles.shape[1:] != (3, 3):
         raise ValueError("mortise shell triangles must have shape (M, 3, 3)")
     if not len(triangles) or not np.isfinite(triangles).all():
         raise ValueError("mortise shell has no usable triangles")
-    # Both windings make the ray test independent of source-shell face winding
-    # and allow open colored patches as collision obstacles.
-    return LocalRayProbe(
-        SimpleNamespace(
-            triangles=np.concatenate((triangles, triangles[:, ::-1, :]))
-        )
-    )
+    # LocalRayProbe.exits deliberately accepts only outward-facing crossings.
+    # Duplicating the reverse winding turns a normal entry into a false exit:
+    # an insert is expected to enter the parent before reaching its far wall.
+    return LocalRayProbe(SimpleNamespace(triangles=triangles))
 
 
 def _polygon_centroid(points: np.ndarray) -> np.ndarray:
@@ -74,25 +123,9 @@ def _polygon_centroid(points: np.ndarray) -> np.ndarray:
 def _simple_planar_inner_contour(
     desired_xy: np.ndarray, outer_xyz: np.ndarray
 ) -> tuple[np.ndarray, dict]:
-    """Untangle a projected inset while retaining its cyclic correspondence.
-
-    A winding 3D Stage 04 boundary can project to a crossed 2D inset.  A
-    planar cap cannot use that outline.  In that case, parameterize a smooth
-    ellipse by the original 3D boundary arclength, keeping one inner point for
-    each outer point and matching the inset's center and principal spans.
-    """
+    """Build an ellipse in the plane normal to the tenon insertion axis."""
     desired = np.asarray(desired_xy, dtype=np.float64)
     projected_ring = np.column_stack((desired, np.zeros(len(desired))))
-    crossings = int(count_polyline_self_intersections_3d(
-        projected_ring
-    )["segment_intersection_count"])
-    if not crossings:
-        return desired, {
-            "strategy": "exact_homothetic_projection",
-            "original_projection_crossings": 0,
-            "max_xy_adjustment_mm": 0.0,
-        }
-
     center = desired.mean(axis=0)
     covariance = np.cov((desired - center).T, bias=True)
     eigenvalues, eigenvectors = np.linalg.eigh(covariance)
@@ -105,19 +138,34 @@ def _simple_planar_inner_contour(
     phase = float(np.arctan2(
         relative_first[1] / radii[1], relative_first[0] / radii[0]
     ))
-    edges = np.linalg.norm(
+    edges = np.maximum(np.linalg.norm(
         np.roll(outer_xyz, -1, axis=0) - outer_xyz, axis=1
-    )
-    edges = np.maximum(edges, 1e-9)
+    ), 1e-9)
     progress = np.concatenate(([0.0], np.cumsum(edges[:-1]))) / edges.sum()
     orientation = 1.0 if signed_area(desired) >= 0.0 else -1.0
-    angles = phase + orientation * (2.0 * np.pi * progress)
+    base_angles = phase + orientation * (2.0 * np.pi * progress)
+    # A single first-point match can twist a long concave boundary around the
+    # ellipse. Pick one cyclic phase for the whole ring by minimizing total
+    # outer-to-inner travel; the plane normal and insertion axis stay fixed.
+    phase_candidates = np.linspace(-np.pi, np.pi, 65)[:-1]
+    errors = []
+    for offset in phase_candidates:
+        trial = center + np.column_stack((
+            radii[0] * np.cos(base_angles + offset),
+            radii[1] * np.sin(base_angles + offset),
+        )) @ axes.T
+        errors.append(float(np.mean(np.sum((trial - desired) ** 2, axis=1))))
+    phase_offset = float(phase_candidates[int(np.argmin(errors))])
+    angles = base_angles + phase_offset
     repaired = center + np.column_stack((
         radii[0] * np.cos(angles), radii[1] * np.sin(angles)
     )) @ axes.T
     return repaired, {
         "strategy": "arclength_parameterized_planar_ellipse",
-        "original_projection_crossings": crossings,
+        "original_projection_crossings": None,
+        "projection_intersection_scan_performed": False,
+        "ellipse_phase_offset_rad": phase_offset,
+        "ellipse_mean_squared_xy_adjustment_mm2": min(errors),
         "max_xy_adjustment_mm": float(np.max(np.linalg.norm(repaired - desired, axis=1))),
     }
 
@@ -152,55 +200,23 @@ def _curved_cap_triangulation(
     points: np.ndarray,
     preferred_normal: np.ndarray,
 ) -> tuple[list[tuple[int, int, int]], dict, np.ndarray | None]:
-    """Triangulate a curved XYZ cap without treating projection crossings as cuts."""
+    """Try one mating-axis projection for a curved cap, without projection search."""
     values = np.asarray(points, dtype=np.float64)
     center = values.mean(axis=0)
-    _left, _singular, right = np.linalg.svd(values - center, full_matrices=False)
-    candidates = [
-        np.asarray(preferred_normal, dtype=np.float64),
-        right[-1], right[0], right[1],
-        np.array([1.0, 0.0, 0.0]),
-        np.array([0.0, 1.0, 0.0]),
-        np.array([0.0, 0.0, 1.0]),
-    ]
-    tried: set[tuple[float, float, float]] = set()
-    best: tuple[int, list[tuple[int, int, int]], np.ndarray, np.ndarray] | None = None
-    for candidate in candidates:
-        normal = np.asarray(candidate, dtype=np.float64)
-        length = float(np.linalg.norm(normal))
-        if length <= 1e-10:
-            continue
+    normal = np.asarray(preferred_normal, dtype=np.float64)
+    length = float(np.linalg.norm(normal))
+    if length > 1e-10:
         normal /= length
-        key = tuple(np.round(normal, 8).tolist())
-        if key in tried:
-            continue
-        tried.add(key)
         u, v = orthonormal_basis(normal)
         projected = project_points(values, center, u, v)
-        crossing_count = int(count_polyline_self_intersections_3d(
-            np.column_stack((projected, np.zeros(len(projected))))
-        )["segment_intersection_count"])
-        if crossing_count:
-            if best is None or crossing_count < best[0]:
-                best = (crossing_count, [], projected, normal)
-            continue
         triangles = triangulate_polygon_ear_clip(projected)
         if len(triangles) == len(values) - 2:
             return triangles, {
                 "geometry": "curved_xyz_boundary",
                 "triangulation_projection_normal": normal.round(8).tolist(),
-                "projection_crossing_count": 0,
-                "projection_is_connectivity_only": True,
+                "projection_crossing_count": None,
+                "projection_search_performed": False,
             }, None
-        if best is None:
-            best = (0, triangles, projected, normal)
-    if best is not None and len(best[1]) == len(values) - 2:
-        return best[1], {
-            "geometry": "curved_xyz_boundary",
-            "triangulation_projection_normal": best[3].round(8).tolist(),
-            "projection_crossing_count": int(best[0]),
-            "projection_is_connectivity_only": True,
-        }, None
     # A projection-independent curved fan always preserves every boundary
     # edge. Its final local index denotes the added centre vertex.
     center_vertex = values.mean(axis=0)
@@ -211,8 +227,9 @@ def _curved_cap_triangulation(
     return fan, {
         "geometry": "curved_xyz_boundary",
         "triangulation_projection_normal": None,
-        "projection_crossing_count": None if best is None else int(best[0]),
-        "projection_is_connectivity_only": True,
+        "projection_crossing_count": None,
+        "projection_search_performed": False,
+        "reason": "single_axis_projection_did_not_triangulate_full_contour",
         "strategy": "projection_independent_curved_center_fan",
     }, center_vertex
 
@@ -230,7 +247,6 @@ def build_pairwise_interface_surfaces(
 ) -> PairedInterfaceSurfaces:
     """Build a capped annular interface with collision-limited socket depth."""
     outer = np.asarray(boundary_points_mm, dtype=np.float64)
-    frozen_outer = outer.copy()
     tenon_axis = np.asarray(insertion_direction, dtype=np.float64)
     mortise_axis = np.asarray(socket_inward_direction, dtype=np.float64)
     if outer.ndim != 2 or outer.shape[1] != 3 or len(outer) < 3:
@@ -249,10 +265,9 @@ def build_pairwise_interface_surfaces(
         raise ValueError(f"{interface_id}: Stage 04 mating direction is degenerate")
     tenon_axis = tenon_axis / tenon_axis_length
     mortise_axis = mortise_axis / mortise_axis_length
-    # Stage 04 identifies which side is the mortise.  The extrusion direction
-    # itself comes from the area normal of the simplified 3D boundary, so the
-    # wall is approximately perpendicular to the interface instead of merely
-    # following the Stage 04 side-classification vector.
+    # Stage 04 identifies the tenon side and provides the approved mating axis.
+    # The contour normal is only diagnostic: replacing the mating axis with it
+    # can turn the tenon sideways when the painted boundary is strongly curved.
     centered_outer = outer - outer.mean(axis=0)
     boundary_normal = np.cross(
         centered_outer, np.roll(centered_outer, -1, axis=0)
@@ -261,15 +276,16 @@ def build_pairwise_interface_surfaces(
     if boundary_normal_length <= 1e-10:
         raise ValueError(f"{interface_id}: simplified boundary has no stable area normal")
     boundary_normal /= boundary_normal_length
-    if float(np.dot(boundary_normal, mortise_axis)) < 0.0:
+    if float(np.dot(boundary_normal, tenon_axis)) < 0.0:
         boundary_normal = -boundary_normal
-    stage04_axis = mortise_axis.copy()
-    tenon_axis = boundary_normal
-    mortise_axis = boundary_normal
+    stage04_axis = tenon_axis.copy()
+    stage04_socket_axis = mortise_axis.copy()
+    tenon_axis = stage04_axis.copy()
+    mortise_axis = stage04_axis.copy()
     ratio = float(scale_ratio)
     clearance = float(clearance_mm)
-    if not np.isfinite(ratio) or not 0.0 < ratio < 1.0:
-        raise ValueError(f"{interface_id}: interface scale ratio must be between 0 and 1")
+    if not np.isfinite(ratio) or not 0.0 < ratio <= 1.0:
+        raise ValueError(f"{interface_id}: interface scale ratio must be between 0 and 1 inclusive")
     if not np.isfinite(clearance) or clearance < 0.0:
         raise ValueError(f"{interface_id}: interface clearance must be finite and non-negative")
 
@@ -282,17 +298,91 @@ def build_pairwise_interface_surfaces(
     # The Stage 04 boundary may be curved in XYZ. Build the inset in its
     # interface plane before extending it, so the inner wall follows the
     # Stage 04 mating axis and every terminal cap is planar.
-    inner = homothetic_loop_points(outer, tenon_axis, ratio)
-    desired_inner_2d = project_points(inner, origin, u, v)
-    repaired_inner_2d, inner_contour_record = _simple_planar_inner_contour(
-        desired_inner_2d, outer
-    )
-    inner += (
-        (repaired_inner_2d[:, 0] - desired_inner_2d[:, 0])[:, None] * u
-        + (repaired_inner_2d[:, 1] - desired_inner_2d[:, 1])[:, None] * v
-    )
-    inner_axial = inner @ mortise_axis
-    inner += (float(np.mean(inner_axial)) - inner_axial)[:, None] * mortise_axis
+    # The inner profile is elliptical; no percentage contour or automatic
+    # fallback can silently replace this selected geometry.
+    contour_attempts = []
+    candidate_specs = [ratio]
+    selected = None
+    for candidate_ratio in candidate_specs:
+        candidate = homothetic_loop_points(outer, tenon_axis, candidate_ratio)
+        desired_xy = project_points(candidate, origin, u, v)
+        try:
+            repaired_xy, contour_record = _simple_planar_inner_contour(desired_xy, outer)
+        except ValueError as exc:
+            contour_attempts.append({
+                "scale_ratio": candidate_ratio, "ellipse": True,
+                "accepted": False, "reason": str(exc),
+            })
+            continue
+        candidate += (
+            (repaired_xy[:, 0] - desired_xy[:, 0])[:, None] * u
+            + (repaired_xy[:, 1] - desired_xy[:, 1])[:, None] * v
+        )
+        candidate_axial = candidate @ mortise_axis
+        # A curved source boundary may reach farther into the host than its
+        # mean plane. Anchor the ellipse beyond that deepest boundary point,
+        # so the connection never folds backward along the insertion axis.
+        base_plane = float(np.max(outer @ mortise_axis)) + MIN_INTERFACE_EXTENSION_MM
+        candidate += (base_plane - candidate_axial)[:, None] * mortise_axis
+        candidate_mortise = radial_offset_points(
+            candidate, origin, u, v, tenon_axis, clearance
+        )
+        try:
+            if contour_record["strategy"] == "arclength_parameterized_planar_ellipse":
+                candidate_cap = [
+                    (index, (index + 1) % len(candidate), len(candidate))
+                    for index in range(len(candidate))
+                ]
+                candidate_center = candidate.mean(axis=0)
+            else:
+                candidate_cap, _, candidate_center = _curved_cap_triangulation(
+                    candidate, tenon_axis
+                )
+        except ValueError as exc:
+            contour_attempts.append({
+                "scale_ratio": candidate_ratio, "ellipse": True,
+                "accepted": False, "reason": str(exc),
+            })
+            continue
+        candidate_cap_points = (
+            np.vstack((candidate_mortise, candidate_mortise.mean(axis=0)))
+            if candidate_center is not None else candidate_mortise
+        )
+        samples = np.vstack((
+            candidate,
+            *(
+                candidate_mortise * (1.0 - fraction)
+                + np.roll(candidate_mortise, -1, axis=0) * fraction
+                for fraction in (0.25, 0.5, 0.75)
+            ),
+            np.asarray([
+                candidate_cap_points[np.asarray(face, dtype=np.int64)].mean(axis=0)
+                for face in candidate_cap
+            ]),
+            np.asarray([
+                (candidate_cap_points[int(left)] + candidate_cap_points[int(right)]) * 0.5
+                for face in candidate_cap
+                for left, right in ((face[0], face[1]), (face[1], face[2]), (face[2], face[0]))
+            ]),
+        ))
+        min_hits, _ = mortise_shell_probe.exits(
+            samples, np.broadcast_to(mortise_axis, samples.shape).copy(),
+            MIN_INTERFACE_EXTENSION_MM + clearance,
+            epsilon=MORTISE_RAY_NUMERICAL_EPSILON_MM,
+        )
+        thickness = _mortise_collision_statistics(min_hits)
+        accepted = not thickness["collision"]
+        contour_attempts.append({
+            "scale_ratio": candidate_ratio, "ellipse": True,
+            "accepted": accepted, "strategy": contour_record["strategy"],
+            "minimum_depth_thickness_probe": thickness,
+        })
+        if accepted:
+            selected = (candidate_ratio, candidate, contour_record)
+            break
+    if selected is None:
+        raise ValueError(f"{interface_id}: elliptical inner contour lacks adequate host thickness: {contour_attempts}")
+    ratio, inner, inner_contour_record = selected
     inner_2d = project_points(inner, origin, u, v)
     inner_orientation_consistent = (
         np.sign(signed_area(inner_2d)) == np.sign(outer_area)
@@ -305,29 +395,13 @@ def build_pairwise_interface_surfaces(
     mortise_inner_2d = project_points(mortise_inner, origin, u, v)
     intersection_diagnostics_3d = {
         "coordinate_space": "world_xyz_mm",
-        "frozen_outer_boundary": count_polyline_self_intersections_3d(frozen_outer),
-        "interface_outer_boundary": count_polyline_self_intersections_3d(outer),
-        "tenon_inner_ring": count_polyline_self_intersections_3d(inner),
-        "mortise_inner_ring": count_polyline_self_intersections_3d(mortise_inner),
-        "projection_only": {
-            "outer_ring": count_polyline_self_intersections_3d(
-                np.column_stack((outer_2d, np.zeros(len(outer_2d))))
-            ),
-            "tenon_inner_ring": count_polyline_self_intersections_3d(
-                np.column_stack((inner_2d, np.zeros(len(inner_2d))))
-            ),
-            "mortise_inner_ring": count_polyline_self_intersections_3d(
-                np.column_stack((mortise_inner_2d, np.zeros(len(mortise_inner_2d))))
-            ),
-            "policy": "diagnostic_only_never_delete_xyz_separated_arcs",
-        },
+        "self_intersection_scans_performed": False,
+        "policy": "skipped_for_ellipse_candidate_by_user_request",
     }
     mortise_orientation_consistent = (
         np.sign(signed_area(mortise_inner_2d)) == np.sign(outer_area)
     )
     if inner_contour_record["strategy"] == "arclength_parameterized_planar_ellipse":
-        # A convex replacement has a reliable centre fan.  Ear clipping its
-        # thousands of nearly collinear samples creates sliver triangles.
         cap_triangles = [
             (index, (index + 1) % len(inner), len(inner))
             for index in range(len(inner))
@@ -389,29 +463,55 @@ def build_pairwise_interface_surfaces(
             probe_points,
             probe_directions,
             extension_depth + clearance,
-            epsilon=1e-7,
+            epsilon=MORTISE_RAY_NUMERICAL_EPSILON_MM,
         )
+        collision_stats = _mortise_collision_statistics(hit_distances)
         hit_mask = np.isfinite(hit_distances)
-        shell_face_count = len(mortise_shell_probe.triangles) // 2
-        hit_source_face_ids = np.unique(
-            hit_faces[hit_mask] % max(shell_face_count, 1)
+        blocking_mask = hit_mask & (
+            hit_distances > MORTISE_COLLISION_DISTANCE_THRESHOLD_MM
         )
+        hit_source_face_ids = np.unique(hit_faces[hit_mask])
         depth_attempts.append({
             "candidate_depth_mm": float(extension_depth),
             "corresponding_mortise_depth_mm": float(extension_depth + clearance),
-            "collision": bool(np.any(hit_mask)),
-            "hit_count": int(np.count_nonzero(hit_mask)),
-            "nearest_hit_mm": (
-                float(np.min(hit_distances[hit_mask])) if np.any(hit_mask) else None
-            ),
+            **collision_stats,
             "hit_face_ids": [int(value) for value in hit_source_face_ids[:16]],
         })
-        if not np.any(hit_mask):
+        if not collision_stats["collision"]:
             break
         if extension_depth <= MIN_INTERFACE_EXTENSION_MM + 1e-9:
+            nearest_hit = float(np.min(hit_distances[blocking_mask]))
+            nearest_hit_index = int(
+                np.flatnonzero(blocking_mask)[np.argmin(hit_distances[blocking_mask])]
+            )
+            hit_records = []
+            for probe_index in np.flatnonzero(blocking_mask)[:8]:
+                face_index = int(hit_faces[probe_index])
+                triangle = mortise_shell_probe.triangles[face_index]
+                normal = np.cross(
+                    triangle[1] - triangle[0], triangle[2] - triangle[0]
+                )
+                normal_length = float(np.linalg.norm(normal))
+                if normal_length > 1e-12:
+                    normal /= normal_length
+                hit_records.append({
+                    "probe_index": int(probe_index),
+                    "probe_point_mm": probe_points[probe_index].round(6).tolist(),
+                    "exit_mm": round(float(hit_distances[probe_index]), 6),
+                    "host_face": face_index,
+                    "host_normal_dot_axis": round(float(normal @ mortise_axis), 6),
+                })
             raise ValueError(
                 f"{interface_id}: mortise shell intersects the inner ring at the "
-                f"minimum {MIN_INTERFACE_EXTENSION_MM} mm tenon depth"
+                f"minimum {MIN_INTERFACE_EXTENSION_MM} mm tenon depth "
+                f"(blocking_hits={collision_stats['blocking_hit_count']}/"
+                f"{collision_stats['probe_count']} total probe rays "
+                f"({collision_stats['raw_hit_count']} rays hit any shell surface), "
+                f"blocking_ratio={collision_stats['blocking_ratio']:.1%}, "
+                f"distance_bands={collision_stats['distance_bands']}, "
+                f"distance_threshold_mm={MORTISE_COLLISION_DISTANCE_THRESHOLD_MM:.3f}, "
+                f"nearest_exit_mm={nearest_hit:.6f}, "
+                f"probe_index={nearest_hit_index}, hit_samples={hit_records})"
             )
         extension_depth = max(extension_depth * 0.5, MIN_INTERFACE_EXTENSION_MM)
 
@@ -429,9 +529,7 @@ def build_pairwise_interface_surfaces(
         np.vstack((outer_2d, mortise_inner_2d)),
         list(range(count)),
         list(range(count, 2 * count)),
-        intersection_points_3d=np.vstack((outer, mortise_inner)),
     )
-
     def make_surface(
         side: str,
         side_axis: np.ndarray,
@@ -457,7 +555,6 @@ def build_pairwise_interface_surfaces(
             projected_vertices,
             list(range(count)),
             list(range(count, 2 * count)),
-            intersection_points_3d=np.vstack((outer, inner_end)),
         )
         side_mesh = trimesh.Trimesh(
             vertices=placed_vertices, faces=faces, process=False
@@ -539,6 +636,39 @@ def build_pairwise_interface_surfaces(
             axis=1,
         )
         degenerate_face_count = int(np.count_nonzero(complete_double_areas <= 1e-12))
+        # Self-intersection scanning of the ellipse candidate is intentionally
+        # skipped; the user requested direct acceptance after ellipse creation.
+        # Closure, winding, degeneracy, thickness and package checks still run.
+        if inner_contour_record.get("strategy") == "arclength_parameterized_planar_ellipse":
+            xyz_audit = {
+                "valid": None,
+                "performed": False,
+                "reason": "skipped_for_ellipse_candidate_by_user_request",
+            }
+        else:
+            xyz_audit = first_nonincident_triangle_intersection_3d(
+                np.vstack((faces, cap_faces)), placed_vertices
+            )
+        ellipse_self_intersection_allowed = (
+            inner_contour_record.get("strategy")
+            == "arclength_parameterized_planar_ellipse"
+            and xyz_audit.get("performed") is False
+        )
+        if (
+            not closure_valid
+            or degenerate_face_count
+            or (not xyz_audit["valid"] and not ellipse_self_intersection_allowed)
+        ):
+            raise ValueError(
+                f"{interface_id} {side}: 3D interface validation failed; "
+                f"projection_diagnostic={projection_audit.reason or mortise_projection_audit.reason}, "
+                f"closure={closure_valid}, degenerate_faces={degenerate_face_count}, "
+                f"xyz_audit={xyz_audit}, strip_face_count={len(faces)}, "
+                f"inner_cap_face_count={len(cap_faces)}, "
+                f"outer_axis_range_mm={[float(np.min(outer @ mortise_axis)), float(np.max(outer @ mortise_axis))]}, "
+                f"inner_axis_mm={float(np.mean(inner_end @ mortise_axis))}, "
+                f"surface_depth_mm={surface_depth}"
+            )
         return InterfaceSurface(
             vertices=placed_vertices,
             faces=np.asarray(collision_mesh.faces, dtype=np.int64),
@@ -553,6 +683,9 @@ def build_pairwise_interface_surfaces(
                 "boundary_vertex_count": count,
                 "scale_ratio": ratio,
                 "inner_planar_contour": inner_contour_record,
+                "ellipse_plane_normal": tenon_axis.round(8).tolist(),
+                "ellipse_extrusion_axis": mortise_axis.round(8).tolist(),
+                "inner_contour_attempts": contour_attempts,
                 "clearance_mm": clearance,
                 "inner_ring_offset_mm": float(sign * clearance),
                 "quality_gates_blocking": False,
@@ -573,11 +706,15 @@ def build_pairwise_interface_surfaces(
                 "clearance_direction": "mortise_only_outward_profile_and_depth",
                 "extension_direction": mortise_axis.round(8).tolist(),
                 "stage04_mating_direction": stage04_axis.round(8).tolist(),
+                "stage04_socket_inward_direction": stage04_socket_axis.round(8).tolist(),
                 "stage04_to_boundary_normal_angle_deg": float(
                     np.degrees(np.arccos(np.clip(
-                        np.dot(stage04_axis, mortise_axis), -1.0, 1.0
+                        np.dot(stage04_axis, boundary_normal), -1.0, 1.0
                     )))
                 ),
+                "stage04_to_extension_angle_deg": float(np.degrees(np.arccos(np.clip(
+                    np.dot(stage04_axis, mortise_axis), -1.0, 1.0
+                )))),
                 "extension_depth_mm": float(surface_depth),
                 "tenon_extension_depth_mm": float(extension_depth),
                 "mortise_recess_depth_mm": float(extension_depth + clearance),
@@ -617,6 +754,19 @@ def build_pairwise_interface_surfaces(
                         "crossing_edges": projection_audit.crossing_edges,
                         "reason": projection_audit.reason,
                     },
+                    "projection_intersection_scan_performed": False,
+                    "three_dimensional_self_intersection": xyz_audit,
+                    "three_dimensional_self_intersection_allowed": bool(
+                        ellipse_self_intersection_allowed
+                    ),
+                    "self_intersection_scan_policy": (
+                        "skipped_for_ellipse_candidate_by_user_request"
+                        if ellipse_self_intersection_allowed
+                        else "performed_and_blocking"
+                    ),
+                    "three_dimensional_self_intersection_scan_performed": bool(
+                        xyz_audit.get("performed", True)
+                    ),
                     "mortise_projection": {
                         "valid": bool(mortise_projection_audit.valid),
                         "crossing_edges": mortise_projection_audit.crossing_edges,

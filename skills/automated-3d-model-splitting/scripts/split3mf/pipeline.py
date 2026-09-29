@@ -34,6 +34,7 @@ from .recognition_metadata import (
     confidence_score,
     load_visual_semantics,
     print_recognition,
+    require_recognition_semantics,
 )
 from .domain import SplitConfig
 from .boundary_review import BoundaryReviewService
@@ -46,6 +47,14 @@ from .application.recognition_review import (
     load_recognition_review,
     result_fingerprint as recognition_result_fingerprint,
     write_recognition_review_template,
+)
+from .stage_table_report import (
+    interface_table, markdown_table, recognition_table, write_markdown_table,
+)
+from .assembly_review import (
+    AssemblyReviewRequired,
+    ensure_assembly_review,
+    load_direction_policy_corrections,
 )
 
 class SplitPipeline:
@@ -104,10 +113,11 @@ class SplitPipeline:
             faces=np.asarray(faces),
             face_color_tokens=np.asarray(colors, dtype="U"),
         )
+        source_sha256 = sha256_file(input_path) if input_path.is_file() else None
         stage_artifacts.write_json(
             "02_loaded_project_summary",
             {"source": str(input_path.resolve()),
-             "source_sha256": sha256_file(input_path) if input_path.is_file() else None,
+             "source_sha256": source_sha256,
              "vertex_count": len(vertices), "face_count": len(faces),
              "project_settings": project_settings},
         )
@@ -201,6 +211,7 @@ class SplitPipeline:
             "开始按材料和共享边识别连通部件",
             source_faces=int(len(faces)),
             small_region_review_max_faces=int(args.small_region_review_max_faces),
+            max_region_review_candidates=int(args.max_region_review_candidates),
         )
         groups = connected_components_by_color(faces, recognition_colors)
         raw_group_count = len(groups)
@@ -252,10 +263,17 @@ class SplitPipeline:
                         maximum_fragment_faces=consolidation_limit)
         region_review = None
         normalized_groups = [np.asarray(group, dtype=np.int64) for group in groups]
-        from .region_review import select_region_review_groups
+        from .region_review import (
+            limit_region_review_candidates,
+            select_region_review_groups,
+        )
         _, review_candidates = select_region_review_groups(
             vertices, faces, normalized_groups, args.noise_review_max_faces,
             args.small_region_review_max_faces, visible_faces)
+        review_candidates, review_limit_noise_exclusions = limit_region_review_candidates(
+            vertices, faces, review_candidates,
+            args.max_region_review_candidates,
+        )
         review_groups = [group for group, _ in review_candidates]
         review_records = classify_review_groups_semantically(
             vertices=vertices, faces=faces, connectivity_colors=recognition_colors,
@@ -274,12 +292,17 @@ class SplitPipeline:
                 small_region_max_faces=args.small_region_review_max_faces,
                 visible_faces=visible_faces, view_count=args.exterior_view_count,
                 depth_map_resolution=args.exterior_depth_map_resolution,
-                image_resolution=args.region_review_resolution)
+                image_resolution=args.region_review_resolution,
+                max_review_candidates=args.max_region_review_candidates,
+                selected_candidates=review_candidates,
+                automatic_noise_candidates=review_limit_noise_exclusions,
+                classified_records=review_records)
             print("region_review_required=" + json.dumps(
                 region_review, ensure_ascii=False, sort_keys=True), flush=True)
             progress("识别", "检测到噪声、小区域或长细条候选；请完成语义分类",
                      candidates=len(review_groups), manifest=region_review["manifest_path"],
-                     decisions=region_review["decision_path"])
+                     decisions=region_review["decision_path"],
+                     automatically_classified_noise=len(review_limit_noise_exclusions))
             raise SystemExit(4)
         review_decisions = {}
         if review_groups:
@@ -289,22 +312,52 @@ class SplitPipeline:
                     review_json_path, input_path=input_path, source_face_count=len(faces),
                     noise_max_faces=args.noise_review_max_faces,
                     small_region_max_faces=args.small_region_review_max_faces,
+                    max_review_candidates=args.max_region_review_candidates,
                     expected_records=review_records)
             except (OSError, ValueError) as exc:
                 parser.error(str(exc))
             region_review = {
                 "status": "user_confirmed", "source": str(review_json_path),
                 "candidate_count": len(review_groups),
+                "total_candidate_count": len(review_groups) + len(review_limit_noise_exclusions),
+                "automatic_noise_count": len(review_limit_noise_exclusions),
+                "automatic_noise_faces": sum(int(item["faces"]) for item in review_limit_noise_exclusions),
+                "automatic_noise_area_mm2": sum(float(item["area_mm2"]) for item in review_limit_noise_exclusions),
                 "classifications": {
                     value: sum(item["classification"] == value for item in review_decisions.values())
+                    + (len(review_limit_noise_exclusions) if value == "noise" else 0)
                     for value in ("noise", "part", "uncertain")
                 },
+                "automatic_noise_exclusions": review_limit_noise_exclusions,
             }
         else:
-            region_review = {"status": "not_required", "candidate_count": 0}
+            region_review = {
+                "status": "not_required", "candidate_count": 0,
+                "total_candidate_count": len(review_limit_noise_exclusions),
+                "automatic_noise_count": len(review_limit_noise_exclusions),
+                "automatic_noise_faces": sum(int(item["faces"]) for item in review_limit_noise_exclusions),
+                "automatic_noise_area_mm2": sum(float(item["area_mm2"]) for item in review_limit_noise_exclusions),
+                "automatic_noise_exclusions": review_limit_noise_exclusions,
+            }
+        confirmed_part_source_ids = {
+            int(record["source_min_face_index"])
+            for record in review_decisions.values()
+            if record["classification"] == "part"
+        }
+        confirmed_noise_source_ids = {
+            int(record["source_min_face_index"])
+            for record in review_decisions.values()
+            if record["classification"] == "noise"
+        }
+        confirmed_noise_source_ids.update(
+            int(item["source_min_face_index"])
+            for item in review_limit_noise_exclusions
+        )
         components, _ = summarize_components(
             vertices, faces, recognition_colors, groups, 101,
-            display_colors=recognition_token_colors)
+            display_colors=recognition_token_colors,
+            retained_source_min_face_ids=confirmed_part_source_ids,
+            excluded_source_min_face_ids=confirmed_noise_source_ids)
         visual_semantics = load_visual_semantics(
             Path(args.visual_semantics_json).expanduser()
             if args.visual_semantics_json else None
@@ -384,10 +437,26 @@ class SplitPipeline:
                 "excluded_area_mm2": sum(item["area_mm2"] for item in automatic_noise_exclusions),
             },
         }, ensure_ascii=False, sort_keys=True), flush=True)
+        if review_limit_noise_exclusions:
+            print(
+                "region_review_limit_noise="
+                + json.dumps({
+                    "count": len(review_limit_noise_exclusions),
+                    "faces": sum(item["faces"] for item in review_limit_noise_exclusions),
+                    "area_mm2": sum(item["area_mm2"] for item in review_limit_noise_exclusions),
+                    "details": "03_recognition_summary.json",
+                }, ensure_ascii=False, sort_keys=True),
+                flush=True,
+            )
         if automatic_noise_exclusions:
             print(
                 "recognition_noise_exclusions="
-                + json.dumps(automatic_noise_exclusions, ensure_ascii=False, sort_keys=True),
+                + json.dumps({
+                    "count": len(automatic_noise_exclusions),
+                    "faces": sum(item["faces"] for item in automatic_noise_exclusions),
+                    "area_mm2": sum(item["area_mm2"] for item in automatic_noise_exclusions),
+                    "details": "03_recognition_summary.json",
+                }, ensure_ascii=False, sort_keys=True),
                 flush=True,
             )
         if recognition_exclusions:
@@ -494,10 +563,10 @@ class SplitPipeline:
             "03_recognized_boundaries",
             **recognized_boundaries.flattened_arrays(),
         )
-        stage_artifacts.write_json(
-            "03_recognition_summary",
-            {"regions": recognition, "region_review": region_review,
+        recognition_summary = {
+            "regions": recognition, "region_review": region_review,
              "source_region_classifications": source_region_classifications,
+             "review_limit_noise_exclusions": review_limit_noise_exclusions,
              "automatic_noise_exclusions": automatic_noise_exclusions,
              "recognition_excluded_regions": recognition_exclusions,
              "source_geometry_changed": False,
@@ -521,8 +590,20 @@ class SplitPipeline:
                  ),
                  "review_artifacts": boundary_review_artifacts,
                  "immutable_after_recognition": True,
-             }},
+             },
+        }
+        recognition_summary["region_table"] = recognition_table(recognition_summary)
+        stage_artifacts.write_json("03_recognition_summary", recognition_summary)
+        stage_artifacts.write_json("03_recognition_table", recognition_summary["region_table"])
+        recognition_table_text = markdown_table(
+            "03 识别零件表", recognition_summary["region_table"]
         )
+        recognition_table_path = stage_artifacts.run_dir / "03_recognition_table.md"
+        write_markdown_table(
+            recognition_table_path, "03 识别零件表", recognition_summary["region_table"]
+        )
+        print(recognition_table_text, flush=True)
+        print("stage03_table=" + str(recognition_table_path), flush=True)
         print_recognition(recognition)
         if not recognition_confirmed and not (
             args.recognize_only or getattr(args, "stop_after_stage", None) == "recognize"
@@ -536,6 +617,16 @@ class SplitPipeline:
             raise SystemExit(4)
         if args.recognize_only or getattr(args, "stop_after_stage", None) == "recognize":
             return
+        try:
+            require_recognition_semantics(recognition)
+        except ValueError as exc:
+            print("semantic_review_required=" + json.dumps({
+                "status": "needs_image_semantics",
+                "reason": str(exc),
+                "stage03_run_dir": str(stage_artifacts.run_dir),
+                "boundary_preview": str(stage_artifacts.run_dir / "03_recognition_boundaries.png"),
+            }, ensure_ascii=False), flush=True)
+            raise SystemExit(4) from exc
         from .contact_interface_planner import plan_contact_interfaces
 
         runtime_log(
@@ -546,26 +637,72 @@ class SplitPipeline:
             boundary_fingerprint=recognized_boundaries.fingerprint,
         )
         contact_interface_plan = plan_contact_interfaces(
+            area_priority_ratio=args.area_priority_ratio,
             vertices=vertices,
             faces=faces,
             components=components,
             recognized_boundaries=recognized_boundaries,
             model_center=model_center,
             recognition_records=recognition,
+            direction_policy_overrides=load_direction_policy_corrections(
+                getattr(args, "assembly_review_json", None)
+            ),
         )
+        contact_interface_plan["interface_table"] = interface_table(contact_interface_plan)
         stage_artifacts.write_json("04_assembly_plan", contact_interface_plan)
+        stage_artifacts.write_json("04_interface_table", contact_interface_plan["interface_table"])
+        interface_table_text = markdown_table(
+            "04 榫卯接口表", contact_interface_plan["interface_table"]
+        )
+        interface_table_path = stage_artifacts.run_dir / "04_interface_table.md"
+        write_markdown_table(
+            interface_table_path, "04 榫卯接口表", contact_interface_plan["interface_table"]
+        )
+        print(interface_table_text, flush=True)
+        print("stage04_table=" + str(interface_table_path), flush=True)
+        from .stage_reuse_provenance import provenance_record
+
+        stage_artifacts.write_json(
+            "04_reuse_provenance", provenance_record(args, source_sha256)
+        )
         runtime_log(
             "装配规划",
             "contact_interface_plan_done",
             "榫卯关系规划完成",
             interfaces=int(contact_interface_plan["interface_count"]),
         )
+        try:
+            assembly_review = ensure_assembly_review(
+                contact_interface_plan,
+                source_sha256=source_sha256,
+                template_path=stage_artifacts.run_dir / "04_assembly_review.json",
+                table_path=interface_table_path,
+                review_path=getattr(args, "assembly_review_json", None),
+            )
+        except AssemblyReviewRequired:
+            review_notice = {
+                "status": "needs_user_confirmation",
+                "review_json": str(stage_artifacts.run_dir / "04_assembly_review.json"),
+                "table": str(interface_table_path),
+            }
+            stage_artifacts.write_json("04_assembly_review_status", review_notice)
+            if getattr(args, "stop_after_stage", None) == "assembly":
+                print("assembly_review_required=" + json.dumps(
+                    review_notice, ensure_ascii=False
+                ), flush=True)
+                return
+            raise
+        stage_artifacts.write_json("04_assembly_review_status", {
+            "status": "user_confirmed",
+            "plan_fingerprint": assembly_review["plan_fingerprint"],
+        })
         if getattr(args, "stop_after_stage", None) == "assembly":
             return
         from .interface_assembly import (
             build_pairwise_interface_surfaces,
             build_pairwise_part_meshes,
         )
+        from .source_face_ownership import complete_component_face_ownership, confirmed_part_ids
 
         interface_arrays, interface_summary = build_pairwise_interface_surfaces(
             contact_interface_plan,
@@ -579,9 +716,18 @@ class SplitPipeline:
             stage_artifacts.write_arrays(
                 "05_interface_surfaces", **interface_arrays
             )
+        output_components, source_face_ownership = complete_component_face_ownership(
+            vertices, faces, components,
+            protected_part_ids=confirmed_part_ids(contact_interface_plan),
+        )
         built_parts, part_records = build_pairwise_part_meshes(
             contact_interface_plan, interface_arrays, interface_summary,
-            vertices=vertices, faces=faces, components=components,
+            vertices=vertices, faces=faces, components=output_components,
+            recognized_components=components,
+            face_color_tokens=colors,
+            remove_detached_micro_shells_part_ids=frozenset(
+                getattr(args, "remove_detached_micro_shells_part", [])
+            ),
         )
         mesh_audits = [
             {"part_id": part["part_id"], **self.validator.validate_mesh(part["mesh"])}
@@ -610,6 +756,7 @@ class SplitPipeline:
             "exported_part_count": len(built_parts),
             "parts": part_records,
             "frozen_boundary_fingerprint": recognized_boundaries.fingerprint,
+            "source_face_ownership": source_face_ownership,
         })
         stage_artifacts.write_json(
             "05_interface_assembly_summary",

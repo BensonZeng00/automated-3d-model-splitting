@@ -5,10 +5,14 @@ import hashlib
 import numpy as np
 
 from ..mesh import boundary_loops, build_local_mesh
+from ..boundary_matching import compare_boundary_loops
 from ..common import Component
 from .recognized_boundaries import RecognizedBoundaries
 
 MINIMUM_BOUNDARY_LOOP_SPAN_MM = 1.0
+MAX_SIMPLIFIED_EDGE_MM = 0.5
+MAX_SMOOTHING_DISPLACEMENT_MM = 0.05
+SMALL_LOOP_RETAINED_FRACTIONS = ((100, 0.80), (200, 0.50))
 
 
 class BoundarySnapshotBuilder:
@@ -49,9 +53,9 @@ class BoundarySnapshotBuilder:
     ) -> RecognizedBoundaries:
         component_loops: list[tuple[tuple[int, ...], ...]] = []
         component_loop_points: list[tuple[tuple[tuple[float, float, float], ...], ...]] = []
+        retained_component_indices: list[int] = []
         simplification_records: list[dict] = []
         excluded_components: list[dict] = []
-        digest = hashlib.sha256()
         for component_index, component in enumerate(components, start=1):
             _local_vertices, local_faces, _global_to_local, global_vertex_ids = build_local_mesh(
                 vertices, faces, component
@@ -107,6 +111,9 @@ class BoundarySnapshotBuilder:
                     continue
                 retained = np.arange(len(source_ids), dtype=np.int64)
                 filtered_source_indices = _remove_isolated_spikes(source_points)
+                loop_retained_fraction = _retained_fraction_for_loop(
+                    len(filtered_source_indices), float(retained_fraction)
+                )
                 status = "unchanged"
                 reason = None
                 if len(source_ids) < 3:
@@ -114,7 +121,9 @@ class BoundarySnapshotBuilder:
                 else:
                     filtered_points = source_points[filtered_source_indices]
                     retained_count = max(
-                        3, int(round(len(filtered_source_indices) * float(retained_fraction)))
+                        3,
+                        int(round(len(filtered_source_indices) * loop_retained_fraction)),
+                        int(np.ceil(perimeter / MAX_SIMPLIFIED_EDGE_MM)),
                     )
                     retained_count = min(len(filtered_source_indices), retained_count)
                     retained_in_filtered = _equal_arc_sample_indices(
@@ -140,7 +149,7 @@ class BoundarySnapshotBuilder:
                     })
                     continue
                 simplified_ids = source_ids[retained]
-                simplified_points = _taubin_smooth_closed_loop(
+                simplified_points = _bounded_smooth_closed_loop(
                     np.asarray(vertices[simplified_ids], dtype=np.float64)
                 )
                 record = {
@@ -150,7 +159,7 @@ class BoundarySnapshotBuilder:
                     "reason": reason,
                     "source_vertex_count": int(len(source_ids)),
                     "simplified_vertex_count": int(len(simplified_ids)),
-                    "retained_fraction": float(retained_fraction),
+                    "retained_fraction": float(loop_retained_fraction),
                     "filtered_spike_vertex_count": int(
                         len(source_ids) - len(filtered_source_indices)
                     ),
@@ -158,6 +167,8 @@ class BoundarySnapshotBuilder:
                     "span_mm": span,
                     "smoothing_algorithm": "taubin_closed_loop",
                     "smoothing_iterations": 6,
+                    "maximum_smoothing_displacement_mm": MAX_SMOOTHING_DISPLACEMENT_MM,
+                    "maximum_simplified_edge_mm": MAX_SIMPLIFIED_EDGE_MM,
                 }
                 simplification_records.append(record)
                 loops_for_component.append(tuple(int(value) for value in simplified_ids))
@@ -167,10 +178,6 @@ class BoundarySnapshotBuilder:
                 ))
             loops = tuple(loops_for_component)
             point_loops = tuple(points_for_component)
-            digest.update(np.asarray([component_index], dtype=np.int64).tobytes())
-            for loop in loops:
-                digest.update(np.asarray(loop, dtype=np.int64).tobytes())
-                digest.update(b"\0")
             if not loops:
                 filtered_reasons = sorted({
                     str(record.get("reason"))
@@ -192,6 +199,17 @@ class BoundarySnapshotBuilder:
                 continue
             component_loops.append(loops)
             component_loop_points.append(point_loops)
+            retained_component_indices.append(component_index)
+        component_loops, component_loop_points = _filter_unpaired_component_loops(
+            component_loops, component_loop_points, retained_component_indices,
+            simplification_records,
+        )
+        digest = hashlib.sha256()
+        for component_index, loops in enumerate(component_loops, start=1):
+            digest.update(np.asarray([component_index], dtype=np.int64).tobytes())
+            for loop in loops:
+                digest.update(np.asarray(loop, dtype=np.int64).tobytes())
+                digest.update(b"\0")
         for point_loops in component_loop_points:
             for loop_points in point_loops:
                 digest.update(np.asarray(loop_points, dtype=np.float64).tobytes())
@@ -205,6 +223,76 @@ class BoundarySnapshotBuilder:
             simplification_records=tuple(simplification_records),
             excluded_components=tuple(excluded_components),
         )
+
+
+def _filter_unpaired_component_loops(
+    component_loops: list[tuple[tuple[int, ...], ...]],
+    component_loop_points: list[tuple[tuple[tuple[float, float, float], ...], ...]],
+    retained_component_indices: list[int],
+    records: list[dict],
+) -> tuple[list[tuple[tuple[int, ...], ...]], list[tuple[tuple[tuple[float, float, float], ...], ...]]]:
+    """Ignore orphan split seams while retaining standalone source components."""
+    loops = [
+        (component_index, loop_index, np.asarray(points, dtype=np.float64))
+        for component_index, point_loops in enumerate(component_loop_points)
+        for loop_index, points in enumerate(point_loops)
+    ]
+    matches: dict[tuple[int, int], set[tuple[int, int]]] = {}
+    records_by_loop = {
+        (int(record.get("component_index", -1)), int(record.get("loop_index", -1))): record
+        for record in records
+    }
+    for position, (left, left_loop, left_points) in enumerate(loops):
+        for right, right_loop, right_points in loops[position + 1:]:
+            if left == right:
+                continue
+            comparison = compare_boundary_loops(left_points, right_points)
+            if comparison is None:
+                continue
+            for key in (
+                (retained_component_indices[left], left_loop + 1),
+                (retained_component_indices[right], right_loop + 1),
+            ):
+                record = records_by_loop.get(key)
+                if record is not None:
+                    record["counterpart_distance_evidence"] = {
+                        "distance_tolerance_mm": comparison["distance_tolerance_mm"],
+                        "left_to_right": comparison["left_to_right"],
+                        "right_to_left": comparison["right_to_left"],
+                        "required_coverage": 0.80,
+                        "matched": comparison["matched"],
+                    }
+            if not comparison["matched"]:
+                continue
+            matches.setdefault((left, left_loop), set()).add((right, right_loop))
+            matches.setdefault((right, right_loop), set()).add((left, left_loop))
+    ambiguous = [key for key, values in matches.items() if len(values) > 1]
+    if ambiguous:
+        raise ValueError(f"simplified boundary has ambiguous contact matches: {ambiguous}")
+    retained_loops = []
+    retained_points = []
+    for component_index, (source_loops, point_loops) in enumerate(
+        zip(component_loops, component_loop_points)
+    ):
+        paired = {index for index in range(len(source_loops)) if (component_index, index) in matches}
+        # A standalone source shell has no counterpart; preserve its identity
+        # and contours instead of silently discarding the entire component.
+        keep = paired if paired else set(range(len(source_loops)))
+        retained_loops.append(tuple(loop for index, loop in enumerate(source_loops) if index in keep))
+        retained_points.append(tuple(points for index, points in enumerate(point_loops) if index in keep))
+        for record in records:
+            if (
+                record.get("component_index") == retained_component_indices[component_index]
+                and record.get("status") != "filtered"
+                and record.get("loop_index", 0) - 1 not in keep
+            ):
+                record["recognition_status"] = "unpaired_boundary_ignored"
+                record["recognition_reason"] = (
+                    "counterpart_coverage_below_threshold"
+                    if record.get("counterpart_distance_evidence")
+                    else "no_recognized_counterpart"
+                )
+    return retained_loops, retained_points
 
 
 def _remove_isolated_spikes(points: np.ndarray) -> np.ndarray:
@@ -302,6 +390,32 @@ def _taubin_smooth_closed_loop(
         neighbors = (np.roll(smoothed, 1, axis=0) + np.roll(smoothed, -1, axis=0)) * 0.5
         smoothed += float(inflation) * (neighbors - smoothed)
     return smoothed
+
+
+def _bounded_smooth_closed_loop(points: np.ndarray) -> np.ndarray:
+    """Limit smoothing drift so a simplified contour remains on its source seam."""
+    original = np.asarray(points, dtype=np.float64)
+    smoothed = _taubin_smooth_closed_loop(original)
+    offsets = smoothed - original
+    lengths = np.linalg.norm(offsets, axis=1)
+    scale = np.minimum(
+        1.0,
+        np.divide(
+            MAX_SMOOTHING_DISPLACEMENT_MM,
+            lengths,
+            out=np.ones_like(lengths),
+            where=lengths > 1e-12,
+        ),
+    )
+    return original + offsets * scale[:, None]
+
+
+def _retained_fraction_for_loop(point_count: int, default_fraction: float) -> float:
+    """Keep enough points to preserve compact contours and small details."""
+    for upper_bound, fraction in SMALL_LOOP_RETAINED_FRACTIONS:
+        if int(point_count) < upper_bound:
+            return fraction
+    return float(default_fraction)
 
 
 def _equal_arc_sample_indices(points: np.ndarray, sample_count: int) -> np.ndarray:

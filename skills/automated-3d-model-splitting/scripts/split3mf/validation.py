@@ -5,136 +5,26 @@ from dataclasses import dataclass
 from .common import *
 from .mesh import *
 from .package_io import *
+from .topology import audit_mesh_topology
 
 def validate_exported_mesh(path: Path) -> dict:
     mesh = trimesh.load_mesh(path, process=True)
-    if len(mesh.edges_unique_inverse):
-        counts = np.bincount(mesh.edges_unique_inverse)
-        open_edges = int(np.sum(counts == 1))
-        over_edges = int(np.sum(counts > 2))
-        unique_edges = int(len(counts))
-    else:
-        open_edges = 0
-        over_edges = 0
-        unique_edges = 0
-    defect_edges = int(open_edges + over_edges)
+    topology = audit_mesh_topology(mesh)
     return {
-        "reload_watertight": bool(mesh.is_watertight),
-        "reload_winding_consistent": bool(mesh.is_winding_consistent),
-        "reload_open_edges": open_edges,
-        "reload_over_shared_edges": over_edges,
-        "reload_unique_edges": unique_edges,
-        "reload_defect_edges": defect_edges,
-        "reload_topology_defect_ratio": float(defect_edges / max(unique_edges, 1)),
+        "reload_watertight": topology["watertight"],
+        "reload_winding_consistent": topology["winding_consistent"],
+        "reload_open_edges": topology["open_edges"],
+        "reload_over_shared_edges": topology["over_shared_edges"],
+        "reload_unique_edges": topology["unique_edges"],
+        "reload_defect_edges": topology["defect_edges"],
+        "reload_topology_defect_ratio": topology["topology_defect_ratio"],
         "reload_faces": int(len(mesh.faces)),
         "reload_vertices": int(len(mesh.vertices)),
     }
 
 
 def validate_mesh_in_memory(mesh: trimesh.Trimesh) -> dict:
-    # Validate the topology that will actually be serialized. Vendor meshes
-    # may intentionally keep coincident vertices distinct at paint junctions;
-    # welding them for validation invents false three-face edge defects.
-    check = mesh
-    faces = np.asarray(check.faces, dtype=np.int64)
-    directed_edges = (
-        np.vstack((faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]))
-        if len(faces)
-        else np.empty((0, 2), dtype=np.int64)
-    )
-    if len(directed_edges):
-        edge_min = np.minimum(directed_edges[:, 0], directed_edges[:, 1])
-        edge_max = np.maximum(directed_edges[:, 0], directed_edges[:, 1])
-        maximum_vertex_id = int(max(edge_min.max(), edge_max.max()))
-        if maximum_vertex_id < (1 << 32):
-            edge_keys = (
-                edge_min.astype(np.uint64) << np.uint64(32)
-            ) | edge_max.astype(np.uint64)
-            unique_keys, inverse_edges, counts = np.unique(
-                edge_keys,
-                return_inverse=True,
-                return_counts=True,
-            )
-            unique_edges = np.column_stack(
-                (
-                    (unique_keys >> np.uint64(32)).astype(np.int64),
-                    (unique_keys & np.uint64(0xFFFFFFFF)).astype(np.int64),
-                )
-            )
-        else:
-            edges = np.column_stack((edge_min, edge_max))
-            unique_edges, inverse_edges, counts = np.unique(
-                edges,
-                axis=0,
-                return_inverse=True,
-                return_counts=True,
-            )
-        direction_sign = np.where(
-            directed_edges[:, 0] == edge_min,
-            1,
-            -1,
-        )
-    else:
-        unique_edges = np.empty((0, 2), dtype=np.int64)
-        inverse_edges = np.array([], dtype=np.int64)
-        counts = np.array([], dtype=np.int64)
-        direction_sign = np.array([], dtype=np.int8)
-    open_edge_ids = unique_edges[counts == 1]
-    over_edge_ids = unique_edges[counts > 2]
-    direction_balance = (
-        np.bincount(inverse_edges, weights=direction_sign, minlength=len(unique_edges))
-        if len(inverse_edges)
-        else np.array([], dtype=np.float64)
-    )
-    inconsistent_edge_ids = unique_edges[(counts == 2) & (np.abs(direction_balance) == 2)]
-    unique_edge_count = int(len(unique_edges))
-    defect_edge_count = int(len(open_edge_ids) + len(over_edge_ids))
-    vertices = np.asarray(check.vertices, dtype=np.float64)
-
-    def edge_metrics(selected: np.ndarray) -> dict:
-        if not len(selected):
-            return {"count": 0, "total_length_mm": 0.0, "max_length_mm": 0.0, "bbox_min": None, "bbox_max": None}
-        segments = vertices[selected]
-        lengths = np.linalg.norm(segments[:, 1] - segments[:, 0], axis=1)
-        points = segments.reshape(-1, 3)
-        return {
-            "count": int(len(selected)),
-            "total_length_mm": float(lengths.sum()),
-            "max_length_mm": float(lengths.max()),
-            "bbox_min": points.min(axis=0).round(6).tolist(),
-            "bbox_max": points.max(axis=0).round(6).tolist(),
-        }
-    component_orientation = watertight_component_orientation_audit(check)
-    return {
-        "watertight": bool(
-            len(faces)
-            and not len(open_edge_ids)
-            and not len(over_edge_ids)
-        ),
-        "winding_consistent": not bool(len(inconsistent_edge_ids)),
-        "open_edges": int(len(open_edge_ids)),
-        "over_shared_edges": int(len(over_edge_ids)),
-        "inconsistent_shared_edges": int(len(inconsistent_edge_ids)),
-        "unique_edges": unique_edge_count,
-        "defect_edges": defect_edge_count,
-        "topology_defect_ratio": float(defect_edge_count / max(unique_edge_count, 1)),
-        "open_edge_ratio": float(len(open_edge_ids) / max(unique_edge_count, 1)),
-        "over_shared_edge_ratio": float(len(over_edge_ids) / max(unique_edge_count, 1)),
-        "inconsistent_orientation_ratio": float(len(inconsistent_edge_ids) / max(unique_edge_count, 1)),
-        "open_edge_metrics": edge_metrics(open_edge_ids),
-        "over_shared_edge_metrics": edge_metrics(over_edge_ids),
-        "inconsistent_edge_metrics": edge_metrics(inconsistent_edge_ids),
-        "faces": int(len(check.faces)),
-        "vertices": int(len(check.vertices)),
-        "closed_component_orientation": component_orientation,
-        "connected_component_count": component_orientation.get("component_count"),
-        "inward_closed_components": component_orientation.get(
-            "inward_closed_component_count"
-        ),
-        "all_closed_components_outward": component_orientation.get(
-            "all_closed_components_outward"
-        ),
-    }
+    return audit_mesh_topology(mesh)
 
 
 def finalize_mesh(mesh: trimesh.Trimesh) -> trimesh.Trimesh:

@@ -24,6 +24,29 @@ _CONFIDENCE = {
 }
 
 
+def meaningful_semantic_label(value: object) -> bool:
+    """An identifier or pending placeholder is not a visual interpretation."""
+    label = str(value or "").strip()
+    return bool(label) and not label.startswith("待确认") and not re.fullmatch(
+        r"[FP]0*\d+", label, re.IGNORECASE
+    )
+
+
+def require_recognition_semantics(records: list[dict]) -> None:
+    missing = [
+        f"P{int(item['part_index']):02d}"
+        for item in records
+        if not meaningful_semantic_label(item.get("visual_semantic_label"))
+        or confidence_score(item.get("visual_semantic_confidence")) <= 0.0
+        or not str(item.get("visual_semantic_evidence") or "").strip()
+    ]
+    if missing:
+        raise ValueError(
+            "image-based semantic label, confidence, and visual evidence are "
+            "required for every recognized part: " + ", ".join(missing)
+        )
+
+
 def confidence_score(value: object, default: float = 0.0) -> float:
     if value is None:
         return default
@@ -105,6 +128,14 @@ def annotate_recognition_with_visual_semantics(
                 "visual_semantic_confidence": semantic.get("confidence", "UNKNOWN"),
                 "visual_semantic_confidence_score": semantic.get("confidence_score", 0.0),
                 "visual_semantic_evidence": semantic.get("visual_evidence", ""),
+            })
+        else:
+            updated.update({
+                "visual_semantic_label": f"待确认区域 P{int(record['part_index']):02d}",
+                "visual_semantic_description": "自动占位标签；需结合边界预览确认部位",
+                "visual_semantic_confidence": "UNKNOWN",
+                "visual_semantic_confidence_score": 0.0,
+                "visual_semantic_evidence": "",
             })
         annotated.append(updated)
     return annotated

@@ -4,6 +4,7 @@ from pathlib import Path
 
 import numpy as np
 from ..boundary_preview import _even_sample
+from ..boundary_matching import matching_seam
 
 MAX_RECOGNITION_PREVIEW_FACES = 750_000
 
@@ -39,6 +40,7 @@ def write_boundary_review_artifacts(
         source_face_color_tokens=source_face_color_tokens,
         source_color_map=source_color_map,
         components=components,
+        recognition_records=recognition_records,
         azimuth=-90,
         view_label="current view",
     )
@@ -50,6 +52,7 @@ def write_boundary_review_artifacts(
         source_face_color_tokens=source_face_color_tokens,
         source_color_map=source_color_map,
         components=components,
+        recognition_records=recognition_records,
         azimuth=90,
         view_label="opposite view",
     )
@@ -61,6 +64,7 @@ def write_boundary_review_artifacts(
         source_face_color_tokens=source_face_color_tokens,
         source_color_map=source_color_map,
         components=components,
+        recognition_records=recognition_records,
         azimuth=0,
         view_label="side view",
     )
@@ -91,6 +95,7 @@ def _write_boundary_plot(
     source_face_color_tokens: np.ndarray | None = None,
     source_color_map: dict[str, str] | None = None,
     components: list | None = None,
+    recognition_records: list[dict] | None = None,
     azimuth: float = -90,
     view_label: str = "current view",
 ) -> int:
@@ -143,41 +148,25 @@ def _write_boundary_plot(
             triangles, facecolors=rgb, edgecolors="none", linewidths=0, zorder=1
         ))
         all_points.append(vertices)
-    palette = [
-        ("red", "#E31A1C"), ("white", "#FFFFFF"), ("blue", "#1F78B4"),
-        ("yellow", "#FFD92F"), ("purple", "#984EA3"), ("orange", "#FF7F00"),
-        ("cyan", "#00BFC4"), ("pink", "#F781BF"), ("green", "#33A02C"),
-        ("lime", "#B2DF8A"), ("magenta", "#E7298A"), ("teal", "#66C2A5"),
-        ("gold", "#E6AB02"),
-    ]
-    legend_handles = []
+    records_by_part = {
+        int(record["part_index"]): record
+        for record in (recognition_records or [])
+    }
+    visible_loops, seam_colors = _boundary_display_groups(boundaries.component_loop_points)
     plotted_boundary_count = 0
-    for component_index, loops in enumerate(boundaries.component_loop_points, start=1):
-        color_name, color = palette[(component_index - 1) % len(palette)]
-        component_points = [np.asarray(loop, dtype=np.float64) for loop in loops if len(loop) >= 3]
-        if not component_points:
-            continue
-        plotted_for_component = 0
-        for loop in loops:
-            if len(loop) < 3:
-                continue
-            points = np.asarray(loop, dtype=np.float64)
+    for component_index, component_loops in visible_loops.items():
+        for points, color in component_loops:
+            halo = "#101318"
             closed = np.vstack((points, points[0]))
             segments = np.stack((closed[:-1], closed[1:]), axis=1)
             axis.add_collection3d(Line3DCollection(
-                segments, colors="#20242A", linewidths=4.2, alpha=1.0, zorder=8
+                segments, colors=halo, linewidths=6.0, alpha=1.0, zorder=8
             ))
             axis.add_collection3d(Line3DCollection(
-                segments, colors=color, linewidths=2.6, alpha=1.0, zorder=10
+                segments, colors=color, linewidths=4.0, alpha=1.0, zorder=10
             ))
             all_points.append(points)
-            plotted_for_component += 1
             plotted_boundary_count += 1
-        if plotted_for_component:
-            legend_handles.append(plt.Line2D(
-                [0], [0], color=color, linewidth=2,
-                label=f"P{component_index:02d}  {color_name}",
-            ))
     if all_points:
         points = np.vstack(all_points)
         center = (points.min(axis=0) + points.max(axis=0)) * 0.5
@@ -200,16 +189,103 @@ def _write_boundary_plot(
     axis.zaxis.label.set_color("#E6E8EB")
     axis.view_init(elev=20, azim=float(azimuth))
     axis.title.set_color("#FFFFFF")
-    if legend_handles:
-        legend = axis.legend(handles=legend_handles, loc="upper left", bbox_to_anchor=(1.02, 1.0))
-        legend.get_frame().set_facecolor("#30363D")
-        legend.get_frame().set_edgecolor("#697078")
-        for text in legend.get_texts():
-            text.set_color("#FFFFFF")
     figure.tight_layout(rect=(0.0, 0.0, 0.82, 1.0))
+    _draw_boundary_legend(
+        figure, len(boundaries.component_loop_points), records_by_part,
+        source_color_map, seam_colors,
+    )
     figure.savefig(path, dpi=180)
     plt.close(figure)
     return plotted_boundary_count
+
+
+def _component_paint_color(
+    component_index: int,
+    records_by_part: dict[int, dict],
+    source_color_map: dict[str, str] | None,
+) -> str:
+    record = records_by_part.get(component_index, {})
+    source_code = str(record.get("color_code", ""))
+    return str(
+        record.get("color_hex")
+        or (source_color_map or {}).get(source_code)
+        or "#A8A8AC"
+    )
+
+
+BOUNDARY_COLORS = (
+    "#FF5C5C", "#2DE2E6", "#FFD166", "#9B7BFF", "#59E071",
+    "#FF8F3D", "#F77BD3", "#6CB6FF", "#D8F05A", "#B57BFF",
+    "#20C997", "#FF6B8B", "#A0C4FF", "#E43CFF", "#B8F28B",
+    "#F4A7D5", "#80CBC4", "#FFA85C", "#C3A6FF", "#E8E85A",
+)
+
+
+def _seam_color(seam_index: int) -> str:
+    if seam_index < len(BOUNDARY_COLORS):
+        return BOUNDARY_COLORS[seam_index]
+    import colorsys
+
+    hue = ((seam_index - len(BOUNDARY_COLORS)) * 0.618033988749895 + 0.13) % 1.0
+    rgb = colorsys.hsv_to_rgb(hue, 0.72, 1.0)
+    return "#" + "".join(f"{round(channel * 255):02X}" for channel in rgb)
+
+
+def _boundary_display_groups(component_loop_points):
+    """Give a shared seam one visible color and list that color for both owners."""
+    selected: list[np.ndarray] = []
+    visible: dict[int, list[tuple[np.ndarray, str]]] = {}
+    colors_by_part: dict[int, list[str]] = {}
+    for component_index, loops in enumerate(component_loop_points, start=1):
+        for loop in loops:
+            if len(loop) < 3:
+                continue
+            points = np.asarray(loop, dtype=np.float64)
+            seam_index = next(
+                (index for index, earlier in enumerate(selected)
+                 if matching_seam(points, earlier)), None
+            )
+            if seam_index is None:
+                seam_index = len(selected)
+                selected.append(points)
+                color = _seam_color(seam_index)
+                visible.setdefault(component_index, []).append((points, color))
+            color = _seam_color(seam_index)
+            owner_colors = colors_by_part.setdefault(component_index, [])
+            if color not in owner_colors:
+                owner_colors.append(color)
+    return visible, colors_by_part
+
+
+def _draw_boundary_legend(figure, part_count, records_by_part, source_color_map, seam_colors):
+    """Show paint as a swatch and the actual boundary stroke in the final column."""
+    from matplotlib.patches import Rectangle
+
+    legend = figure.add_axes((0.82, 0.29, 0.17, 0.62))
+    legend.set_facecolor("#30363D")
+    legend.set_xlim(0, 1)
+    legend.set_ylim(0, part_count + 1.5)
+    legend.set_xticks([])
+    legend.set_yticks([])
+    for spine in legend.spines.values():
+        spine.set_color("#697078")
+    legend.text(0.06, part_count + 0.65, "Part", color="white", fontsize=9)
+    legend.text(0.36, part_count + 0.65, "Paint", color="white", fontsize=9)
+    legend.text(0.66, part_count + 0.65, "Boundary", color="white", fontsize=9)
+    for index in range(1, part_count + 1):
+        y = part_count + 0.25 - index
+        legend.text(0.06, y, f"P{index:02d}", color="white", fontsize=9, va="center")
+        legend.add_patch(Rectangle(
+            (0.39, y - 0.17), 0.17, 0.34,
+            facecolor=_component_paint_color(index, records_by_part, source_color_map),
+            edgecolor="#AAAAAA", linewidth=0.5,
+        ))
+        colors = seam_colors.get(index, [])
+        for color_index, color in enumerate(colors):
+            x0 = 0.66 + 0.28 * color_index / max(len(colors), 1)
+            x1 = x0 + 0.28 / max(len(colors), 1)
+            legend.plot((x0, x1), (y, y), color="#101318", linewidth=6, solid_capstyle="round")
+            legend.plot((x0, x1), (y, y), color=color, linewidth=3, solid_capstyle="round")
 
 
 def _sample_component_faces(components: list, face_count: int) -> np.ndarray:
@@ -281,7 +357,7 @@ def _write_summary(
         "",
         f"## 区域判断（{len(recognition_records)} 个有效零件）",
         "",
-        "边界重合时会互相遮盖，预览中的重合处只显示一种颜色。",
+        "共用简化边界只绘制一次；相接零件共用该边界线色。图例分别显示原模型涂色和边界线色。",
         "",
         "| 区域 | 区域语义 / 颜色 | 面数 / 面积 mm² | 判断建议 |",
         "|---|---|---:|---|",
@@ -292,7 +368,7 @@ def _write_summary(
             review.get("classification") or part.get("source_region_classification") or ""
         )
         if classification == "noise":
-            suggestion = "建议删除（复核标为噪声）"
+            suggestion = "保留源面（复核标为噪声）"
         elif classification == "part":
             suggestion = "建议保留（复核为独立部件）"
         elif classification == "uncertain":
@@ -345,15 +421,9 @@ def _semantic_label(part: dict) -> str:
 
 def _required_semantic_labels(recognition_records: list[dict]) -> dict[int, str]:
     labels = {
-        int(part["part_index"]): _semantic_label(part)
+        int(part["part_index"]): _semantic_label(part) or f"待确认区域 P{int(part['part_index']):02d}"
         for part in recognition_records
     }
-    missing = [f"P{index:02d}" for index, label in labels.items() if not label]
-    if missing:
-        raise ValueError(
-            "识别报告要求每个有效区域都有视觉语义标签；请通过 "
-            "--visual-semantics-json 补全：" + ", ".join(missing)
-        )
     return labels
 
 

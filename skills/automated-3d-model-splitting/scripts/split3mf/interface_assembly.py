@@ -24,6 +24,8 @@ from .spatial_intersections import (
     first_nonincident_triangle_intersection_3d,
     remove_true_self_intersections_3d,
 )
+from .interface_relations import interface_role_index
+from .stage_cache import fingerprint_payload
 import trimesh
 
 
@@ -177,6 +179,7 @@ def build_pairwise_interface_surfaces(
     interfaces = interface_plan.get("interfaces")
     if not isinstance(interfaces, list):
         raise ValueError("Stage 04 interface plan has no interfaces list")
+    role_index = interface_role_index(interface_plan)
 
     arrays: dict[str, np.ndarray] = {}
     records: list[dict] = []
@@ -185,11 +188,8 @@ def build_pairwise_interface_surfaces(
         interface_id = str(relation.get("interface_id", ""))
         if not interface_id:
             raise ValueError("Stage 04 interface entry is missing interface_id")
-        if relation.get("tenon_part") not in relation.get("parts", []):
-            raise ValueError(f"{interface_id}: tenon is not one of the declared parts")
-        if relation.get("mortise_part") not in relation.get("parts", []):
-            raise ValueError(f"{interface_id}: mortise is not one of the declared parts")
-        mortise_index = _part_index(relation["mortise_part"])
+        roles = role_index[interface_id]
+        mortise_index = _part_index(roles["mortise_part"])
         if not 1 <= mortise_index <= len(components):
             raise ValueError(f"{interface_id}: mortise references an unknown part")
         if mortise_index not in mortise_probes:
@@ -312,8 +312,8 @@ def build_pairwise_interface_surfaces(
             records.append({
                 "interface_id": interface_id,
                 "loop_position": loop_position,
-                "tenon_part": relation["tenon_part"],
-                "mortise_part": relation["mortise_part"],
+                "tenon_part": roles["tenon_part"],
+                "mortise_part": roles["mortise_part"],
                 "tenon_loop_index": tenon_loop_index,
                 "mortise_loop_index": mortise_loop_index,
                 "boundary_cleanup_3d": boundary_cleanup,
@@ -341,6 +341,8 @@ def build_pairwise_interface_surfaces(
 
     result = {
         "schema": "pairwise-interface-surfaces/v1",
+        "interface_role_index": role_index,
+        "interface_role_index_sha256": fingerprint_payload(role_index),
         "source_interface_schema": interface_plan["schema"],
         "recognized_boundary_fingerprint": interface_plan.get(
             "recognized_boundary_fingerprint"
@@ -388,19 +390,37 @@ def build_pairwise_part_meshes(
         (item["interface_id"], item["loop_position"]): item
         for item in interface_summary["interfaces"]
     }
+    role_index = interface_role_index(interface_plan)
+    role_index_sha256 = fingerprint_payload(role_index)
+    if interface_summary.get("interface_role_index_sha256") != role_index_sha256:
+        raise ValueError("interface summary was built from a different interface role table")
+    summary_roles = {}
+    for item in interface_summary["interfaces"]:
+        interface_id = str(item["interface_id"])
+        roles = role_index.get(interface_id)
+        if roles is None or (
+            item.get("tenon_part"), item.get("mortise_part")
+        ) != (roles["tenon_part"], roles["mortise_part"]):
+            raise ValueError(
+                f"{interface_id}: built interface roles do not match the hashed role table"
+            )
+        summary_roles[interface_id] = roles
+    if set(summary_roles) != set(role_index):
+        raise ValueError("built interface surfaces do not match the hashed role table")
     attachments_by_part: dict[str, list[InterfaceAttachment]] = {
         f"P{index:02d}": [] for index in range(1, len(components) + 1)
     }
     imprinted_pockets = []
     for relation in interface_plan["interfaces"]:
         interface_id = str(relation["interface_id"])
+        roles = role_index[interface_id]
         for loop_position, _loop in enumerate(
             relation["contact"]["shared_boundary_loops"]
         ):
             record = records[(interface_id, loop_position)]
             stem = f"{interface_id.lower()}_loop_{loop_position:03d}"
-            for side, part_field in (("tenon", "tenon_part"), ("mortise", "mortise_part")):
-                part_id = str(relation[part_field])
+            for side in ("tenon", "mortise"):
+                part_id = roles[f"{side}_part"]
                 if (side == "mortise" and relation["contact"].get("counterpart_mode")
                         == "imprinted_host_surface"):
                     imprinted_pockets.append((
@@ -491,6 +511,11 @@ def build_pairwise_part_meshes(
             "winding_consistent": bool(mesh.is_winding_consistent),
             "degenerate_face_count": degenerate,
             "source_degenerate_face_count": source_degenerate,
+            "interface_role_index_sha256": role_index_sha256,
+            "interface_roles": {
+                item["interface_id"]: item["side"]
+                for item in composition.get("interfaces", [])
+            },
             "composition": composition,
         })
     if imprinted_pockets:

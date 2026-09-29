@@ -142,7 +142,13 @@ def test_local_boundary_controls_tip_instead_of_part_center_axis(
     }
     with patch("split3mf.interface_assembly.build_local_mesh", return_value=(host.vertices, host.faces, {}, [])):
         arrays, summary = build_pairwise_interface_surfaces(
-            {"schema": "contact-interface-plan/v1", "interfaces": [relation]},
+            {
+                "schema": "contact-interface-plan/v1",
+                "relation_table": {"rows": [[
+                    "I001", relation["tenon_part"], relation["mortise_part"],
+                ]]},
+                "interfaces": [relation],
+            },
             vertices=host.vertices, faces=host.faces, components=[None, None],
             scale_ratio=0.5, clearance_mm=0.2,
         )

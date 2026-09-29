@@ -104,7 +104,9 @@ def ensure_assembly_review(
                 raise ValueError("Stage 04 correction request references an unknown interface")
             if not str(request.get("issue", "")).strip() or not str(request.get("requested_change", "")).strip():
                 raise ValueError("Stage 04 correction request needs issue and requested_change")
-        payload["user_confirmed"] = reviewed["user_confirmed"]
+        # A confirmation attached to unresolved corrections cannot approve the
+        # stale plan; the corrected plan needs its own review pass.
+        payload["user_confirmed"] = reviewed["user_confirmed"] and not requests
         payload["correction_requests"] = requests
     template_path.parent.mkdir(parents=True, exist_ok=True)
     template_path.write_text(

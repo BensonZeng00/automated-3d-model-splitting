@@ -29,7 +29,7 @@ def load_direction_policy_corrections(review_path: str | Path | None) -> dict[st
         policy = request.get("direction_policy")
         if policy is None:
             continue
-        if policy != "smaller_area_first":
+        if policy not in {"smaller_area_first", "larger_area_first"}:
             raise ValueError(f"unsupported Stage 04 direction policy: {policy}")
         interface_id = str(request.get("interface_id") or "").strip()
         if not interface_id:

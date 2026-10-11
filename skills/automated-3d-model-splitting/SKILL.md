@@ -35,7 +35,7 @@ Current release: `2.1.0`, positioned as automated painted-3MF model-part splitti
 
 首次识别不要求预先提供 `--visual-semantics-json`：未命名区域以零置信度的“待确认区域 Pxx”写入报告，一次运行即可生成边界图和审核文件，不能将占位标签当作已确认部件名称。阶段 03 完成后，完整拆件流程还必须经过识别结果确认。查看 `03_recognition_boundary_review.md` 与预览；如果识别有误，可在 `03_recognition_review.json` 的 `actions` 中明确写 `delete` 或 `merge`，再通过 `--recognition-review-json PATH` 重跑。应用修改后必须复核新报告，并将新 JSON 中 `user_confirmed` 设为 `true`；只有匹配当前结果指纹的确认才会进入装配。这里的删除/合并是独立的用户明确操作，不由 `noise`/`part`/`uncertain` 分类自动触发。
 
-阶段 04 完成后同样必须停下供用户审核 `04_interface_table.md` 和冻结边界。`04_assembly_review.json` 绑定源文件、边界和当前榫卯规划；只在用户明确确认后设置 `user_confirmed=true`，用 `--assembly-review-json PATH` 进入阶段 05。发现错配时保持 `false`，在 `correction_requests` 逐项记录接口 ID、问题及用户要求；当要求更改榫方选择策略时，可明确设置 `direction_policy` 为 `smaller_area_first`。按用户指令修正并重做阶段 04，再让用户确认新规划。未确认、存在待改项或规划指纹失效时，全流程和阶段工件续跑均不得进入阶段 05。
+阶段 04 完成后同样必须停下供用户审核 `04_interface_table.md` 和冻结边界。`04_assembly_review.json` 绑定源文件、边界和当前榫卯规划；只在用户明确确认后设置 `user_confirmed=true`，用 `--assembly-review-json PATH` 进入阶段 05。发现错配时保持 `false`，在 `correction_requests` 逐项记录接口 ID、问题及用户要求；当要求更改榫方选择策略时，可明确设置 `direction_policy` 为 `smaller_area_first` 或 `larger_area_first`。按用户指令修正并重做阶段 04，再让用户确认新规划。未确认、存在待改项或规划指纹失效时，全流程和阶段工件续跑均不得进入阶段 05。
 
 运行识别：
 

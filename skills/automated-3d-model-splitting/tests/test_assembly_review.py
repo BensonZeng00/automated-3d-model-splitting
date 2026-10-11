@@ -8,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from split3mf.assembly_review import (
     AssemblyReviewRequired, assembly_plan_fingerprint, ensure_assembly_review,
+    load_direction_policy_corrections,
 )
 from split3mf.resume_interface_stage import resume_interface_stage
 
@@ -61,6 +62,15 @@ def test_correction_requests_block_stage05_even_if_confirmed(tmp_path: Path) -> 
     path.write_text(json.dumps(review), encoding="utf-8")
     with pytest.raises(AssemblyReviewRequired):
         ensure_assembly_review(plan, source_sha256="source-1", template_path=path, table_path=tmp_path / "table.md")
+
+
+def test_review_loads_larger_area_direction_correction(tmp_path: Path) -> None:
+    path = tmp_path / "04_assembly_review.json"
+    path.write_text(json.dumps({"correction_requests": [{
+        "interface_id": "I014", "direction_policy": "larger_area_first",
+    }]}), encoding="utf-8")
+
+    assert load_direction_policy_corrections(path) == {"I014": "larger_area_first"}
 
 
 def test_artifact_resume_cannot_bypass_stage04_review(tmp_path: Path) -> None:

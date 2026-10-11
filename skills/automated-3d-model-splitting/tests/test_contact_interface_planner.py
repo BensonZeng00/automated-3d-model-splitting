@@ -62,6 +62,13 @@ class ContactInterfacePlannerTests(unittest.TestCase):
         self.assertEqual(relation["tenon_part"], "P02")
         self.assertEqual(relation["direction_evidence"]["method"], "user_requested_smaller_area_first")
 
+    def test_explicit_larger_area_policy_selects_larger_part_as_tenon(self):
+        relation = self._plan(0.0, areas=(8.0, 4.0),
+                              direction_policy_overrides={"I001": "larger_area_first"})["interfaces"][0]
+        self.assertEqual(relation["tenon_part"], "P01")
+        self.assertEqual(relation["mortise_part"], "P02")
+        self.assertEqual(relation["direction_evidence"]["method"], "user_requested_larger_area_first")
+
     def test_invalid_area_threshold_rejected(self):
         for value in (0, 1, float("nan"), float("inf")):
             with self.assertRaises(ValueError):

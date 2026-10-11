@@ -285,6 +285,9 @@ def plan_contact_interfaces(
         if direction_policy == "smaller_area_first":
             tenon, mortise = area_order
             decision = "user_requested_smaller_area_first"
+        elif direction_policy == "larger_area_first":
+            tenon, mortise = area_order[::-1]
+            decision = "user_requested_larger_area_first"
         elif (left, right) in imprinted_pairs:
             tenon = imprinted_pairs[(left, right)][0]
             mortise = right if tenon == left else left

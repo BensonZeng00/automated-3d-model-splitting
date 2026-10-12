@@ -88,6 +88,7 @@ class BoundaryReviewService:
                     context=context, faces=len(faces), adjacency_edges=len(graph.adjacency),
                     duration_seconds=round(time.perf_counter()-started, 4))
         labels = np.asarray(owners).astype(str)
+        source_context = context == 'input' or context.startswith('step_')
         from .boundary_budget import BoundaryAreaBudget
         from .boundary_simplification import simplify_crossing_ownership
         budget_key = graph.fingerprint(np.full(len(labels), ''), context)
@@ -96,7 +97,7 @@ class BoundaryReviewService:
         budget = self.area_budgets[budget_key]
         # An explicit review file owns its proposal: do not invalidate it first.
         cleanup = []
-        if self.decisions is None:
+        if self.decisions is None and not source_context:
             cleanup_started = time.perf_counter()
             runtime_log('分界', 'boundary_crossing_cleanup_start',
                         '开始检查材料间共享边的局部交叉', context=context)
@@ -121,7 +122,7 @@ class BoundaryReviewService:
         # handoff seams. Preserve their exact ownership and report ambiguity
         # without blocking recognition; generated recursive interfaces remain
         # subject to the normal blocking checks below.
-        if context == 'input' or context.startswith('step_'):
+        if source_context:
             report.update(status='source_diagnostics',
                           source_diagnostics='non_blocking',
                           ownership_changed=False,

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:openai:skill:automated-3d-model-splitting:region-review:2.2.0",
+  "$id": "urn:openai:skill:automated-3d-model-splitting:region-review:3.0.0",
   "title": "User-confirmed source-region semantic review",
   "type": "object",
   "required": [

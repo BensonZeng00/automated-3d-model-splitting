@@ -5,26 +5,18 @@ import re
 import numpy as np
 
 from .interface_surface import (
-    InterfaceSurface,
-    PairedInterfaceSurfaces,
     MAX_INTERFACE_EXTENSION_MM,
-    MORTISE_COLLISION_DISTANCE_THRESHOLD_MM,
-    MORTISE_COLLISION_RATIO_THRESHOLD,
-    MORTISE_FAR_COLLISION_DISTANCE_MM,
-    MORTISE_FAR_COLLISION_RATIO_THRESHOLD,
-    build_mortise_shell_probe,
     build_pairwise_interface_surfaces as build_interface_surface_pair,
-    _curved_cap_triangulation,
-    _mortise_collision_statistics,
 )
-from .mesh import build_local_mesh, orthonormal_basis, radial_offset_points
+from .mesh import build_local_mesh
 from .part_interface_composition import InterfaceAttachment, compose_part_with_interfaces
 from .project import color_resolution_status
 from .spatial_intersections import (
-    first_nonincident_triangle_intersection_3d,
     remove_true_self_intersections_3d,
 )
 from .interface_relations import interface_role_index
+from .interface_direction import inward_interface_axis
+from .local_ray_probe import LocalRayProbe
 from .stage_cache import fingerprint_payload
 import trimesh
 
@@ -35,134 +27,6 @@ def _part_index(part_id: str) -> int:
         raise ValueError(f"invalid Stage 04 part id: {part_id!r}")
     return int(match.group(1))
 
-
-SIMPLIFIED_BOUNDARY_FALLBACK_DEPTH_MM = 1.0
-
-
-def _build_simplified_boundary_fallback_pair(
-    *,
-    simplified_boundary: np.ndarray,
-    insertion_axis: np.ndarray,
-    clearance_mm: float,
-    mortise_shell_probe: LocalRayProbe,
-    interface_id: str,
-) -> PairedInterfaceSurfaces:
-    """Extrude the complete Stage 03 simplified contour after the 50% candidate fails."""
-    outer = np.asarray(simplified_boundary, dtype=np.float64)
-    axis = np.asarray(insertion_axis, dtype=np.float64)
-    if outer.ndim != 2 or outer.shape[1:] != (3,) or len(outer) < 3:
-        raise ValueError(f"{interface_id}: simplified fallback contour must be an N×3 loop")
-    if not np.isfinite(outer).all() or not np.isfinite(axis).all():
-        raise ValueError(f"{interface_id}: simplified fallback contour or axis is non-finite")
-    axis_length = float(np.linalg.norm(axis))
-    if axis_length <= 1e-10:
-        raise ValueError(f"{interface_id}: simplified fallback axis is degenerate")
-    axis /= axis_length
-    count = len(outer)
-    origin = outer.mean(axis=0)
-
-    def build_side(side: str) -> InterfaceSurface:
-        is_mortise = side == "mortise"
-        clearance = float(clearance_mm) if is_mortise else 0.0
-        depth = SIMPLIFIED_BOUNDARY_FALLBACK_DEPTH_MM + clearance
-        if is_mortise:
-            u, v = orthonormal_basis(axis)
-            inner = radial_offset_points(outer, origin, u, v, axis, clearance)
-        else:
-            inner = outer.copy()
-        inner = inner + axis * depth
-        vertices = np.vstack((outer, inner))
-        strip_faces = []
-        for index in range(count):
-            following = (index + 1) % count
-            strip_faces.extend((
-                (index, following, count + index),
-                (following, count + following, count + index),
-            ))
-        cap_triangles, cap_record, cap_center = _curved_cap_triangulation(inner, axis)
-        if cap_center is not None:
-            raise ValueError(
-                f"{interface_id} {side}: simplified 100% contour cap cannot be triangulated "
-                "without a centre fan"
-            )
-        cap_faces = [
-            tuple(int(vertex) + count for vertex in triangle)
-            for triangle in cap_triangles
-        ]
-        outer_cap_faces, outer_cap_record, outer_cap_center = _curved_cap_triangulation(
-            outer, axis
-        )
-        if outer_cap_center is not None:
-            raise ValueError(
-                f"{interface_id} {side}: simplified boundary cannot be triangulated "
-                "without a centre fan"
-            )
-        faces = np.asarray(strip_faces + cap_faces + outer_cap_faces, dtype=np.int64)
-        outer_cap_face_count = len(outer_cap_faces)
-        construction_faces = faces[:-outer_cap_face_count]
-        xyz_audit = first_nonincident_triangle_intersection_3d(
-            construction_faces, vertices
-        )
-        if not xyz_audit["valid"]:
-            raise ValueError(
-                f"{interface_id} {side}: simplified-boundary 1 mm fallback has a 3D intersection: {xyz_audit}"
-            )
-        if is_mortise:
-            sample = inner
-            hit_distances, _ = mortise_shell_probe.exits(
-                sample, np.broadcast_to(axis, sample.shape).copy(),
-                depth + MORTISE_RAY_NUMERICAL_EPSILON_MM,
-                epsilon=MORTISE_RAY_NUMERICAL_EPSILON_MM,
-            )
-            thickness = _mortise_collision_statistics(hit_distances)
-            if thickness["collision"]:
-                raise ValueError(
-                    f"{interface_id}: simplified-boundary 1 mm fallback exceeds P01 thickness limits: {thickness}"
-                )
-        mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
-        trimesh.repair.fix_winding(mesh)
-        trimesh.repair.fix_inversion(mesh, multibody=True)
-        record = {
-            "interface_id": interface_id,
-            "side": side,
-            "geometry_role": "additive_tenon_surface" if side == "tenon" else "subtractive_mortise_surface",
-            "boundary_vertex_count": count,
-            "scale_ratio": 1.0,
-            "selected_strategy": "translated_simplified_boundary_1mm",
-            "fallback_from_scale_ratio": 0.5,
-            "inner_planar_contour": {"strategy": "full_simplified_boundary_translation"},
-            "ellipse_plane_normal": axis.round(8).tolist(),
-            "ellipse_extrusion_axis": axis.round(8).tolist(),
-            "inner_contour_attempts": [{"scale_ratio": 0.5, "accepted": False},
-                                       {"scale_ratio": 1.0, "accepted": True}],
-            "clearance_mm": float(clearance_mm),
-            "inner_ring_offset_mm": clearance,
-            "outer_boundary_shift_mm": 0.0,
-            "extension_direction": axis.round(8).tolist(),
-            "stage04_mating_direction": axis.round(8).tolist(),
-            "extension_depth_mm": depth,
-            "tenon_extension_depth_mm": SIMPLIFIED_BOUNDARY_FALLBACK_DEPTH_MM,
-            "mortise_recess_depth_mm": SIMPLIFIED_BOUNDARY_FALLBACK_DEPTH_MM + clearance_mm,
-            "inner_cap_face_count": int(len(cap_faces)),
-            "inner_cap_geometry": "translated_simplified_boundary_triangulation",
-            "inner_cap_triangulation": cap_record,
-            "outer_boundary_cap_face_count": int(outer_cap_face_count),
-            "outer_boundary_cap_triangulation": outer_cap_record,
-            "outer_boundary_closed_from_frozen_simplified_loop": True,
-            "outer_to_extended_inner_face_count": int(len(strip_faces)),
-            "quality_diagnostics": {
-                "fallback_selected_after_50_percent_candidate_failure": True,
-                "simplified_boundary_vertex_count": int(count),
-                "three_dimensional_self_intersection": xyz_audit,
-                "quality_gates_blocking": False,
-            },
-        }
-        return InterfaceSurface(vertices=vertices, faces=np.asarray(mesh.faces), record=record)
-
-    return PairedInterfaceSurfaces(
-        tenon=build_side("tenon"),
-        mortise=build_side("mortise"),
-    )
 
 def build_pairwise_interface_surfaces(
     interface_plan: dict,
@@ -180,10 +44,11 @@ def build_pairwise_interface_surfaces(
     if not isinstance(interfaces, list):
         raise ValueError("Stage 04 interface plan has no interfaces list")
     role_index = interface_role_index(interface_plan)
-
     arrays: dict[str, np.ndarray] = {}
     records: list[dict] = []
-    mortise_probes = {}
+    mortise_source_triangles = {}
+    source_probe = LocalRayProbe(trimesh.Trimesh(vertices, faces, process=False))
+    source_ray_limit = max(float(np.linalg.norm(np.ptp(vertices, axis=0))) * 2, 1.0)
     for relation in interfaces:
         interface_id = str(relation.get("interface_id", ""))
         if not interface_id:
@@ -192,12 +57,13 @@ def build_pairwise_interface_surfaces(
         mortise_index = _part_index(roles["mortise_part"])
         if not 1 <= mortise_index <= len(components):
             raise ValueError(f"{interface_id}: mortise references an unknown part")
-        if mortise_index not in mortise_probes:
-            shell_vertices, shell_faces, _lookup, _global_ids = build_local_mesh(
-                vertices, faces, components[mortise_index - 1]
-            )
-            mortise_probes[mortise_index] = build_mortise_shell_probe(
-                shell_vertices[shell_faces]
+        if mortise_index not in mortise_source_triangles:
+            mortise_component = components[mortise_index - 1]
+            mortise_source_triangles[mortise_index] = (
+                vertices[faces[mortise_component.global_faces]]
+                if mortise_component is not None
+                and getattr(mortise_component, "global_faces", None) is not None
+                else None
             )
         axis = np.asarray(relation.get("mating_axis_toward_mortise"), dtype=np.float64)
         if axis.shape != (3,) or not np.isfinite(axis).all() or np.linalg.norm(axis) <= 1e-10:
@@ -226,22 +92,28 @@ def build_pairwise_interface_surfaces(
                 raise ValueError(f"{interface_id}: shared boundary points must be an N×3 array")
             if not np.isfinite(points).all():
                 raise ValueError(f"{interface_id}: shared boundary contains non-finite coordinates")
-            points, _ephemeral_ids, boundary_cleanup = remove_true_self_intersections_3d(
+            cleaned_points, _ephemeral_ids, boundary_cleanup = remove_true_self_intersections_3d(
                 points
             )
+            if not np.array_equal(cleaned_points, points):
+                raise ValueError(
+                    f"{interface_id}: frozen Stage 03 boundary crosses itself; "
+                    "repair the shared boundary before Stage 04"
+                )
             if len(points) < 3:
                 raise ValueError(f"{interface_id}: 3D crossing cleanup left fewer than three boundary points")
             simplified_boundary_point_count = len(points)
-            centered_points = points - points.mean(axis=0)
-            contact_axis = np.cross(
-                centered_points, np.roll(centered_points, -1, axis=0)
-            ).sum(axis=0)
-            contact_axis_length = float(np.linalg.norm(contact_axis))
-            if contact_axis_length <= 1e-10:
-                raise ValueError(f"{interface_id}: contact boundary has no stable local axis")
-            contact_axis /= contact_axis_length
-            if float(contact_axis @ axis) < 0.0:
-                contact_axis = -contact_axis
+            tenon_index = _part_index(roles["tenon_part"])
+            if not 1 <= tenon_index <= len(components):
+                raise ValueError(f"{interface_id}: tenon references an unknown part")
+            tenon_vertices, tenon_faces, _, _ = build_local_mesh(
+                vertices, faces, components[tenon_index - 1]
+            )
+            contact_axis, direction_audit = inward_interface_axis(
+                points, tenon_vertices[tenon_faces], source_probe=source_probe,
+                mortise_triangles=mortise_source_triangles[mortise_index],
+                toward_mortise=axis, maximum_mm=source_ray_limit,
+            )
             tenon_loop_index = int(loop.get("tenon_loop_index", -1))
             mortise_loop_index = int(loop.get("mortise_loop_index", -1))
             imprinted_host = (
@@ -253,33 +125,16 @@ def build_pairwise_interface_surfaces(
             stem = f"{interface_id.lower()}_loop_{loop_position:03d}"
             if not re.fullmatch(r"[a-z0-9_]+", stem):
                 raise ValueError(f"invalid interface array key: {stem!r}")
-            used_simplified_fallback = False
-            try:
-                pair = build_interface_surface_pair(
-                    boundary_points_mm=points,
-                    insertion_direction=contact_axis,
-                    socket_inward_direction=np.asarray(
-                        side_directions["mortise"], dtype=np.float64
-                    ),
-                    scale_ratio=scale_ratio,
-                    clearance_mm=clearance_mm,
-                    mortise_shell_probe=mortise_probes[mortise_index],
-                    interface_id=interface_id,
-                    extension_depth_limit_mm=MAX_INTERFACE_EXTENSION_MM,
-                )
-            except ValueError as primary_error:
-                used_simplified_fallback = True
-                pair = _build_simplified_boundary_fallback_pair(
-                    simplified_boundary=simplified_points,
-                    insertion_axis=contact_axis,
-                    clearance_mm=clearance_mm,
-                    mortise_shell_probe=mortise_probes[mortise_index],
-                    interface_id=interface_id,
-                )
-                points = pair.tenon.vertices[:pair.tenon.record["boundary_vertex_count"]]
-                simplified_boundary_point_count = len(points)
-                pair.tenon.record["fallback_reason"] = str(primary_error)
-                pair.mortise.record["fallback_reason"] = str(primary_error)
+            pair = build_interface_surface_pair(
+                boundary_points_mm=points,
+                insertion_direction=contact_axis,
+                socket_inward_direction=contact_axis,
+                scale_ratio=scale_ratio,
+                clearance_mm=clearance_mm,
+                mortise_shell_probe=source_probe,
+                interface_id=interface_id,
+                extension_depth_limit_mm=MAX_INTERFACE_EXTENSION_MM,
+            )
             paired_topology_matches = bool(
                 np.array_equal(pair.tenon.faces, pair.mortise.faces)
             )
@@ -288,12 +143,14 @@ def build_pairwise_interface_surfaces(
                 pair.tenon.record["extension_direction"], dtype=np.float64
             )
             socket_direction /= np.linalg.norm(socket_direction)
-            if float(np.dot(socket_direction, axis)) <= 1e-8:
+            if float(np.dot(socket_direction, contact_axis)) < 1.0 - 1e-7:
                 raise ValueError(
                     f"{interface_id}: construction axis does not point toward the mortise"
                 )
-            tenon_tip = pair.tenon.vertices[boundary_count : 2 * boundary_count]
-            mortise_floor = pair.mortise.vertices[boundary_count : 2 * boundary_count]
+            tip_start = pair.tenon.record["tip_vertex_start"]
+            tip_count = pair.tenon.record["tip_vertex_count"]
+            tenon_tip = pair.tenon.vertices[tip_start : tip_start + tip_count]
+            mortise_floor = pair.mortise.vertices[tip_start : tip_start + tip_count]
             tip_difference = mortise_floor - tenon_tip
             axial_gaps = tip_difference @ socket_direction
             radial_gaps = tip_difference - axial_gaps[:, None] * socket_direction
@@ -303,7 +160,7 @@ def build_pairwise_interface_surfaces(
             clearance_matches = bool(
                 np.allclose(measured_gaps, clearance_mm, atol=1e-7, rtol=1e-7)
                 and np.isclose(
-                    measured_depth_clearance, clearance_mm, atol=1e-7, rtol=1e-7
+                    measured_depth_clearance, pair.tenon.record.get("bottom_clearance_mm", clearance_mm), atol=1e-7, rtol=1e-7
                 )
             )
             for side, surface in (("tenon", pair.tenon), ("mortise", pair.mortise)):
@@ -320,15 +177,13 @@ def build_pairwise_interface_surfaces(
                 "simplified_boundary_point_count": int(simplified_boundary_point_count),
                 "densified_boundary_point_count": int(len(points)),
                 "boundary_densification_subdivisions": 0,
-                "selected_geometry_strategy": (
-                    "translated_simplified_boundary_1mm"
-                    if used_simplified_fallback else "scaled_inner_contour"
-                ),
+                "selected_geometry_strategy": pair.tenon.record["selected_strategy"],
                 "insertion_direction": relation.get("insertion_direction"),
                 "socket_inward_direction": relation.get("socket_inward_direction"),
                 "mating_axis_toward_mortise": axis.tolist(),
                 "stage04_insertion_direction": insertion_axis.tolist(),
                 "construction_axis_toward_mortise": socket_direction.tolist(),
+                "direction_audit": direction_audit,
                 "mean_inner_ring_clearance_mm": measured_gap,
                 "measured_clearance_mm": measured_gap,
                 "mean_mortise_bottom_clearance_mm": measured_depth_clearance,
@@ -351,13 +206,8 @@ def build_pairwise_interface_surfaces(
         "total_clearance_mm": float(clearance_mm),
         "extension_depth_limit_mm": MAX_INTERFACE_EXTENSION_MM,
         "extension_depth_minimum_mm": 0.2,
-        "extension_depth_policy": "halve_on_mortise_shell_hit_until_safe_or_minimum",
-        "mortise_collision_distance_threshold_mm": MORTISE_COLLISION_DISTANCE_THRESHOLD_MM,
-        "mortise_collision_ratio_threshold": MORTISE_COLLISION_RATIO_THRESHOLD,
-        "mortise_far_collision_distance_mm": MORTISE_FAR_COLLISION_DISTANCE_MM,
-        "mortise_far_collision_ratio_threshold": MORTISE_FAR_COLLISION_RATIO_THRESHOLD,
-        "collision_distance_bands": "short: (0.1, 1.0] mm; far: (1.0, infinity) mm; OR",
-        "collision_ratio_denominator": "all_probe_rays",
+        "extension_depth_policy": "local_cap_root_single_source_query",
+        "collision_acceptance_policy": "any_source_exit_blocks",
         "clearance_allocation": "mortise_only_full_side_and_bottom_clearance",
         "interface_surface_count": len(records),
         "interfaces": records,
@@ -436,6 +286,7 @@ def build_pairwise_part_meshes(
                     faces=interface_arrays[f"{stem}_{side}_faces"],
                     outer_vertex_count=record["densified_boundary_point_count"],
                     outer_cap_face_count=record[f"{side}_surface"]["outer_boundary_cap_face_count"],
+                    original_boundary_points=vertices[np.asarray(_loop["boundary_vertex_ids"], dtype=np.int64)],
                 ))
     parts = []
     part_records = []
@@ -450,6 +301,9 @@ def build_pairwise_part_meshes(
             )
         except ValueError as exc:
             raise ValueError(f"{part_id}: {exc}") from exc
+        source_face_origin_indices = np.asarray(
+            composition.pop("source_face_origin_indices"), dtype=np.int64
+        )
         source_mesh = trimesh.Trimesh(
             vertices=source_vertices, faces=source_faces, process=False
         )
@@ -478,7 +332,8 @@ def build_pairwise_part_meshes(
             "mesh": mesh,
         }
         if face_color_tokens is not None:
-            source_tokens = np.asarray(face_color_tokens)[component.global_faces].astype(object)
+            completed_face_ids = np.asarray(component.global_faces)
+            source_tokens = np.asarray(face_color_tokens)[completed_face_ids].astype(object)
             if len(source_tokens) != len(source_faces):
                 raise ValueError(f"{part_id}: source face colors do not align with the mesh")
             recolored_faces = 0
@@ -486,10 +341,11 @@ def build_pairwise_part_meshes(
                 from .source_face_ownership import color_assigned_faces_as_part
 
                 source_tokens, recolored_faces = color_assigned_faces_as_part(
-                    source_tokens, component.global_faces,
+                    source_tokens, completed_face_ids,
                     recognized_components[index - 1].global_faces, color_code,
                 )
             composition["assigned_source_faces_recolored_to_part_color"] = recolored_faces
+            source_tokens = source_tokens[source_face_origin_indices]
             generated_count = len(mesh.faces) - len(source_tokens)
             if generated_count < 0:
                 raise ValueError(f"{part_id}: composition lost source triangles")

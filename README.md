@@ -46,7 +46,7 @@
 复制下面这段话发给 AI 助手：
 
 ```text
-请从 https://github.com/BensonZeng00/automated-3d-model-splitting 安装 automated-3d-model-splitting 2.1.0 Skill 和所需依赖。装好后，问我是否用仓库自带的小猫头 cathead.3mf 试一次。
+请从 https://github.com/BensonZeng00/automated-3d-model-splitting 安装 automated-3d-model-splitting 3.0.0 Skill 和所需依赖。装好后，问我是否用仓库自带的小猫头 cathead.3mf 试一次。
 ```
 
 可以先用示例熟悉流程，也可以直接提供自己的模型。
@@ -83,4 +83,4 @@ AI 还会说明拆出了多少个零件、配色是否保留、检查是否通�
 
 ---
 
-当前版本：`2.1.0` · [测试结果与已验证范围](TEST_RESULTS.md) · [参与贡献](CONTRIBUTING.md) · [PolyForm Noncommercial 1.0.0](LICENSE)
+当前版本：`3.0.0` · [测试结果与已验证范围](TEST_RESULTS.md) · [参与贡献](CONTRIBUTING.md) · [PolyForm Noncommercial 1.0.0](LICENSE)

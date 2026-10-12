@@ -1,5 +1,7 @@
 # CLI reference
 
+Current release: `3.0.0`.
+
 Run `python scripts/split_painted_3mf.py --help` for the active options. The source must be a vendor-painted `.3mf`.
 
 ```powershell

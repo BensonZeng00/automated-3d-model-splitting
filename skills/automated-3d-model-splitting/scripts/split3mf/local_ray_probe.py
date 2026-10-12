@@ -18,6 +18,13 @@ class LocalRayProbe:
 
     def exits(self, points, directions, maximum_mm, epsilon=1e-7):
         """Return first outward exits within the bound; NaN means no bounded hit."""
+        return self._hits(points, directions, maximum_mm, epsilon, outward_only=True)
+
+    def first_hits(self, points, directions, maximum_mm, epsilon=1e-7):
+        """Return the first surface hit, including entries, for side classification."""
+        return self._hits(points, directions, maximum_mm, epsilon, outward_only=False)
+
+    def _hits(self, points, directions, maximum_mm, epsilon, *, outward_only):
         points = np.asarray(points, dtype=float).reshape((-1, 3))
         directions = np.broadcast_to(np.asarray(directions, dtype=float), points.shape).copy()
         lengths = np.linalg.norm(directions, axis=1)
@@ -50,7 +57,8 @@ class LocalRayProbe:
             e, g = triangles[:, 1]-a, triangles[:, 2]-a
             h = np.cross(axis, g)
             det = np.einsum('ij,ij->i', e, h)
-            valid = np.einsum('ij,j->i', np.cross(e, g), axis) > 1e-12
+            facing = np.einsum('ij,j->i', np.cross(e, g), axis)
+            valid = facing > 1e-12 if outward_only else np.abs(facing) > 1e-12
             ids, a, e, g, h, det = ids[valid], a[valid], e[valid], g[valid], h[valid], det[valid]
             delta = point-a
             u = np.einsum('ij,ij->i', delta, h)/det

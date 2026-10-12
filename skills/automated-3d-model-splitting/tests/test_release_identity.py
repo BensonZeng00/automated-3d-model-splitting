@@ -8,7 +8,7 @@ import unittest
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 TECHNICAL_ID = "automated-3d-model-splitting"
-VERSION = "2.1.0"
+VERSION = "3.0.0"
 
 
 class ReleaseIdentityTests(unittest.TestCase):

@@ -37,6 +37,7 @@ class RequiredImageSemanticsTests(unittest.TestCase):
             (images / "manifest.json").write_text(json.dumps({
                 "schema_version": 2, "source": "example.3mf", "source_face_count": 8,
                 "noise_max_faces": 100, "small_region_max_faces": 999,
+                "max_review_candidates": 10,
                 "items": [{"fragment_id": 1, "source_min_face_index": 0}],
             }), encoding="utf-8")
             summary = {

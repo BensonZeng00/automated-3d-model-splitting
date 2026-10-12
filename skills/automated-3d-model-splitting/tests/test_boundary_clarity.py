@@ -79,28 +79,28 @@ class BoundaryClarityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             candidate = next(c for c in self.graph.propose(labels,self.graph.assess(labels)) if c['admissible'])
             path = Path(directory) / 'approval.json'
-            decision = dict(fingerprint=self.graph.fingerprint(labels,'input'), user_confirmed=True,
+            decision = dict(fingerprint=self.graph.fingerprint(labels,'generated_interface'), user_confirmed=True,
                             selected_candidate=candidate['id'],
-                            candidate_fingerprint=self.graph.fingerprint(candidate['owners'],'input'))
+                            candidate_fingerprint=self.graph.fingerprint(candidate['owners'],'generated_interface'))
             path.write_text(json.dumps({'decisions': [decision]}), encoding='utf-8')
             approved, result = BoundaryReviewService(Path(directory), path).prepare(
-                self.mesh.vertices, self.mesh.faces, labels)
+                self.mesh.vertices, self.mesh.faces, labels, context='generated_interface')
             self.assertEqual(result['status'], 'user_confirmed')
             self.assertTrue(self.graph.assess(approved).clear)
             decision['candidate_fingerprint'] = 'stale'
             path.write_text(json.dumps(decision), encoding='utf-8')
             with self.assertRaises(BoundaryDecisionError):
-                BoundaryReviewService(Path(directory), path).prepare(self.mesh.vertices, self.mesh.faces, labels)
+                BoundaryReviewService(Path(directory), path).prepare(self.mesh.vertices, self.mesh.faces, labels, context='generated_interface')
             decision['user_confirmed'] = False
             path.write_text(json.dumps(decision), encoding='utf-8')
             with self.assertRaises(BoundaryDecisionError):
-                BoundaryReviewService(Path(directory), path).prepare(self.mesh.vertices, self.mesh.faces, labels)
+                BoundaryReviewService(Path(directory), path).prepare(self.mesh.vertices, self.mesh.faces, labels, context='generated_interface')
 
     def test_above_one_percent_uses_impact_assessment_and_continues(self):
         labels = self.ambiguous_labels()
         with tempfile.TemporaryDirectory() as directory:
             actual, report = BoundaryReviewService(Path(directory)).prepare(
-                self.mesh.vertices, self.mesh.faces, labels)
+                self.mesh.vertices, self.mesh.faces, labels, context='generated_interface')
         self.assertEqual(report['status'],'completion_priority_local_merge')
         self.assertFalse(report['area_policy']['automatic'])
         self.assertTrue(report['completion_assessment']['exterior_unchanged'])
@@ -112,31 +112,20 @@ class BoundaryClarityTests(unittest.TestCase):
                 with patch('split3mf.boundary_preview.render_boundary_review', return_value=[]):
                     with self.assertRaises(BoundaryReviewRequired):
                         BoundaryReviewService(Path(directory)).prepare(
-                            self.mesh.vertices, self.mesh.faces, self.ambiguous_labels())
+                            self.mesh.vertices, self.mesh.faces, self.ambiguous_labels(), context='generated_interface')
             self.assertEqual(search.call_args.kwargs['max_candidates'], 3)
 
-    def test_dense_fragmented_paint_uses_relative_micro_candidate(self):
+    def test_ambiguous_source_is_diagnostic_and_keeps_ownership(self):
         labels = self.ambiguous_labels()
-        assessment = self.graph.assess(labels)
-        assessment.uncertain_faces = np.arange(3000)
-        candidate = self.graph.propose(labels, self.graph.assess(labels))[0]
-        candidate['admissible'] = False
-        dense_faces = np.tile(self.mesh.faces, (1300, 1))
-        dense_labels = np.tile(labels, 1300)
-        # Keep this unit focused on the policy; production candidates still
-        # come from the full dense graph and retain their own assessment.
-        with tempfile.TemporaryDirectory() as directory, \
-             patch.object(BoundaryGraph, 'assess', return_value=assessment), \
-             patch.object(BoundaryGraph, 'propose', return_value=[candidate]), \
-             patch('split3mf.boundary_budget.BoundaryAreaBudget.evaluate',
-                   return_value=dict(automatic=True, identities_preserved=True,
-                       changed_face_count=1, regions=[dict(owner='A',
-                           affected_area_mm2=.01, source_region_area_mm2=100.,
-                           affected_area_ratio=.0001)])):
-            _owners, report = BoundaryReviewService(Path(directory)).prepare(
-                np.tile(self.mesh.vertices, (1300, 1)), dense_faces, dense_labels)
-        self.assertEqual(report['status'], 'fragmented_paint_completion')
-        self.assertTrue(report['completion_assessment']['downstream_geometry_audits_required'])
+        with tempfile.TemporaryDirectory() as directory:
+            with patch('split3mf.boundary_simplification.simplify_crossing_ownership',
+                       side_effect=AssertionError('source ownership must not be cleaned')):
+                actual, report = BoundaryReviewService(Path(directory)).prepare(
+                    self.mesh.vertices, self.mesh.faces, labels, context='input')
+        np.testing.assert_array_equal(actual, labels)
+        self.assertEqual(report['status'], 'source_diagnostics')
+        self.assertEqual(report['source_diagnostics'], 'non_blocking')
+        self.assertFalse(report['ownership_changed'])
 
     def test_component_reassignment_does_not_repaint_or_mutate_components(self):
         areas = triangle_areas(self.mesh.vertices, self.mesh.faces)

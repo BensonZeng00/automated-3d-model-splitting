@@ -40,22 +40,30 @@ def interface_table(plan: dict) -> dict:
     rows = []
     for interface in plan.get("interfaces", []):
         contact = interface.get("contact", {})
+        direction_evidence = interface.get("direction_evidence", {})
+        role_decision = {
+            "inward_alignment": "内向法线",
+            "large_area_difference": "面积悬殊，小面积者优先",
+            "smaller_region_tiebreak": "面积较小者优先",
+            "user_requested_smaller_area_first": "按确认关系指定榫方",
+            "user_requested_larger_area_first": "按确认关系指定榫方",
+            "user_confirmed_part_center_axis": "已确认的零件中心接合方向",
+            "user_confirmed_local_surface_axis": "已确认的局部接合面插入方向",
+        }.get(str(direction_evidence.get("method") or ""),
+              str(direction_evidence.get("method") or "待确认"))
+        orientation = {
+            "paired_region_surface_side_probe": "榫卯区域归属定向",
+            "source_interior_single_sided": "源模型单侧内向证据",
+            "mixed_per_loop_direction_evidence": "逐边界方向证据",
+        }.get(str(direction_evidence.get("insertion_axis_source") or ""))
+        direction_label = f"{role_decision}；{orientation}" if orientation else role_decision
         rows.append([
             str(interface["interface_id"]),
             part_label(str(interface["tenon_part"])),
             part_label(str(interface["mortise_part"])),
             len(contact.get("shared_boundary_loops", [])),
             int(contact.get("shared_boundary_sample_count", 0)),
-            {
-                "inward_alignment": "内向法线",
-                "large_area_difference": "面积悬殊，小面积者优先",
-                "smaller_region_tiebreak": "面积较小者优先",
-                "user_confirmed_part_center_axis": "已确认的零件中心接合方向",
-                "user_confirmed_local_surface_axis": "已确认的局部接合面插入方向",
-            }.get(
-                str(interface.get("direction_evidence", {}).get("method") or ""),
-                str(interface.get("direction_evidence", {}).get("method") or "待确认"),
-            ),
+            direction_label,
         ])
     return {
         "columns": ["接口", "榫方", "卯方", "共用简化边界数", "边界采样点数", "方向依据"],

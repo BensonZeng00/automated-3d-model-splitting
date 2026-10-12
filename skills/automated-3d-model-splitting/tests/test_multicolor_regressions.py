@@ -54,7 +54,6 @@ class ExteriorRecognitionRegressionTests(unittest.TestCase):
         recognized, report = recognition_colors_from_exterior(
             colors,
             visible,
-            body_color_override="BODY",
             faces=faces,
         )
 
@@ -72,17 +71,16 @@ class ExteriorRecognitionRegressionTests(unittest.TestCase):
             ],
             dtype=np.int64,
         )
-        colors = ["DETAIL", "DETAIL", "BODY", "DETAIL"]
+        colors = ["DETAIL", "DETAIL", "DEFAULT", "DETAIL"]
         visible = np.array([False, True, True, True], dtype=bool)
 
         recognized, report = recognition_colors_from_exterior(
             colors,
             visible,
-            body_color_override="BODY",
             faces=faces,
         )
 
-        self.assertEqual(recognized[0], "BODY")
+        self.assertEqual(recognized[0], "DEFAULT")
         self.assertEqual(report["protected_enclosed_occluded_faces"], 0)
         self.assertEqual(report["reassigned_occluded_faces"], 1)
 
@@ -98,13 +96,12 @@ class ExteriorRecognitionRegressionTests(unittest.TestCase):
             ],
             dtype=np.int64,
         )
-        colors = ["DETAIL", "DETAIL", "BODY", "DETAIL"]
+        colors = ["DETAIL", "DETAIL", "DEFAULT", "DETAIL"]
         visible = np.array([False, True, False, True], dtype=bool)
 
         recognized, report = recognition_colors_from_exterior(
             colors,
             visible,
-            body_color_override="BODY",
             faces=faces,
         )
 

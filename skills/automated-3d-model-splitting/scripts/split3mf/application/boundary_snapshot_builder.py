@@ -7,11 +7,12 @@ import numpy as np
 from ..mesh import boundary_loops, build_local_mesh
 from ..boundary_matching import compare_boundary_loops
 from ..common import Component
+from ..boundary_smoothing import MAX_RELATIVE_SHAPE_CHANGE, smooth_closed_loop_by_arclength
 from .recognized_boundaries import RecognizedBoundaries
 
 MINIMUM_BOUNDARY_LOOP_SPAN_MM = 1.0
 MAX_SIMPLIFIED_EDGE_MM = 0.5
-MAX_SMOOTHING_DISPLACEMENT_MM = 0.05
+BOUNDARY_SMOOTHING_SIGMA_MM = 4.0
 SMALL_LOOP_RETAINED_FRACTIONS = ((100, 0.80), (200, 0.50))
 
 
@@ -129,6 +130,11 @@ class BoundarySnapshotBuilder:
                     retained_in_filtered = _equal_arc_sample_indices(
                         filtered_points, retained_count
                     )
+                    shape_tolerance = min(0.25, 0.02 * span)
+                    while (len(retained_in_filtered) < len(filtered_points)
+                           and _maximum_sampling_deviation(filtered_points, retained_in_filtered) > shape_tolerance):
+                        retained_count = min(len(filtered_points), max(retained_count + 1, retained_count * 2))
+                        retained_in_filtered = _equal_arc_sample_indices(filtered_points, retained_count)
                     retained = filtered_source_indices[retained_in_filtered]
                     status = (
                         "simplified"
@@ -149,9 +155,15 @@ class BoundarySnapshotBuilder:
                     })
                     continue
                 simplified_ids = source_ids[retained]
-                simplified_points = _bounded_smooth_closed_loop(
-                    np.asarray(vertices[simplified_ids], dtype=np.float64)
+                sampled_points = np.asarray(vertices[simplified_ids], dtype=np.float64)
+                smoothed_points, smoothing = smooth_closed_loop_by_arclength(
+                    sampled_points, BOUNDARY_SMOOTHING_SIGMA_MM
                 )
+                shape_limit = MAX_RELATIVE_SHAPE_CHANGE * span
+                smoothing_accepted = smoothing["maximum_displacement_mm"] <= shape_limit
+                simplified_points = smoothed_points if smoothing_accepted else sampled_points
+                if len(simplified_ids) == len(source_ids):
+                    status = "unchanged"
                 record = {
                     "component_index": component_index,
                     "loop_index": loop_index,
@@ -165,10 +177,15 @@ class BoundarySnapshotBuilder:
                     ),
                     "perimeter_mm": perimeter,
                     "span_mm": span,
-                    "smoothing_algorithm": "taubin_closed_loop",
-                    "smoothing_iterations": 6,
-                    "maximum_smoothing_displacement_mm": MAX_SMOOTHING_DISPLACEMENT_MM,
+                    "smoothing_algorithm": smoothing["algorithm"] if smoothing_accepted else "preserve_sparse_or_shape_sensitive_loop",
+                    "smoothing_sigma_mm": BOUNDARY_SMOOTHING_SIGMA_MM,
+                    "smoothing_maximum_displacement_mm": smoothing["maximum_displacement_mm"] if smoothing_accepted else 0.0,
+                    "smoothing_rejected_displacement_mm": None if smoothing_accepted else smoothing["maximum_displacement_mm"],
+                    "maximum_relative_shape_change": MAX_RELATIVE_SHAPE_CHANGE,
                     "maximum_simplified_edge_mm": MAX_SIMPLIFIED_EDGE_MM,
+                    "maximum_sampling_deviation_mm": _maximum_sampling_deviation(
+                        source_points, retained
+                    ) if len(retained) < len(source_ids) else 0.0,
                 }
                 simplification_records.append(record)
                 loops_for_component.append(tuple(int(value) for value in simplified_ids))
@@ -368,46 +385,6 @@ def _is_geometrically_degenerate_loop(points: np.ndarray) -> bool:
     return largest <= 1e-18 or second <= largest * 1e-8
 
 
-def _taubin_smooth_closed_loop(
-    points: np.ndarray,
-    *,
-    iterations: int = 6,
-    relaxation: float = 0.35,
-    inflation: float = -0.36,
-) -> np.ndarray:
-    """Smooth a cyclic polyline in place conceptually, preserving sample count.
-
-    Taubin's positive/negative Laplacian passes reduce high-frequency contour
-    noise while counteracting the shrinkage of ordinary Laplacian smoothing.
-    Every input sample remains represented by one output point.
-    """
-    smoothed = np.asarray(points, dtype=np.float64).copy()
-    if len(smoothed) < 3:
-        return smoothed
-    for _ in range(max(0, int(iterations))):
-        neighbors = (np.roll(smoothed, 1, axis=0) + np.roll(smoothed, -1, axis=0)) * 0.5
-        smoothed += float(relaxation) * (neighbors - smoothed)
-        neighbors = (np.roll(smoothed, 1, axis=0) + np.roll(smoothed, -1, axis=0)) * 0.5
-        smoothed += float(inflation) * (neighbors - smoothed)
-    return smoothed
-
-
-def _bounded_smooth_closed_loop(points: np.ndarray) -> np.ndarray:
-    """Limit smoothing drift so a simplified contour remains on its source seam."""
-    original = np.asarray(points, dtype=np.float64)
-    smoothed = _taubin_smooth_closed_loop(original)
-    offsets = smoothed - original
-    lengths = np.linalg.norm(offsets, axis=1)
-    scale = np.minimum(
-        1.0,
-        np.divide(
-            MAX_SMOOTHING_DISPLACEMENT_MM,
-            lengths,
-            out=np.ones_like(lengths),
-            where=lengths > 1e-12,
-        ),
-    )
-    return original + offsets * scale[:, None]
 
 
 def _retained_fraction_for_loop(point_count: int, default_fraction: float) -> float:
@@ -416,6 +393,26 @@ def _retained_fraction_for_loop(point_count: int, default_fraction: float) -> fl
         if int(point_count) < upper_bound:
             return fraction
     return float(default_fraction)
+
+
+def _maximum_sampling_deviation(points: np.ndarray, retained_indices: np.ndarray) -> float:
+    """Measure how far skipped points depart from each retained chord."""
+    values = np.asarray(points, dtype=np.float64)
+    retained = np.asarray(retained_indices, dtype=np.int64)
+    if len(retained) == len(values):
+        return 0.0
+    largest = 0.0
+    for first, last in zip(retained, np.r_[retained[1:], retained[0] + len(values)]):
+        ids = np.arange(first + 1, last, dtype=np.int64) % len(values)
+        if not len(ids):
+            continue
+        start, finish = values[first], values[last % len(values)]
+        chord = finish - start
+        squared = float(chord @ chord)
+        fraction = (values[ids] - start) @ chord / max(squared, 1e-18)
+        closest = start + np.clip(fraction, 0.0, 1.0)[:, None] * chord
+        largest = max(largest, float(np.linalg.norm(values[ids] - closest, axis=1).max()))
+    return largest
 
 
 def _equal_arc_sample_indices(points: np.ndarray, sample_count: int) -> np.ndarray:

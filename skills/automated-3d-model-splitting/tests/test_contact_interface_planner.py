@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import patch
 
 import numpy as np
+import trimesh
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from split3mf import common
@@ -29,17 +30,24 @@ class ContactInterfacePlannerTests(unittest.TestCase):
             source_vertex_count=126, source_face_count=0, fingerprint="test",
         )
         components = [
-            Component("A", np.array([], dtype=np.int64), 0, areas[0],
+            Component("A", np.array([0], dtype=np.int64), 1, areas[0],
                       first.min(axis=0), first.max(axis=0), np.array([0.0, 0.0, 0.0])),
-            Component("B", np.array([], dtype=np.int64), 0, areas[1],
+            Component("B", np.array([1], dtype=np.int64), 1, areas[1],
                       second.min(axis=0), second.max(axis=0), np.array([0.0, 0.0, 1.0])),
         ]
         with patch(
             "split3mf.contact_interface_planner._component_inward_direction",
             return_value=np.array([0.0, 0.0, 1.0]),
+        ), patch(
+            "split3mf.contact_interface_planner.inward_interface_axis",
+            return_value=(np.array([0.0, 0.0, -1.0]), {
+                "method": "confirmed_roles_source_interior",
+                "selection": "only_source_interior_side",
+            }),
         ):
+            solid = trimesh.creation.box(extents=(4, 4, 2))
             return plan_contact_interfaces(
-                np.zeros((1, 3)), np.zeros((0, 3), dtype=np.int64),
+                solid.vertices, solid.faces,
                 components, boundaries, np.zeros(3), **options,
             )
 
@@ -84,7 +92,7 @@ class ContactInterfacePlannerTests(unittest.TestCase):
         self.assertEqual(relation["tenon_part"], "P02")
         self.assertEqual(
             relation["direction_evidence"]["insertion_axis_source"],
-            "contact_boundary_area_normal",
+            "source_interior_single_sided",
         )
         np.testing.assert_allclose(relation["insertion_direction"], [0, 0, -1])
         np.testing.assert_allclose(relation["mating_axis_toward_mortise"], [0, 0, -1])

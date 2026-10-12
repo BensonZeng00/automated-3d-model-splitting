@@ -9,6 +9,7 @@ import numpy as np
 from scipy.spatial import ConvexHull, QhullError, cKDTree
 import trimesh
 from .boundary_matching import distances_to_loop
+from .boundary_smoothing import MAX_RELATIVE_SHAPE_CHANGE
 
 from .mesh import triangulate_boundary_cap_without_center
 
@@ -21,6 +22,7 @@ class InterfaceAttachment:
     faces: np.ndarray
     outer_vertex_count: int
     outer_cap_face_count: int
+    original_boundary_points: np.ndarray | None = None
 
 
 def _oriented_source_boundary_loops(
@@ -100,90 +102,59 @@ def _ordered_bridge(
     target_points: np.ndarray,
     target_ids: np.ndarray,
 ) -> list[tuple[int, int, int]]:
-    """Triangulate a monotone ribbon by matching normalized boundary arclength."""
-    def spaced_samples(points: np.ndarray) -> np.ndarray:
-        edge_lengths = np.linalg.norm(
-            np.roll(points, -1, axis=0) - points, axis=1
-        )
-        cumulative = np.r_[0.0, np.cumsum(edge_lengths)]
-        distances = np.linspace(0.0, cumulative[-1], 64, endpoint=False)
-        indices = np.searchsorted(cumulative, distances, side="right") - 1
-        fractions = (distances - cumulative[indices]) / np.maximum(
-            edge_lengths[indices], 1e-12
-        )
-        return (
-            points[indices] * (1.0 - fractions[:, None])
-            + points[(indices + 1) % len(points)] * fractions[:, None]
-        )
-
-    source_samples = spaced_samples(source_points)
-    reversed_points = np.concatenate((target_points[:1], target_points[:0:-1]))
-    reversed_ids = np.concatenate((target_ids[:1], target_ids[:0:-1]))
-    alignments = []
-    for oriented_points, oriented_ids, orientation in (
-        (target_points, target_ids, "forward"),
-        (reversed_points, reversed_ids, "reverse"),
-    ):
-        target_samples = spaced_samples(oriented_points)
-        costs = [
-            float(np.linalg.norm(
-                source_samples - np.roll(target_samples, shift, axis=0), axis=1
-            ).mean())
-            for shift in range(len(source_samples))
-        ]
-        shift = int(np.argmin(costs))
-        approximate_offset = int(round(-shift * len(oriented_ids) / len(source_samples)))
-        for adjustment in range(-2, 3):
-            offset = approximate_offset + adjustment
-            rotated_points = np.roll(oriented_points, offset, axis=0)
-            rotated_samples = spaced_samples(rotated_points)
-            cost = float(np.linalg.norm(source_samples - rotated_samples, axis=1).mean())
-            alignments.append((cost, rotated_points, np.roll(oriented_ids, offset), orientation))
-    _alignment_cost, target_points, target_ids, _orientation = min(
-        alignments, key=lambda item: item[0]
-    )
+    """Find a short monotone ribbon between unequal cyclic contours."""
+    source_points = np.asarray(source_points, dtype=np.float64)
+    target_points = np.asarray(target_points, dtype=np.float64)
+    source_ids = np.asarray(source_ids, dtype=np.int64)
+    target_ids = np.asarray(target_ids, dtype=np.int64)
     ns, nt = len(source_ids), len(target_ids)
-    nearest_targets = cKDTree(target_points).query(source_points)[1]
-    # Unwrap the nearest-point sequence around the closed contour, then remove
-    # local reversals caused by close self-approaching arcs. This tracks actual
-    # geometric correspondence instead of assuming both rims have uniform
-    # point density along the same normalized arclength.
-    nearest_targets = np.asarray(nearest_targets, dtype=np.int64)
-    nearest_targets = np.rint(np.unwrap(
-        nearest_targets * (2.0 * np.pi / len(target_ids))
-    ) * (len(target_ids) / (2.0 * np.pi))).astype(np.int64)
-    nearest_targets -= nearest_targets[0]
-    nearest_targets = np.maximum.accumulate(nearest_targets)
-    nearest_targets = np.clip(nearest_targets, 0, len(target_ids))
-    faces: list[tuple[int, int, int]] = []
-    source_index = target_index = 0
-    while source_index < ns or target_index < nt:
-        desired_target = (
-            int(nearest_targets[source_index + 1])
-            if source_index + 1 < ns else nt
-        )
-        if target_index < min(desired_target, nt):
-            faces.append((
-                int(source_ids[source_index % ns]),
-                int(target_ids[(target_index + 1) % nt]),
-                int(target_ids[target_index % nt]),
-            ))
-            target_index += 1
-        elif source_index < ns:
-            faces.append((
-                int(source_ids[source_index % ns]),
-                int(source_ids[(source_index + 1) % ns]),
-                int(target_ids[target_index % nt]),
-            ))
-            source_index += 1
-        else:
-            faces.append((
-                int(source_ids[source_index % ns]),
-                int(target_ids[(target_index + 1) % nt]),
-                int(target_ids[target_index % nt]),
-            ))
-            target_index += 1
-    return faces
+
+    def solve(oriented_points: np.ndarray, oriented_ids: np.ndarray):
+        points = np.vstack((oriented_points, oriented_points[:1]))
+        source = np.vstack((source_points, source_points[:1]))
+        width = nt + 1
+        predecessor = np.empty((ns + 1, width), dtype=np.int32)
+        previous = np.cumsum(np.linalg.norm(source[0] - points, axis=1))
+        predecessor[0] = np.arange(width)
+        columns = np.arange(width, dtype=np.int32)
+        for row in range(1, ns + 1):
+            costs = np.linalg.norm(source[row] - points, axis=1)
+            prefix = np.cumsum(costs)
+            candidates = previous - np.r_[0.0, prefix[:-1]]
+            minima = np.minimum.accumulate(candidates)
+            changed = np.r_[True, candidates[1:] < minima[:-1]]
+            predecessor[row] = np.maximum.accumulate(np.where(changed, columns, 0))
+            previous = prefix + minima
+        faces = []
+        row, column = ns, nt
+        while row:
+            entered = int(predecessor[row, column])
+            while column > entered:
+                faces.append((int(source_ids[row % ns]),
+                              int(oriented_ids[column % nt]),
+                              int(oriented_ids[(column-1) % nt])))
+                column -= 1
+            faces.append((int(source_ids[(row-1) % ns]),
+                          int(source_ids[row % ns]),
+                          int(oriented_ids[column % nt])))
+            row -= 1
+        while column:
+            faces.append((int(source_ids[0]), int(oriented_ids[column % nt]),
+                          int(oriented_ids[(column-1) % nt])))
+            column -= 1
+        return float(previous[-1]), faces
+
+    best = None
+    for points, ids in ((target_points, target_ids),
+                        (target_points[::-1], target_ids[::-1])):
+        closest = int(cKDTree(points).query(source_points[0])[1])
+        for offset in ((closest - 1) % nt, closest, (closest + 1) % nt):
+            aligned_points = np.roll(points, -offset, axis=0)
+            aligned_ids = np.roll(ids, -offset)
+            cost, faces = solve(aligned_points, aligned_ids)
+            if best is None or cost < best[0]:
+                best = cost, faces
+    return list(reversed(best[1]))
 
 
 def compose_part_with_interface(
@@ -354,10 +325,17 @@ def compose_part_with_interfaces(
         interface_faces = np.asarray(attachment.faces, dtype=np.int64)
         outer_count = int(attachment.outer_vertex_count)
         cap_count = int(attachment.outer_cap_face_count)
-        if cap_count <= 0 or cap_count >= len(interface_faces):
-            raise ValueError(f"{attachment.interface_id}: interface outer cap is missing")
-        if outer_count < 3 or len(interface_vertices) < 2 * outer_count:
+        if cap_count < 0 or cap_count >= len(interface_faces):
+            raise ValueError(f"{attachment.interface_id}: invalid removable cap count")
+        if outer_count < 3 or len(interface_vertices) < outer_count:
             raise ValueError(f"{attachment.interface_id}: interface rings have invalid counts")
+        if cap_count == 0:
+            patch = trimesh.Trimesh(interface_vertices, interface_faces, process=False)
+            counts = np.bincount(patch.edges_unique_inverse)
+            boundary = {tuple(edge) for edge in patch.edges_unique[counts == 1]}
+            expected = {tuple(sorted((i, (i+1) % outer_count))) for i in range(outer_count)}
+            if boundary != expected or np.any(counts > 2):
+                raise ValueError(f"{attachment.interface_id}: direct closure patch has invalid boundary")
         outer_points = interface_vertices[:outer_count]
         candidates = []
         for position, loop in enumerate(loops):
@@ -371,7 +349,7 @@ def compose_part_with_interfaces(
         _, selected, distances = min(candidates, key=lambda item: item[0])
         span = float(np.linalg.norm(np.ptp(outer_points, axis=0)))
         maximum_distance = float(distances.max())
-        allowed_distance = max(0.15, 0.04 * span)
+        allowed_distance = 0.15 + MAX_RELATIVE_SHAPE_CHANGE * span
         if maximum_distance > allowed_distance:
             raise ValueError(
                 f"{attachment.interface_id}: exterior is too far from the simplified interface "
@@ -380,15 +358,138 @@ def compose_part_with_interfaces(
         selected_loops.add(selected)
         assignments.append((attachment, selected, distances))
 
+    # The frozen Stage 03 contours define the cut through source triangles.
+    # Clipping at interpolated edge crossings avoids a staircase source rim.
+    from .surface_collar_remesh import clip_source_surface
+    from .surface_transition_validation import transition_self_intersection_count
+    collar_records = []
+    for attachment, selected, original_distances in assignments:
+        source_loop = np.asarray(loops[selected], dtype=np.int64)
+        original = attachment.original_boundary_points
+        target = np.asarray(attachment.vertices[:attachment.outer_vertex_count], dtype=np.float64)
+        displacement = (
+            float(np.linalg.norm(np.asarray(original) - target, axis=1).max())
+            if original is not None and np.shape(original) == np.shape(target)
+            else float(original_distances.max())
+        )
+        if displacement < 1e-4:
+            displacement = 0.0
+        source_points = source_vertices[source_loop]
+        edge_lengths = np.linalg.norm(source_points - np.roll(source_points, -1, axis=0), axis=1)
+        spacing = float(np.quantile(edge_lengths, 0.95))
+        width = original_distances.max() + spacing if displacement else 0.0
+        others = [
+            source_vertices[np.asarray(loops[other_selected], dtype=np.int64)]
+            for other_attachment, other_selected, _ in assignments
+            if other_attachment is not attachment
+        ]
+        if others:
+            separation = min(float(cKDTree(other).query(source_points)[0].min()) for other in others)
+            width = min(width, 0.3 * separation)
+        collar_records.append({
+            "interface_id": attachment.interface_id, "side": attachment.side,
+            "boundary_displacement_mm": displacement,
+            "source_to_frozen_gap_mm": float(original_distances.max()),
+            "local_spacing_mm": spacing, "collar_width_mm": float(width),
+        })
+
+    original_gaps = {
+        id(attachment): float(distances.max()) for attachment, _, distances in assignments
+    }
+    original_loops = {
+        id(attachment): np.asarray(loops[selected], dtype=np.int64)
+        for attachment, selected, _ in assignments
+    }
+    baseline_crossings: dict[int, int] = {}
+
+    def ribbon_crossings(mesh_vertices: np.ndarray, loop: np.ndarray,
+                         attachment: InterfaceAttachment) -> int:
+        target = np.asarray(attachment.vertices[:attachment.outer_vertex_count], dtype=np.float64)
+        target_ids = np.arange(len(target), dtype=np.int64) + len(mesh_vertices)
+        ribbon = _ordered_bridge(mesh_vertices[loop], loop, target, target_ids)
+        return transition_self_intersection_count(
+            np.vstack((mesh_vertices, target)), np.asarray(ribbon, dtype=np.int64)
+        )
+
+    attachment_positions = {id(attachment): position for position, attachment in enumerate(attachments)}
+    for collar_scale in (1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.49, 0.48,
+                         0.45, 0.4, 0.3, 0.25, 0.2, 0.125, 0.0625, 0.0):
+        widths = [record["collar_width_mm"] * collar_scale for record in collar_records]
+        clipped_vertices, retained_source_faces, source_face_origins, clip_record = (
+            clip_source_surface(
+                source_vertices, source_faces,
+                [np.asarray(item.vertices[:item.outer_vertex_count], dtype=np.float64)
+                 for item, _, _ in assignments],
+                widths,
+                [original_loops[id(item)] for item, _, _ in assignments],
+            )
+        )
+        retained_triangles = clipped_vertices[retained_source_faces]
+        retained_twice_areas = np.linalg.norm(np.cross(
+            retained_triangles[:, 1] - retained_triangles[:, 0],
+            retained_triangles[:, 2] - retained_triangles[:, 0],
+        ), axis=1)
+        if np.any(retained_twice_areas <= 2e-10):
+            continue
+        candidate_loops = _oriented_source_boundary_loops(clipped_vertices, retained_source_faces)
+        candidate_assignments = []
+        selected_loops = set()
+        for attachment in attachments:
+            target = np.asarray(attachment.vertices[:attachment.outer_vertex_count], dtype=np.float64)
+            candidates = []
+            for position, loop in enumerate(candidate_loops):
+                if position in selected_loops:
+                    continue
+                distances = distances_to_loop(target, clipped_vertices[np.asarray(loop)])
+                candidates.append((float(np.quantile(distances, 0.95)), position, distances))
+            if not candidates:
+                break
+            _, selected, distances = min(candidates, key=lambda item: item[0])
+            permitted_gap = max(
+                1.5 * original_gaps[id(attachment)],
+                1.5 * widths[attachment_positions[id(attachment)]],
+                0.15,
+            )
+            if float(distances.max()) > permitted_gap + 1e-6:
+                break
+            selected_loops.add(selected)
+            candidate_assignments.append((attachment, selected, distances))
+        if len(candidate_assignments) != len(attachments):
+            continue
+        candidate_crossings = []
+        collision_regression = False
+        for attachment, selected, _ in candidate_assignments:
+            crossing = ribbon_crossings(
+                clipped_vertices, np.asarray(candidate_loops[selected], dtype=np.int64),
+                attachment,
+            )
+            candidate_crossings.append(crossing)
+            if crossing:
+                key = id(attachment)
+                if key not in baseline_crossings:
+                    baseline_crossings[key] = ribbon_crossings(
+                        source_vertices, original_loops[key], attachment,
+                    )
+                if crossing > baseline_crossings[key]:
+                    collision_regression = True
+                    break
+        if not collision_regression:
+            source_vertices = clipped_vertices
+            loops = candidate_loops
+            assignments = candidate_assignments
+            break
+    else:
+        raise ValueError("frozen-boundary surface remeshing cannot retain separate valid rims")
+
     vertices = source_vertices.tolist()
-    faces = source_faces.tolist()
+    faces = retained_source_faces.tolist()
     source_edges = np.sort(np.vstack((
-        source_faces[:, [0, 1]], source_faces[:, [1, 2]], source_faces[:, [2, 0]],
+        retained_source_faces[:, [0, 1]], retained_source_faces[:, [1, 2]], retained_source_faces[:, [2, 0]],
     )), axis=1)
     occupied_edges = set(map(tuple, source_edges.tolist()))
     source_directed_edges = {
         (int(left), int(right))
-        for face in source_faces
+        for face in retained_source_faces
         for left, right in ((face[0], face[1]), (face[1], face[2]), (face[2], face[0]))
     }
     capped_small_loops = 0
@@ -427,7 +528,7 @@ def compose_part_with_interfaces(
             del faces[previous_face_count:]
             try:
                 cap_record = _append_planar_convex_cap(
-                    vertices, faces, loop, source_vertices, source_faces,
+                    vertices, faces, loop, source_vertices, retained_source_faces,
                     source_area_mm2,
                 )
             except ValueError as exc:
@@ -484,8 +585,18 @@ def compose_part_with_interfaces(
         bridge_lengths = np.linalg.norm(
             bridge_triangles - np.roll(bridge_triangles, -1, axis=1), axis=2
         )
+        bridge_cross = np.cross(
+            bridge_triangles[:, 1] - bridge_triangles[:, 0],
+            bridge_triangles[:, 2] - bridge_triangles[:, 0],
+        )
+        bridge_twice_areas = np.linalg.norm(bridge_cross, axis=1)
+        bridge_altitudes = bridge_twice_areas / np.maximum(bridge_lengths.max(axis=1), 1e-12)
+        if np.any(bridge_twice_areas <= 1e-10):
+            raise ValueError(f"{attachment.interface_id}: surface transition has degenerate triangles")
         faces.extend(bridge_faces)
-        faces.extend((interface_faces[:-attachment.outer_cap_face_count] + offset).tolist())
+        kept = (interface_faces[:-attachment.outer_cap_face_count]
+                if attachment.outer_cap_face_count else interface_faces)
+        faces.extend((kept + offset).tolist())
         interface_records.append({
             "interface_id": attachment.interface_id,
             "side": attachment.side,
@@ -493,6 +604,8 @@ def compose_part_with_interfaces(
             "simplified_interface_boundary_points": int(outer_count),
             "maximum_boundary_gap_mm": float(distances.max()),
             "bridge_maximum_edge_mm": float(bridge_lengths.max()),
+            "bridge_minimum_altitude_mm": float(bridge_altitudes.min()),
+            "bridge_faces_below_0_01mm_altitude": int(np.count_nonzero(bridge_altitudes < 0.01)),
             "outer_cap_faces_removed": int(attachment.outer_cap_face_count),
         })
     mesh = trimesh.Trimesh(
@@ -502,7 +615,16 @@ def compose_part_with_interfaces(
     trimesh.repair.fix_winding(mesh)
     trimesh.repair.fix_inversion(mesh, multibody=True)
     return mesh, {
-        "source_exterior_faces_preserved": int(len(source_faces)),
+        "source_exterior_faces_preserved": int(len(retained_source_faces)),
+        "source_exterior_faces_replaced": int(clip_record["source_faces_removed"]),
+        "source_face_origin_indices": source_face_origins.tolist(),
+        "source_surface_remesh": clip_record,
+        "interface_collars": collar_records,
+        "interface_collar_scale": collar_scale,
+        "transition_self_intersections": [
+            {"interface_id": item.interface_id, "side": item.side, "crossings": count}
+            for (item, _, _), count in zip(assignments, candidate_crossings)
+        ],
         "small_source_loops_closed": int(capped_small_loops),
         "reconstructed_nonplanar_caps": reconstructed_nonplanar_caps,
         "bridge_strategy": "geometric_monotone_nearest_ribbon",

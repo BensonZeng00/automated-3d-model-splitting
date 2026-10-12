@@ -17,7 +17,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 SKILL_ROOT = REPOSITORY_ROOT / "skills" / "automated-3d-model-splitting"
 TECHNICAL_ID = "automated-3d-model-splitting"
 DISPLAY_NAME = "自动化3d模型拆件"
-VERSION = "2.1.0"
+VERSION = "3.0.0"
 
 
 def read(relative: str) -> str:

@@ -46,7 +46,7 @@ AIアシスタント向けのSkill（スキル）です。Skillのインスト�
 次の文章をコピーして送ってください。
 
 ```text
-https://github.com/BensonZeng00/automated-3d-model-splitting から automated-3d-model-splitting 2.1.0 Skill と必要な依存関係をインストールしてください。完了したら、付属の猫の頭のサンプル cathead.3mf で試すか確認してください。
+https://github.com/BensonZeng00/automated-3d-model-splitting から automated-3d-model-splitting 3.0.0 Skill と必要な依存関係をインストールしてください。完了したら、付属の猫の頭のサンプル cathead.3mf で試すか確認してください。
 ```
 
 サンプルで流れを試しても、自分のモデルから始めても構いません。
@@ -81,4 +81,4 @@ AIはパーツ数、配色の保持、検証の合否、確認が必要な点も
 
 ---
 
-現在のバージョン：`2.1.0` · [テスト結果と検証範囲](TEST_RESULTS.md) · [貢献ガイド](CONTRIBUTING.md) · [PolyForm Noncommercial 1.0.0](LICENSE)
+現在のバージョン：`3.0.0` · [テスト結果と検証範囲](TEST_RESULTS.md) · [貢献ガイド](CONTRIBUTING.md) · [PolyForm Noncommercial 1.0.0](LICENSE)

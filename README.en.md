@@ -46,7 +46,7 @@ This is a Skill for an AI assistant. Use an assistant environment that supports 
 Copy and send this prompt:
 
 ```text
-Install the automated-3d-model-splitting 2.1.0 Skill and its required dependencies from https://github.com/BensonZeng00/automated-3d-model-splitting. Once installed, ask whether I'd like to try the bundled cathead.3mf example.
+Install the automated-3d-model-splitting 3.0.0 Skill and its required dependencies from https://github.com/BensonZeng00/automated-3d-model-splitting. Once installed, ask whether I'd like to try the bundled cathead.3mf example.
 ```
 
 Start with the example to get familiar with the process, or provide your own model.
@@ -81,4 +81,4 @@ This project uses [PolyForm Noncommercial 1.0.0](LICENSE). Permitted noncommerci
 
 ---
 
-Current version: `2.1.0` · [Test results and verified scope](TEST_RESULTS.md) · [Contributing](CONTRIBUTING.md) · [PolyForm Noncommercial 1.0.0](LICENSE)
+Current version: `3.0.0` · [Test results and verified scope](TEST_RESULTS.md) · [Contributing](CONTRIBUTING.md) · [PolyForm Noncommercial 1.0.0](LICENSE)

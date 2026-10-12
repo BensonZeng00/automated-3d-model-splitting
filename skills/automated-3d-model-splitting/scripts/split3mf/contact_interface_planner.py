@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 
 import numpy as np
+import trimesh
 
 from .boundary_matching import (
     MINIMUM_BOUNDARY_COVERAGE,
@@ -10,8 +11,9 @@ from .boundary_matching import (
     compare_loop_to_boundary_segments,
 )
 from .mesh import average_outward_normal, build_local_mesh, boundary_loops
+from .interface_direction import inward_interface_axis
+from .local_ray_probe import LocalRayProbe
 from .source_face_ownership import complete_component_face_ownership
-from .application.boundary_snapshot_builder import MAX_SMOOTHING_DISPLACEMENT_MM
 
 
 def _component_inward_direction(
@@ -22,26 +24,6 @@ def _component_inward_direction(
     return -average_outward_normal(
         local_vertices, local_faces, component_center, model_center
     )
-
-
-def _contact_axis_toward_host(
-    loops: list[np.ndarray], fallback: np.ndarray, toward_host: np.ndarray
-) -> tuple[np.ndarray, str]:
-    """Use the joined seam's local area normal for the insertion direction."""
-    area_vector = np.zeros(3, dtype=np.float64)
-    for points in loops:
-        centered = points - points.mean(axis=0)
-        area_vector += np.cross(centered, np.roll(centered, -1, axis=0)).sum(axis=0)
-    length = float(np.linalg.norm(area_vector))
-    if length <= 1e-10:
-        direction = np.asarray(fallback, dtype=np.float64).copy()
-        source = "component_inward_fallback"
-    else:
-        direction = area_vector / length
-        source = "contact_boundary_area_normal"
-    if float(np.dot(direction, toward_host)) < 0.0:
-        direction = -direction
-    return direction, source
 
 
 def _fragmented_host_contacts(
@@ -87,7 +69,7 @@ def _fragmented_host_contacts(
         for loop_index, points in loops:
             frozen_edges = np.linalg.norm(np.roll(points, -1, axis=0) - points, axis=1)
             median_spacing = float(np.median(frozen_edges))
-            smoothing = MAX_SMOOTHING_DISPLACEMENT_MM
+            smoothing = 0.0  # The Stage 03 contour already contains its final smoothing.
             tolerance = min(0.60, max(0.08, 0.30 * median_spacing, 0.06 * float(np.ptp(points, axis=0).max())))
             scored = []
             for host in range(1, len(components) + 1):
@@ -266,6 +248,8 @@ def plan_contact_interfaces(
         for index, component in enumerate(components, start=1)
     }
     relations = []
+    source_probe = LocalRayProbe(trimesh.Trimesh(vertices, faces, process=False))
+    source_ray_limit = max(float(np.linalg.norm(np.ptp(vertices, axis=0))) * 2, 1.0)
     for interface_number, (left, right) in enumerate(sorted(contact_pairs), start=1):
         samples = contact_pairs[(left, right)]
         left_center, right_center = part_centers[left], part_centers[right]
@@ -315,9 +299,35 @@ def plan_contact_interfaces(
             simplified_loop_points[(tenon, left_loop if tenon == left else right_loop)]
             for left_loop, right_loop in sorted(loop_contacts[(left, right)])
         ]
-        insertion_axis, insertion_axis_source = _contact_axis_toward_host(
-            tenon_contact_loops, inward[tenon], toward_host
-        )
+        tenon_triangles = vertices[faces[components[tenon - 1].global_faces]]
+        mortise_triangles = vertices[faces[components[mortise - 1].global_faces]]
+        local_axis_results = [
+            inward_interface_axis(
+                points, tenon_triangles, source_probe=source_probe,
+                mortise_triangles=mortise_triangles,
+                toward_mortise=toward_host, maximum_mm=source_ray_limit,
+            )
+            for points in tenon_contact_loops
+        ]
+        local_axes = [result[0] for result in local_axis_results]
+        local_axis_evidence = [result[1] for result in local_axis_results]
+        insertion_axis = np.sum(local_axes, axis=0)
+        axis_length = float(np.linalg.norm(insertion_axis))
+        if axis_length <= 1e-10:
+            raise ValueError(f"{interface_id}: local interface axes cancel")
+        insertion_axis /= axis_length
+        orientation_selections = {
+            str(evidence.get("selection", "unspecified"))
+            for evidence in local_axis_evidence
+        }
+        if orientation_selections == {"opposite_outward_source_boundary"}:
+            insertion_axis_source = "confirmed_tenon_source_boundary_orientation"
+        elif orientation_selections == {"paired_region_ownership_toward_confirmed_mortise"}:
+            insertion_axis_source = "paired_region_surface_side_probe"
+        elif orientation_selections == {"only_source_interior_side"}:
+            insertion_axis_source = "source_interior_single_sided"
+        else:
+            insertion_axis_source = "mixed_per_loop_direction_evidence"
         relations.append({
             "interface_id": interface_id,
             "parts": [f"P{left:02d}", f"P{right:02d}"],
@@ -368,15 +378,13 @@ def plan_contact_interfaces(
             },
             "tenon_part": f"P{tenon:02d}",
             "mortise_part": f"P{mortise:02d}",
-            "mating_axis_toward_mortise": (
-                (part_centers[mortise] - part_centers[tenon])
-                / max(float(np.linalg.norm(part_centers[mortise] - part_centers[tenon])), 1e-12)
-            ).round(6).tolist(),
+            "mating_axis_toward_mortise": insertion_axis.round(6).tolist(),
             "insertion_direction": insertion_axis.round(6).tolist(),
-            "socket_inward_direction": inward[mortise].round(6).tolist(),
+            "socket_inward_direction": insertion_axis.round(6).tolist(),
             "direction_evidence": {
                 "method": decision,
                 "insertion_axis_source": insertion_axis_source,
+                "per_loop_orientation_evidence": local_axis_evidence,
                 "insertion_axis_center_alignment": round(float(
                     insertion_axis @ (
                         toward_host / max(float(np.linalg.norm(toward_host)), 1e-12)

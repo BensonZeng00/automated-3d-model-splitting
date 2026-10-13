@@ -1,0 +1,79 @@
+{
+  "parts": {
+    "P01": {
+      "label": "白色头部及胸腹连续区域",
+      "confidence": "HIGH",
+      "visual_evidence": "03_recognition_boundaries.png 与 opposite 视图中边界颜色对照图例定位；左右均以正面预览为准。"
+    },
+    "P02": {
+      "label": "正面图左侧白色脚掌",
+      "confidence": "HIGH",
+      "visual_evidence": "03_recognition_boundaries.png 与 opposite 视图中边界颜色对照图例定位；左右均以正面预览为准。"
+    },
+    "P03": {
+      "label": "正面图右侧白色脚掌",
+      "confidence": "HIGH",
+      "visual_evidence": "03_recognition_boundaries.png 与 opposite 视图中边界颜色对照图例定位；左右均以正面预览为准。"
+    },
+    "P04": {
+      "label": "正面图左侧白色眼部",
+      "confidence": "HIGH",
+      "visual_evidence": "03_recognition_boundaries.png 与 opposite 视图中边界颜色对照图例定位；左右均以正面预览为准。"
+    },
+    "P05": {
+      "label": "正面图右侧白色眼部",
+      "confidence": "HIGH",
+      "visual_evidence": "03_recognition_boundaries.png 与 opposite 视图中边界颜色对照图例定位；左右均以正面预览为准。"
+    },
+    "P06": {
+      "label": "黑色躯干及四肢连续区域",
+      "confidence": "HIGH",
+      "visual_evidence": "03_recognition_boundaries.png 与 opposite 视图中边界颜色对照图例定位；左右均以正面预览为准。"
+    },
+    "P07": {
+      "label": "正面图左侧黑色耳朵",
+      "confidence": "HIGH",
+      "visual_evidence": "03_recognition_boundaries.png 与 opposite 视图中边界颜色对照图例定位；左右均以正面预览为准。"
+    },
+    "P08": {
+      "label": "正面图右侧黑色耳朵",
+      "confidence": "HIGH",
+      "visual_evidence": "03_recognition_boundaries.png 与 opposite 视图中边界颜色对照图例定位；左右均以正面预览为准。"
+    },
+    "P09": {
+      "label": "正面图左侧黑色眼圈",
+      "confidence": "HIGH",
+      "visual_evidence": "03_recognition_boundaries.png 与 opposite 视图中边界颜色对照图例定位；左右均以正面预览为准。"
+    },
+    "P10": {
+      "label": "正面图右侧黑色眼圈",
+      "confidence": "HIGH",
+      "visual_evidence": "03_recognition_boundaries.png 与 opposite 视图中边界颜色对照图例定位；左右均以正面预览为准。"
+    },
+    "P11": {
+      "label": "黑色鼻子",
+      "confidence": "HIGH",
+      "visual_evidence": "03_recognition_boundaries.png 与 opposite 视图中边界颜色对照图例定位；左右均以正面预览为准。"
+    },
+    "P12": {
+      "label": "正面图左侧脚掌双趾黑色区域",
+      "confidence": "HIGH",
+      "visual_evidence": "03_recognition_boundaries.png 与 opposite 视图中边界颜色对照图例定位；左右均以正面预览为准。"
+    },
+    "P13": {
+      "label": "正面图右侧脚掌双趾黑色区域",
+      "confidence": "HIGH",
+      "visual_evidence": "03_recognition_boundaries.png 与 opposite 视图中边界颜色对照图例定位；左右均以正面预览为准。"
+    },
+    "P14": {
+      "label": "正面图左侧脚掌单趾黑色区域",
+      "confidence": "HIGH",
+      "visual_evidence": "03_recognition_boundaries.png 与 opposite 视图中边界颜色对照图例定位；左右均以正面预览为准。"
+    },
+    "P15": {
+      "label": "正面图右侧脚掌单趾黑色区域",
+      "confidence": "HIGH",
+      "visual_evidence": "03_recognition_boundaries.png 与 opposite 视图中边界颜色对照图例定位；左右均以正面预览为准。"
+    }
+  }
+}

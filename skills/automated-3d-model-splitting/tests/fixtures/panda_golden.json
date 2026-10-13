@@ -1,0 +1,260 @@
+{
+  "schema": "panda-golden-regression/v1",
+  "source_sha256": "729e939f8ba91dd03be90b1bf2d87a781d8f4278d76260a73fc823e86bc017f4",
+  "source_face_count": 590091,
+  "regions": [
+    {
+      "part": "P01",
+      "source_min_face_index": 3121,
+      "face_count": 212590,
+      "color_code": "0C"
+    },
+    {
+      "part": "P02",
+      "source_min_face_index": 20196,
+      "face_count": 5738,
+      "color_code": "0C"
+    },
+    {
+      "part": "P03",
+      "source_min_face_index": 33689,
+      "face_count": 4173,
+      "color_code": "0C"
+    },
+    {
+      "part": "P04",
+      "source_min_face_index": 55123,
+      "face_count": 2889,
+      "color_code": "0C"
+    },
+    {
+      "part": "P05",
+      "source_min_face_index": 3429,
+      "face_count": 2661,
+      "color_code": "0C"
+    },
+    {
+      "part": "P06",
+      "source_min_face_index": 0,
+      "face_count": 176705,
+      "color_code": "4C"
+    },
+    {
+      "part": "P07",
+      "source_min_face_index": 3377,
+      "face_count": 40452,
+      "color_code": "4C"
+    },
+    {
+      "part": "P08",
+      "source_min_face_index": 107513,
+      "face_count": 39546,
+      "color_code": "4C"
+    },
+    {
+      "part": "P09",
+      "source_min_face_index": 55096,
+      "face_count": 14532,
+      "color_code": "4C"
+    },
+    {
+      "part": "P10",
+      "source_min_face_index": 3412,
+      "face_count": 14294,
+      "color_code": "4C"
+    },
+    {
+      "part": "P11",
+      "source_min_face_index": 25963,
+      "face_count": 8013,
+      "color_code": "4C"
+    },
+    {
+      "part": "P12",
+      "source_min_face_index": 20162,
+      "face_count": 3422,
+      "color_code": "4C"
+    },
+    {
+      "part": "P13",
+      "source_min_face_index": 33698,
+      "face_count": 3293,
+      "color_code": "4C"
+    },
+    {
+      "part": "P14",
+      "source_min_face_index": 20183,
+      "face_count": 1646,
+      "color_code": "4C"
+    },
+    {
+      "part": "P15",
+      "source_min_face_index": 34584,
+      "face_count": 1612,
+      "color_code": "4C"
+    }
+  ],
+  "interfaces": [
+    {
+      "interface_id": "I001",
+      "tenon_part": "P01",
+      "mortise_part": "P06",
+      "insertion_direction": [
+        5.3e-05,
+        0.439847,
+        -0.898072
+      ]
+    },
+    {
+      "interface_id": "I002",
+      "tenon_part": "P07",
+      "mortise_part": "P01",
+      "insertion_direction": [
+        0.857003,
+        -0.11793,
+        -0.501636
+      ]
+    },
+    {
+      "interface_id": "I003",
+      "tenon_part": "P08",
+      "mortise_part": "P01",
+      "insertion_direction": [
+        -0.855997,
+        -0.120876,
+        -0.502651
+      ]
+    },
+    {
+      "interface_id": "I004",
+      "tenon_part": "P09",
+      "mortise_part": "P01",
+      "insertion_direction": [
+        0.503571,
+        0.859818,
+        0.084429
+      ]
+    },
+    {
+      "interface_id": "I005",
+      "tenon_part": "P10",
+      "mortise_part": "P01",
+      "insertion_direction": [
+        -0.503336,
+        0.859612,
+        0.087862
+      ]
+    },
+    {
+      "interface_id": "I006",
+      "tenon_part": "P11",
+      "mortise_part": "P01",
+      "insertion_direction": [
+        -0.001362,
+        0.888511,
+        -0.458852
+      ]
+    },
+    {
+      "interface_id": "I007",
+      "tenon_part": "P02",
+      "mortise_part": "P06",
+      "insertion_direction": [
+        0.412603,
+        0.884294,
+        0.218592
+      ]
+    },
+    {
+      "interface_id": "I008",
+      "tenon_part": "P12",
+      "mortise_part": "P02",
+      "insertion_direction": [
+        0.382783,
+        0.901083,
+        0.203781
+      ]
+    },
+    {
+      "interface_id": "I009",
+      "tenon_part": "P14",
+      "mortise_part": "P02",
+      "insertion_direction": [
+        0.412929,
+        0.885251,
+        0.214055
+      ]
+    },
+    {
+      "interface_id": "I010",
+      "tenon_part": "P03",
+      "mortise_part": "P06",
+      "insertion_direction": [
+        -0.412177,
+        0.884577,
+        0.218248
+      ]
+    },
+    {
+      "interface_id": "I011",
+      "tenon_part": "P13",
+      "mortise_part": "P03",
+      "insertion_direction": [
+        -0.383476,
+        0.900702,
+        0.204161
+      ]
+    },
+    {
+      "interface_id": "I012",
+      "tenon_part": "P15",
+      "mortise_part": "P03",
+      "insertion_direction": [
+        -0.413779,
+        0.884817,
+        0.214212
+      ]
+    },
+    {
+      "interface_id": "I013",
+      "tenon_part": "P04",
+      "mortise_part": "P09",
+      "insertion_direction": [
+        0.465878,
+        0.878604,
+        -0.10494
+      ]
+    },
+    {
+      "interface_id": "I014",
+      "tenon_part": "P05",
+      "mortise_part": "P10",
+      "insertion_direction": [
+        -0.462405,
+        0.880355,
+        -0.10563
+      ]
+    }
+  ],
+  "part_colors": {
+    "P01": "#FFFFFFFF",
+    "P02": "#FFFFFFFF",
+    "P03": "#FFFFFFFF",
+    "P04": "#FFFFFFFF",
+    "P05": "#FFFFFFFF",
+    "P06": "#000000FF",
+    "P07": "#000000FF",
+    "P08": "#000000FF",
+    "P09": "#000000FF",
+    "P10": "#000000FF",
+    "P11": "#000000FF",
+    "P12": "#000000FF",
+    "P13": "#000000FF",
+    "P14": "#000000FF",
+    "P15": "#000000FF"
+  },
+  "max_axis_angle_degrees": 15,
+  "surface_vertex_p99_mm": 1.0,
+  "bbox_tolerance_mm": 1.0,
+  "approved_sha256": "56aab7a63ee6f6ca4e9adc9f708e0a87a695ab407c6001c6d23ab90e5f4f8b1b"
+}

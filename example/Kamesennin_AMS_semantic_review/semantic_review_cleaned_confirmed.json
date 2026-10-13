@@ -1,0 +1,133 @@
+{
+  "schema": "painted-3mf-semantic-proposals/v1",
+  "source_run_dir": "/workspace/automated-3d-model-splitting/example/Kamesennin_AMS_split_parts_stages/4c50fea34a624ee0b294314b666fbc5c",
+  "region_review_dir": "/workspace/automated-3d-model-splitting/example/Kamesennin+AMS_region_review",
+  "user_confirmed": true,
+  "parts": {
+    "P01": {
+      "label": "肤色头部、躯干与四肢主体",
+      "confidence": "HIGH",
+      "evidence": "最大连续肤色区域覆盖头部、上身及两臂，面积约 29214 mm²，边界连接多处独立涂色细节。"
+    },
+    "P02": {
+      "label": "白色胡须",
+      "confidence": "HIGH",
+      "evidence": "正面与侧面边界预览中，白色区域从口鼻下方向胸前延伸，呈胡须造型；面积约 1153 mm²。"
+    },
+    "P03": {
+      "label": "白色腰带与垂布",
+      "confidence": "HIGH",
+      "evidence": "正面边界预览中，白色区域绕腰并连接垂落到蓝色裤装前方的布条；有两个边界环，面积约 2551 mm²。"
+    },
+    "P04": {
+      "label": "眼镜上方白色小装饰",
+      "confidence": "MED",
+      "evidence": "边界预览显示该白色小区域位于头部前侧、眼镜上缘附近；面积约 45 mm²。"
+    },
+    "P05": {
+      "label": "眼镜上方白色细长装饰",
+      "confidence": "MED",
+      "evidence": "审核视图中为头部前侧眼镜上缘附近的细长白色片，长度明显大于宽度；面积约 34.6 mm²。"
+    },
+    "P06": {
+      "label": "眼镜左侧白色细节",
+      "confidence": "MED",
+      "evidence": "候选预览中位于脸部眼镜附近，与右侧 F003 成对；白色区域面积约 25 mm²。"
+    },
+    "P07": {
+      "label": "胡须下缘白色小片",
+      "confidence": "LOW",
+      "evidence": "候选区域位于白色胡须下缘附近，面积约 3.7 mm²；具体是否独立造型细节不清楚。"
+    },
+    "P08": {
+      "label": "眼镜右侧白色细节",
+      "confidence": "MED",
+      "evidence": "候选预览中位于脸部眼镜附近，与左侧 F002 成对；白色区域面积约 23 mm²。"
+    },
+    "P09": {
+      "label": "画面左侧裸露脚趾",
+      "confidence": "HIGH",
+      "evidence": "边界预览中位于黑色鞋面与蓝色裤脚下方，呈肤色脚趾形状；面积约 289 mm²。"
+    },
+    "P10": {
+      "label": "画面右侧裸露脚趾",
+      "confidence": "HIGH",
+      "evidence": "边界预览中位于另一只黑色鞋面与蓝色裤脚下方，呈肤色脚趾形状；面积约 282 mm²。"
+    },
+    "P11": {
+      "label": "黑色太阳镜镜框",
+      "confidence": "HIGH",
+      "evidence": "头部前侧黑色区域勾勒两片镜片及连接桥，面积约 528 mm²。"
+    },
+    "P12": {
+      "label": "画面左侧黑色鞋子",
+      "confidence": "HIGH",
+      "evidence": "模型底部左侧的大面积黑色区域与裸露脚趾相邻，符合一只鞋的外形；面积约 1543 mm²。"
+    },
+    "P13": {
+      "label": "画面右侧黑色鞋子",
+      "confidence": "HIGH",
+      "evidence": "模型底部右侧的大面积黑色区域与裸露脚趾相邻，符合另一只鞋的外形；面积约 1502 mm²。"
+    },
+    "P14": {
+      "label": "蓝色裤装主体",
+      "confidence": "HIGH",
+      "evidence": "大面积蓝色区域覆盖双腿与臀部下半身，面积约 14636 mm²。"
+    },
+    "P15": {
+      "label": "蓝色裤腰上缘",
+      "confidence": "MED",
+      "evidence": "蓝色区域位于裤装上缘，介于腰带垂布和裤腿主体之间；面积约 635 mm²。"
+    }
+  },
+  "fragments": {
+    "F001": {
+      "label": "白色头部细长装饰",
+      "confidence": "MED",
+      "evidence": "候选高亮位于头部前侧眼镜上缘附近，呈细长带状，白色区域约 34.58 mm²。",
+      "suggested_classification": "part"
+    },
+    "F002": {
+      "label": "眼镜左侧白色细节",
+      "confidence": "MED",
+      "evidence": "高亮在眼镜左侧附近；与 F003 位于相对两侧，形状和白色材料相近，面积约 24.99 mm²。",
+      "suggested_classification": "part"
+    },
+    "F003": {
+      "label": "眼镜右侧白色细节",
+      "confidence": "MED",
+      "evidence": "高亮在眼镜右侧附近；与 F002 成对，面积约 23.21 mm²。",
+      "suggested_classification": "part"
+    },
+    "F004": {
+      "label": "胡须下缘白色小片",
+      "confidence": "LOW",
+      "evidence": "高亮位于脸部下方、较大的白色胡须区域边缘，面积约 3.72 mm²；作为小型独立白色细节保留。",
+      "suggested_classification": "part"
+    },
+    "F005": {
+      "label": "蓝色裤装小色块",
+      "confidence": "LOW",
+      "evidence": "高亮是裤装上的小面积蓝色片段，没有明显独立轮廓或配件形态，面积约 1.87 mm²。",
+      "suggested_classification": "noise"
+    },
+    "F006": {
+      "label": "肤色下肢小片",
+      "confidence": "LOW",
+      "evidence": "高亮是下肢附近的微小肤色片段，仅 19 面、面积约 1.59 mm²；未见独立部件形状。",
+      "suggested_classification": "noise"
+    },
+    "F007": {
+      "label": "另一侧肤色下肢小片",
+      "confidence": "LOW",
+      "evidence": "高亮位于下肢另一侧，与 F006 材料和尺寸接近；仅 35 面、面积约 1.51 mm²。",
+      "suggested_classification": "noise"
+    },
+    "F008": {
+      "label": "肤色躯干小片",
+      "confidence": "LOW",
+      "evidence": "高亮是躯干或手臂附近的微小肤色片段，仅 92 面、面积约 1.41 mm²；未见独立部件形状。",
+      "suggested_classification": "noise"
+    }
+  }
+}

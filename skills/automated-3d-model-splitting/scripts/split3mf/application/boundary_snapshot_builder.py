@@ -8,6 +8,8 @@ from ..mesh import boundary_loops, build_local_mesh
 from ..boundary_matching import compare_boundary_loops
 from ..common import Component
 from ..boundary_smoothing import MAX_RELATIVE_SHAPE_CHANGE, smooth_closed_loop_by_arclength
+from ..spatial_intersections import clean_tiny_boundary_contacts_3d
+from ..source_contact_segments import SourceContactEdges, retained_arc_labels
 from .recognized_boundaries import RecognizedBoundaries
 
 MINIMUM_BOUNDARY_LOOP_SPAN_MM = 1.0
@@ -54,6 +56,8 @@ class BoundarySnapshotBuilder:
     ) -> RecognizedBoundaries:
         component_loops: list[tuple[tuple[int, ...], ...]] = []
         component_loop_points: list[tuple[tuple[tuple[float, float, float], ...], ...]] = []
+        component_loop_contact_labels: list[tuple[tuple[int, ...], ...]] = []
+        contacts = SourceContactEdges(len(vertices), faces, components)
         retained_component_indices: list[int] = []
         simplification_records: list[dict] = []
         excluded_components: list[dict] = []
@@ -67,6 +71,7 @@ class BoundarySnapshotBuilder:
             )
             loops_for_component = []
             points_for_component = []
+            labels_for_component = []
             loop_perimeters = [
                 float(np.linalg.norm(
                     np.roll(np.asarray(vertices[np.asarray(loop, dtype=np.int64)]), -1, axis=0)
@@ -76,6 +81,7 @@ class BoundarySnapshotBuilder:
             ]
             for loop_index, source_loop in enumerate(raw_loops, start=1):
                 source_ids = np.asarray(source_loop, dtype=np.int64)
+                source_labels = contacts.labels(source_ids, component_index)
                 source_points = np.asarray(vertices[source_ids], dtype=np.float64)
                 perimeter = loop_perimeters[loop_index - 1]
                 span = float(np.max(np.ptp(source_points, axis=0))) if len(source_points) else 0.0
@@ -139,6 +145,8 @@ class BoundarySnapshotBuilder:
                         retained_count = min(len(filtered_points), max(retained_count + 1, retained_count * 2))
                         retained_in_filtered = _equal_arc_sample_indices(filtered_points, retained_count)
                     retained = filtered_source_indices[retained_in_filtered]
+                    junctions = np.flatnonzero(source_labels != np.roll(source_labels, 1))
+                    retained = np.unique(np.concatenate((retained, junctions)))
                     status = (
                         "simplified"
                         if len(retained) < len(source_ids) or len(filtered_source_indices) < len(source_ids)
@@ -165,6 +173,10 @@ class BoundarySnapshotBuilder:
                 shape_limit = MAX_RELATIVE_SHAPE_CHANGE * span
                 smoothing_accepted = smoothing["maximum_displacement_mm"] <= shape_limit
                 simplified_points = smoothed_points if smoothing_accepted else sampled_points
+                simplified_points, simplified_ids, contact_cleanup = clean_tiny_boundary_contacts_3d(
+                    simplified_points, simplified_ids
+                )
+                frozen_labels = retained_arc_labels(source_ids, source_labels, simplified_ids)
                 if len(simplified_ids) == len(source_ids):
                     status = "unchanged"
                 record = {
@@ -192,6 +204,7 @@ class BoundarySnapshotBuilder:
                     "maximum_sampling_deviation_mm": _maximum_sampling_deviation(
                         source_points, retained
                     ) if len(retained) < len(source_ids) else 0.0,
+                    "contact_cleanup_3d": contact_cleanup,
                 }
                 simplification_records.append(record)
                 loops_for_component.append(tuple(int(value) for value in simplified_ids))
@@ -199,6 +212,7 @@ class BoundarySnapshotBuilder:
                     tuple(float(value) for value in point)
                     for point in simplified_points
                 ))
+                labels_for_component.append(tuple(map(int, frozen_labels)))
             loops = tuple(loops_for_component)
             point_loops = tuple(points_for_component)
             if not loops:
@@ -222,11 +236,18 @@ class BoundarySnapshotBuilder:
                 continue
             component_loops.append(loops)
             component_loop_points.append(point_loops)
+            component_loop_contact_labels.append(tuple(labels_for_component))
             retained_component_indices.append(component_index)
-        component_loops, component_loop_points = _filter_unpaired_component_loops(
-            component_loops, component_loop_points, retained_component_indices,
+        component_loops, component_loop_points, component_loop_contact_labels = _filter_unpaired_component_loops(
+            component_loops, component_loop_points, component_loop_contact_labels, retained_component_indices,
             simplification_records,
         )
+        part_index_map = {old: new for new, old in enumerate(retained_component_indices, start=1)}
+        component_loop_contact_labels = [
+            tuple(tuple(part_index_map.get(label, 0) if label > 0 else label
+                        for label in loop) for loop in loops)
+            for loops in component_loop_contact_labels
+        ]
         digest = hashlib.sha256()
         for component_index, loops in enumerate(component_loops, start=1):
             digest.update(np.asarray([component_index], dtype=np.int64).tobytes())
@@ -237,9 +258,14 @@ class BoundarySnapshotBuilder:
             for loop_points in point_loops:
                 digest.update(np.asarray(loop_points, dtype=np.float64).tobytes())
                 digest.update(b"\0")
+        for label_loops in component_loop_contact_labels:
+            for labels in label_loops:
+                digest.update(np.asarray(labels, dtype=np.int32).tobytes())
+                digest.update(b"\0")
         return RecognizedBoundaries(
             component_loops=tuple(component_loops),
             component_loop_points=tuple(component_loop_points),
+            component_loop_contact_labels=tuple(component_loop_contact_labels),
             source_vertex_count=int(len(vertices)),
             source_face_count=int(len(faces)),
             fingerprint=digest.hexdigest(),
@@ -251,9 +277,10 @@ class BoundarySnapshotBuilder:
 def _filter_unpaired_component_loops(
     component_loops: list[tuple[tuple[int, ...], ...]],
     component_loop_points: list[tuple[tuple[tuple[float, float, float], ...], ...]],
+    component_loop_contact_labels: list[tuple[tuple[int, ...], ...]],
     retained_component_indices: list[int],
     records: list[dict],
-) -> tuple[list[tuple[tuple[int, ...], ...]], list[tuple[tuple[tuple[float, float, float], ...], ...]]]:
+) -> tuple[list, list, list]:
     """Ignore orphan split seams while retaining standalone source components."""
     loops = [
         (component_index, loop_index, np.asarray(points, dtype=np.float64))
@@ -294,15 +321,20 @@ def _filter_unpaired_component_loops(
         raise ValueError(f"simplified boundary has ambiguous contact matches: {ambiguous}")
     retained_loops = []
     retained_points = []
+    retained_labels = []
     for component_index, (source_loops, point_loops) in enumerate(
         zip(component_loops, component_loop_points)
     ):
         paired = {index for index in range(len(source_loops)) if (component_index, index) in matches}
         # A standalone source shell has no counterpart; preserve its identity
         # and contours instead of silently discarding the entire component.
-        keep = paired if paired else set(range(len(source_loops)))
+        contacted = {index for index, labels in enumerate(component_loop_contact_labels[component_index])
+                     if any(label > 0 for label in labels)}
+        keep = paired | contacted if paired or contacted else set(range(len(source_loops)))
         retained_loops.append(tuple(loop for index, loop in enumerate(source_loops) if index in keep))
         retained_points.append(tuple(points for index, points in enumerate(point_loops) if index in keep))
+        retained_labels.append(tuple(labels for index, labels in enumerate(
+            component_loop_contact_labels[component_index]) if index in keep))
         for record in records:
             if (
                 record.get("component_index") == retained_component_indices[component_index]
@@ -315,7 +347,7 @@ def _filter_unpaired_component_loops(
                     if record.get("counterpart_distance_evidence")
                     else "no_recognized_counterpart"
                 )
-    return retained_loops, retained_points
+    return retained_loops, retained_points, retained_labels
 
 
 def _remove_isolated_spikes(points: np.ndarray) -> np.ndarray:

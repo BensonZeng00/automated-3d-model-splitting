@@ -9,11 +9,15 @@ from .boundary_matching import (
     MINIMUM_BOUNDARY_COVERAGE,
     compare_boundary_loops,
     compare_loop_to_boundary_segments,
+    distances_to_segments,
 )
 from .mesh import average_outward_normal, build_local_mesh, boundary_loops
 from .interface_direction import inward_interface_axis
 from .local_ray_probe import LocalRayProbe
 from .source_face_ownership import complete_component_face_ownership
+from .source_contact_segments import SourceContactEdges
+
+PAIR_CONTACT_MAX_DISPLACEMENT_MM = 2.0
 
 
 def _component_inward_direction(
@@ -24,6 +28,89 @@ def _component_inward_direction(
     return -average_outward_normal(
         local_vertices, local_faces, component_center, model_center
     )
+
+
+def _pair_contact_segments(recognized_boundaries) -> dict[tuple[int, int], dict]:
+    """Compare only frozen arcs whose source faces identify the same part pair."""
+    groups: dict[tuple[int, int], dict[int, list]] = defaultdict(lambda: defaultdict(list))
+    if not recognized_boundaries.component_loop_contact_labels:
+        return {}
+    for part, (loops, label_loops) in enumerate(zip(
+        recognized_boundaries.component_loop_points,
+        recognized_boundaries.component_loop_contact_labels,
+    ), start=1):
+        for loop_index, (loop, labels) in enumerate(zip(loops, label_loops)):
+            points = np.asarray(loop, dtype=np.float64)
+            if len(labels) != len(points):
+                raise ValueError("frozen contact labels and points differ")
+            for edge_index, peer in enumerate(labels):
+                if peer <= 0 or peer == part:
+                    continue
+                pair = tuple(sorted((part, int(peer))))
+                groups[pair][part].append((loop_index, edge_index, np.stack((
+                    points[edge_index], points[(edge_index + 1) % len(points)]
+                ))))
+    results = {}
+    for pair, sides in groups.items():
+        if any(part not in sides for part in pair):
+            results[pair] = {
+                "matched": False,
+                "reason": "one_sided_source_contact",
+                "required_coverage": MINIMUM_BOUNDARY_COVERAGE,
+                "coverage": {f"P{part:02d}": 0.0 if part not in sides else None
+                             for part in pair},
+                "segments": sides,
+            }
+            continue
+        first = np.stack([item[2] for item in sides[pair[0]]])
+        second = np.stack([item[2] for item in sides[pair[1]]])
+        lengths = [np.linalg.norm(lines[:, 1] - lines[:, 0], axis=1)
+                   for lines in (first, second)]
+        # Exact source edge ownership establishes adjacency; this bound only
+        # allows the two independently smoothed frozen copies to separate.
+        tolerance = PAIR_CONTACT_MAX_DISPLACEMENT_MM
+        distances = [distances_to_segments(lines.mean(axis=1), other)
+                     for lines, other in ((first, second), (second, first))]
+        coverage = [float(weight[distance <= tolerance].sum() / max(weight.sum(), 1e-12))
+                    for weight, distance in zip(lengths, distances)]
+        results[pair] = {
+            "matched": all(value >= MINIMUM_BOUNDARY_COVERAGE for value in coverage),
+            "distance_tolerance_mm": tolerance,
+            "source_edge_ownership_required": True,
+            "required_coverage": MINIMUM_BOUNDARY_COVERAGE,
+            "coverage": {f"P{part:02d}": value for part, value in zip(pair, coverage)},
+            "p50_distance_mm": {f"P{part:02d}": float(np.quantile(distance, 0.50))
+                                for part, distance in zip(pair, distances)},
+            "p90_distance_mm": {f"P{part:02d}": float(np.quantile(distance, 0.90))
+                                for part, distance in zip(pair, distances)},
+            "maximum_distance_mm": {f"P{part:02d}": float(distance.max())
+                                    for part, distance in zip(pair, distances)},
+            "segments": sides,
+        }
+    return results
+
+
+def _contact_support_area(
+    vertices, faces, components, boundaries, contacts, part, loop_index, peer,
+    raw_loop_cache,
+) -> float:
+    """Area of source faces adjoining this part's shared contact edges."""
+    if part not in raw_loop_cache:
+        local_vertices, local_faces, _, global_ids = build_local_mesh(
+            vertices, faces, components[part - 1]
+        )
+        raw_loop_cache[part] = [global_ids[np.asarray(loop, dtype=np.int64)]
+                                for loop in boundary_loops(local_faces, local_vertices)]
+    frozen_ids = set(boundaries.loops_for_component(part)[loop_index])
+    source_loop = next((loop for loop in raw_loop_cache[part]
+                        if frozen_ids.issubset(set(map(int, loop)))), None)
+    if source_loop is None:
+        raise ValueError(f"P{part:02d} frozen boundary has no source loop for contact area")
+    face_ids = contacts.contact_face_ids(np.asarray(source_loop, dtype=np.int64), part, peer)
+    triangles = vertices[faces[face_ids]]
+    return float(np.linalg.norm(np.cross(
+        triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0]
+    ), axis=1).sum() * 0.5)
 
 
 def _fragmented_host_contacts(
@@ -169,12 +256,68 @@ def plan_contact_interfaces(
             sample_offset = len(contact_samples[pair])
             for offset, point in enumerate(left_points):
                 contact_samples[pair][sample_offset + offset] = point
-    contacted_parts = {part for pair in loop_contacts for part in pair}
     imprinted_pairs: dict[tuple[int, int], tuple[int, dict]] = {}
-    for host, candidate, loop_index, evidence in _fragmented_host_contacts(
-        vertices, faces, components, simplified_loop_points,
-        recognition_records or [], contacted_parts,
-    ):
+    contacted_parts = {part for pair in loop_contacts for part in pair}
+    segment_evidence = _pair_contact_segments(recognized_boundaries)
+    source_contacts = SourceContactEdges(len(vertices), faces, components)
+    raw_loop_cache = {}
+    candidates = []
+    for pair, evidence in segment_evidence.items():
+        if not evidence["matched"] or pair in loop_contacts:
+            continue
+        tenon = min(pair, key=lambda part: (
+            float(components[part - 1].area), part
+        ))
+        tenon_segments = evidence["segments"][tenon]
+        loop_index = max(
+            {item[0] for item in tenon_segments},
+            key=lambda index: sum(float(np.linalg.norm(item[2][1] - item[2][0]))
+                                  for item in tenon_segments if item[0] == index),
+        )
+        peer = pair[1] if tenon == pair[0] else pair[0]
+        contact_area = _contact_support_area(
+            vertices, faces, components, recognized_boundaries, source_contacts,
+            tenon, loop_index, peer, raw_loop_cache,
+        )
+        candidates.append((pair, tenon, loop_index, contact_area, tenon_segments, evidence))
+    chosen_by_loop = {}
+    for pair, tenon, loop_index, area, _segments, _evidence in candidates:
+        key = (tenon, loop_index)
+        previous = chosen_by_loop.get(key)
+        if previous is not None and np.isclose(area, previous[1], rtol=1e-6, atol=1e-9):
+            raise ValueError(f"P{tenon:02d} loop {loop_index} has equally sized host contacts")
+        if previous is None or area > previous[1]:
+            chosen_by_loop[key] = (pair, area)
+    suppressed_contacts = []
+    for pair, tenon, loop_index, contact_area, tenon_segments, evidence in candidates:
+        chosen_pair, chosen_area = chosen_by_loop[(tenon, loop_index)]
+        if pair != chosen_pair:
+            suppressed_contacts.append({
+                "parts": [f"P{part:02d}" for part in pair],
+                "tenon_part": f"P{tenon:02d}",
+                "tenon_loop_index": loop_index,
+                "contact_support_area_mm2": contact_area,
+                "selected_pair": [f"P{part:02d}" for part in chosen_pair],
+                "selected_contact_support_area_mm2": chosen_area,
+                "reason": "smaller_contact_on_shared_tenon_loop",
+            })
+            continue
+        left_loop = loop_index if tenon == pair[0] else -1
+        right_loop = loop_index if tenon == pair[1] else -1
+        loop_contacts[pair].add((left_loop, right_loop))
+        for index, item in enumerate(tenon_segments):
+            contact_samples[pair][index] = item[2].mean(axis=0)
+        imprinted_pairs[pair] = (tenon, {
+            **{key: value for key, value in evidence.items() if key != "segments"},
+            "contact_support_area_mm2": contact_area,
+        })
+    legacy_contacts = (
+        _fragmented_host_contacts(
+            vertices, faces, components, simplified_loop_points,
+            recognition_records or [], contacted_parts,
+        ) if not recognized_boundaries.component_loop_contact_labels else []
+    )
+    for host, candidate, loop_index, evidence in legacy_contacts:
         left, right = sorted((host, candidate))
         pair = (left, right)
         left_loop = loop_index if left == candidate else -1
@@ -192,7 +335,9 @@ def plan_contact_interfaces(
                 matched_loops[(left, left_loop)].add((right, right_loop))
             if right_loop >= 0:
                 matched_loops[(right, right_loop)].add((left, left_loop))
-    ambiguous = [key for key, matches in matched_loops.items() if len(matches) > 1]
+    ambiguous = [key for key, matches in matched_loops.items()
+                 if len(matches) > 1 and key[0] not in
+                 {owner for owner, _ in imprinted_pairs.values()}]
     if ambiguous:
         raise ValueError(f"simplified boundary has ambiguous contact matches: {ambiguous}")
     contact_pairs = dict(contact_samples)
@@ -288,6 +433,12 @@ def plan_contact_interfaces(
         else:
             tenon, mortise = area_order
             decision = "smaller_region_tiebreak"
+        if ((left, right) in imprinted_pairs
+                and tenon != imprinted_pairs[(left, right)][0]):
+            raise ValueError(
+                f"{interface_id}: imprinted contact requires its complete boundary "
+                "on the tenon side"
+            )
         contact_points = np.asarray(list(samples.values()), dtype=np.float64)
         contact_center = (
             contact_points.mean(axis=0)
@@ -350,6 +501,15 @@ def plan_contact_interfaces(
                 "counterpart_evidence": (
                     imprinted_pairs[(left, right)][1]
                     if (left, right) in imprinted_pairs else {}
+                ),
+                "contact_segment_evidence": (
+                    {key: value for key, value in segment_evidence[(left, right)].items()
+                     if key != "segments"}
+                    if (left, right) in segment_evidence else {}
+                ),
+                "contact_segments_mm": (
+                    [item[2].tolist() for item in segment_evidence[(left, right)]["segments"].get(tenon, [])]
+                    if (left, right) in segment_evidence else []
                 ),
                 "shared_boundary_sample_count": len(samples),
                 "contact_center_mm": contact_center.round(6).tolist(),
@@ -414,6 +574,13 @@ def plan_contact_interfaces(
         ),
         "parts": part_records,
         "interface_count": len(relations),
+        "suppressed_secondary_contacts": suppressed_contacts,
+        "unmatched_contact_segments": [
+            {"parts": [f"P{part:02d}" for part in pair],
+             **{key: value for key, value in evidence.items() if key != "segments"}}
+            for pair, evidence in sorted(segment_evidence.items())
+            if not evidence["matched"] and pair not in loop_contacts
+        ],
         "relation_table": {
             "columns": ["接口", "榫方", "卯方"],
             "rows": [

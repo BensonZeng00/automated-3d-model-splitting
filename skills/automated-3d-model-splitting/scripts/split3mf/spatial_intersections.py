@@ -350,6 +350,8 @@ def count_polyline_self_intersections_3d(
 def remove_true_self_intersections_3d(
     points: np.ndarray,
     vertex_ids: np.ndarray | None = None,
+    *,
+    maximum_removed_loops: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray, dict]:
     """Remove the smaller loop at each true XYZ crossing of a closed contour.
 
@@ -422,6 +424,8 @@ def remove_true_self_intersections_3d(
         })
         if len(ring) < 3:
             raise ValueError("3D intersection cleanup left fewer than three boundary points")
+        if maximum_removed_loops is not None and len(removed) >= maximum_removed_loops:
+            break
 
     final_audit = count_polyline_self_intersections_3d(ring)
     return ring, ids, {
@@ -432,3 +436,87 @@ def remove_true_self_intersections_3d(
         "remaining_near_contact_count": int(final_audit["near_contact_count"]),
         "projection_only_intersections_removed": 0,
     }
+
+
+def clean_tiny_boundary_contacts_3d(
+    points: np.ndarray,
+    vertex_ids: np.ndarray,
+    *,
+    maximum_change_mm: float = 1.0,
+) -> tuple[np.ndarray, np.ndarray, dict]:
+    """Remove only small vertex-on-segment loops without inventing source IDs.
+
+    A general interior crossing needs a new intersection vertex and remains a
+    blocking geometry error. The same one-millimetre budget bounds total
+    discarded perimeter and the deviation from the original contour.
+    """
+    ring = np.asarray(points, dtype=np.float64)
+    ids = np.asarray(vertex_ids, dtype=np.int64)
+    if ring.ndim != 2 or ring.shape[1:] != (3,) or ids.shape != (len(ring),):
+        raise ValueError("boundary points and source IDs must correspond")
+    original = ring.copy()
+    removed = []
+    total_perimeter = 0.0
+    for _ in range(len(ring)):
+        audit = count_polyline_self_intersections_3d(ring)
+        if not audit["segment_intersection_count"]:
+            break
+        crossing = audit["intersections"][0]
+        left, right = crossing["segment_indices"]
+        left_t, right_t = crossing["segment_parameters"]
+        # A point contact has one endpoint on the interior of another edge.
+        endpoint = next((index for index, value in (
+            ((left + 1) % len(ring), left_t), (left, 1.0 - left_t),
+            ((right + 1) % len(ring), right_t), (right, 1.0 - right_t),
+        ) if abs(value - 1.0) <= 1e-7), None)
+        if endpoint is None or not (1e-7 < left_t < 1.0 - 1e-7
+                                    or 1e-7 < right_t < 1.0 - 1e-7):
+            break
+        candidate, _, cleanup = remove_true_self_intersections_3d(
+            ring, maximum_removed_loops=1
+        )
+        if cleanup["removed_crossing_loop_count"] != 1 or len(candidate) != len(ring) - 1:
+            break
+        perimeter = cleanup["removed_loops"][0]["discarded_path_perimeter_mm"]
+        if total_perimeter + perimeter > maximum_change_mm:
+            break
+        distances = np.linalg.norm(candidate[:, None, :] - ring[None, :, :], axis=2)
+        nearest = np.argmin(distances, axis=1)
+        if np.max(distances[np.arange(len(candidate)), nearest]) > 1e-7:
+            break
+        if len(set(nearest.tolist())) != len(candidate):
+            break
+        candidate = ring[nearest].copy()
+        new_ids = ids[nearest]
+        deviation = _contour_vertex_deviation_mm(original, candidate)
+        if deviation > maximum_change_mm:
+            break
+        ring, ids = candidate, new_ids
+        total_perimeter += perimeter
+        removed.append(cleanup["removed_loops"][0])
+    remaining = count_polyline_self_intersections_3d(ring)["segment_intersection_count"]
+    return ring, ids, {
+        "removed_crossing_loop_count": len(removed),
+        "removed_loops": removed,
+        "discarded_perimeter_mm": total_perimeter,
+        "maximum_contour_deviation_mm": _contour_vertex_deviation_mm(original, ring),
+        "remaining_intersection_count": remaining,
+        "maximum_change_mm": maximum_change_mm,
+    }
+
+
+def _contour_vertex_deviation_mm(reference: np.ndarray, candidate: np.ndarray) -> float:
+    if np.array_equal(reference, candidate):
+        return 0.0
+    starts = candidate
+    edges = np.roll(candidate, -1, axis=0) - starts
+    lengths_squared = np.einsum("ij,ij->i", edges, edges)
+    maximum = 0.0
+    for point in reference:
+        fractions = np.clip(
+            np.einsum("ij,ij->i", point - starts, edges)
+            / np.maximum(lengths_squared, 1e-30), 0.0, 1.0,
+        )
+        nearest = starts + fractions[:, None] * edges
+        maximum = max(maximum, float(np.linalg.norm(nearest - point, axis=1).min()))
+    return maximum

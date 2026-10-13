@@ -53,17 +53,20 @@ def restore_boundaries(
         raise ValueError("03 boundary artifact is missing required arrays")
     ids = arrays["boundary_vertex_ids"]
     points = arrays["boundary_points"]
+    labels = arrays.get("boundary_contact_part_ids", np.zeros(len(ids), dtype=np.int32))
     loop_offsets = arrays["boundary_loop_offsets"]
     component_offsets = arrays["component_loop_offsets"]
-    if len(ids) != len(points) or points.ndim != 2 or points.shape[1:] != (3,):
+    if len(ids) != len(points) or len(ids) != len(labels) or points.ndim != 2 or points.shape[1:] != (3,):
         raise ValueError("03 boundary artifact has inconsistent point and vertex arrays")
     if len(loop_offsets) == 0 or len(component_offsets) == 0:
         raise ValueError("03 boundary artifact has empty offsets")
     loops: list[tuple[tuple[int, ...], ...]] = []
     point_loops: list[tuple[tuple[tuple[float, float, float], ...], ...]] = []
+    label_loops: list[tuple[tuple[int, ...], ...]] = []
     for component_index in range(len(component_offsets) - 1):
         component_loops = []
         component_points = []
+        component_labels = []
         for loop_index in range(
             int(component_offsets[component_index]),
             int(component_offsets[component_index + 1]),
@@ -71,12 +74,16 @@ def restore_boundaries(
             start, end = map(int, loop_offsets[loop_index : loop_index + 2])
             component_loops.append(tuple(map(int, ids[start:end])))
             component_points.append(tuple(tuple(map(float, point)) for point in points[start:end]))
+            component_labels.append(tuple(map(int, labels[start:end])))
         loops.append(tuple(component_loops))
         point_loops.append(tuple(component_points))
+        label_loops.append(tuple(component_labels))
     boundary_summary = summary.get("recognized_boundaries", {})
     return RecognizedBoundaries(
         component_loops=tuple(loops),
         component_loop_points=tuple(point_loops),
+        component_loop_contact_labels=(tuple(label_loops)
+                                       if "boundary_contact_part_ids" in arrays else ()),
         source_vertex_count=int(boundary_summary["source_vertex_count"]),
         source_face_count=int(boundary_summary["source_face_count"]),
         fingerprint=str(boundary_summary["fingerprint"]),

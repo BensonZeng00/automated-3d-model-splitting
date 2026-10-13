@@ -8,9 +8,13 @@ from scipy.spatial import cKDTree
 
 from .common import COLOR_INFO
 from .validation import boolean_collapsed_face_audit
+from .boundary_matching import distances_to_segments
 
 
-def _transfer_paint_tokens(old_part: dict, carved: trimesh.Trimesh) -> list[str]:
+UNCHANGED_SURFACE_TOLERANCE_MM = 1e-2
+
+
+def _transfer_paint_tokens(old_part: dict, carved: trimesh.Trimesh) -> tuple[list[str], np.ndarray]:
     """Preserve exterior paint and assign newly exposed socket walls to the host."""
     old_mesh = old_part["mesh"]
     base = str(old_part["color_code"])
@@ -20,9 +24,10 @@ def _transfer_paint_tokens(old_part: dict, carved: trimesh.Trimesh) -> list[str]
     old_centers = old_mesh.triangles_center
     tree = cKDTree(old_centers)
     tokens = []
-    for start in range(0, len(carved.faces), 4096):
-        centers = carved.triangles_center[start:start + 4096]
-        _, candidate_ids = tree.query(centers, k=min(8, len(old_centers)))
+    surface_distances = []
+    for start in range(0, len(carved.faces), 1024):
+        centers = carved.triangles_center[start:start + 1024]
+        _, candidate_ids = tree.query(centers, k=min(64, len(old_centers)))
         candidate_ids = np.asarray(candidate_ids).reshape((len(centers), -1))
         repeated_points = np.repeat(centers, candidate_ids.shape[1], axis=0)
         candidate_triangles = old_mesh.triangles[candidate_ids.reshape(-1)]
@@ -31,11 +36,12 @@ def _transfer_paint_tokens(old_part: dict, carved: trimesh.Trimesh) -> list[str]
         nearest = np.argmin(distances, axis=1)
         for row, position in enumerate(nearest):
             face_id = int(candidate_ids[row, position])
+            surface_distances.append(float(distances[row, position]))
             tokens.append(
                 str(original_tokens[face_id])
-                if distances[row, position] <= 1e-4 else base
+                if distances[row, position] <= UNCHANGED_SURFACE_TOLERANCE_MM else base
             )
-    return tokens
+    return tokens, np.asarray(surface_distances, dtype=np.float64)
 
 
 def carve_imprinted_mortise(
@@ -44,6 +50,8 @@ def carve_imprinted_mortise(
     mortise_vertices: np.ndarray,
     mortise_faces: np.ndarray,
     interface_id: str,
+    contact_segments: np.ndarray | None = None,
+    maximum_contact_distance_mm: float = 7.0,
 ) -> dict:
     """Use the paired interface's mortise solid as a local subtractive cutter."""
     cutter = trimesh.Trimesh(
@@ -75,7 +83,23 @@ def carve_imprinted_mortise(
     removed_volume = float(original.volume - carved.volume)
     if removed_volume <= 1e-4:
         raise ValueError(f"{interface_id}: mortise cutter missed the host solid")
-    tokens = _transfer_paint_tokens(host_part, carved)
+    tokens, surface_distances = _transfer_paint_tokens(host_part, carved)
+    maximum_changed_distance = 0.0
+    if contact_segments is not None and len(contact_segments):
+        changed = surface_distances > UNCHANGED_SURFACE_TOLERANCE_MM
+        if np.any(changed):
+            distances = distances_to_segments(
+                carved.triangles_center[changed], np.asarray(contact_segments, dtype=np.float64)
+            )
+            maximum_changed_distance = float(distances.max())
+            if maximum_changed_distance > maximum_contact_distance_mm:
+                far = np.flatnonzero(changed)[np.argmax(distances)]
+                raise ValueError(
+                    f"{interface_id}: host carving extends {maximum_changed_distance:.3f} mm "
+                    f"from its confirmed contact segments (limit {maximum_contact_distance_mm:.3f} mm); "
+                    f"far_face={far}, center={carved.triangles_center[far].tolist()}, "
+                    f"distance_to_old={surface_distances[far]:.6f}, changed_faces={int(changed.sum())}"
+                )
     infos = [COLOR_INFO.get(token, {}) for token in tokens]
     host_part["mesh"] = carved
     host_part["face_paint_color_tokens"] = tokens
@@ -96,6 +120,7 @@ def carve_imprinted_mortise(
         "strategy": "paired_mortise_solid_subtracted_from_fragmented_host",
         "removed_volume_mm3": removed_volume,
         "face_count_after": int(len(carved.faces)),
+        "maximum_changed_face_to_contact_mm": maximum_changed_distance,
     }
     host_record["composition"].setdefault("imprinted_mortise_pockets", []).append(pocket)
     return pocket

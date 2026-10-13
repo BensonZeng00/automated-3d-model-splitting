@@ -14,6 +14,8 @@ from .boundary_smoothing import MAX_RELATIVE_SHAPE_CHANGE
 
 from .mesh import triangulate_boundary_cap_without_center
 
+MAX_EXTERIOR_INTERFACE_DISTANCE_MM = 2.0
+
 
 @dataclass(frozen=True)
 class InterfaceAttachment:
@@ -351,7 +353,10 @@ def compose_part_with_interfaces(
         _, selected, distances = min(candidates, key=lambda item: item[0])
         span = float(np.linalg.norm(np.ptp(outer_points, axis=0)))
         maximum_distance = float(distances.max())
-        allowed_distance = min(1.0, 0.15 + MAX_RELATIVE_SHAPE_CHANGE * span)
+        allowed_distance = min(
+            MAX_EXTERIOR_INTERFACE_DISTANCE_MM,
+            0.15 + MAX_RELATIVE_SHAPE_CHANGE * span,
+        )
         if maximum_distance > allowed_distance:
             raise ValueError(
                 f"{attachment.interface_id}: exterior is too far from the simplified interface "
@@ -463,7 +468,7 @@ def compose_part_with_interfaces(
             if not candidates:
                 break
             _, selected, distances = min(candidates, key=lambda item: item[0])
-            permitted_gap = min(1.0, max(
+            permitted_gap = min(MAX_EXTERIOR_INTERFACE_DISTANCE_MM, max(
                 1.5 * original_gaps[id(attachment)],
                 1.5 * widths[attachment_positions[id(attachment)]],
                 0.15,

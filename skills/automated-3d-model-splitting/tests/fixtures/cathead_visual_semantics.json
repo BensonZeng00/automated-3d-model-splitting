@@ -1,0 +1,82 @@
+{
+  "parts": {
+    "P01": {
+      "label": "头部黑色外壳",
+      "description": "猫头主体的黑色外轮廓和额顶壳体，左右两侧贯通；语义只描述可见模型外观。",
+      "confidence": "HIGH",
+      "visual_evidence": "正面原模型图中耳外框、头顶及两侧脸部均为连续深灰黑色区域；识别边界图中 P01 的大面积区域覆盖这片主体，并沿额鼻白区、眼周白圈、耳内粉色和胡须等颜色边界分离。"
+    },
+    "P02": {
+      "label": "黑色鼻口细节",
+      "description": "脸中央的黑色鼻子与口部小区域。",
+      "confidence": "HIGH",
+      "visual_evidence": "该区域材料码为 DEFAULT 黑色，尺寸约 9.7×2.0×8.1 mm，中心位于脸部中央；边界预览中对应中央鼻口细节，不是白色额鼻毛色区。"
+    },
+    "P03": {
+      "label": "右侧黑色脸颊斑块",
+      "description": "猫脸右侧（画面右）的黑色脸颊区域。",
+      "confidence": "HIGH",
+      "visual_evidence": "该区域材料码为 DEFAULT 黑色，中心 X≈195 mm；原模型和边界预览中对应画面右眼外侧下方的黑色脸颊斑块。"
+    },
+    "P04": {
+      "label": "左侧黑色脸颊斑块",
+      "description": "猫脸左侧（画面左）的黑色脸颊区域。",
+      "confidence": "HIGH",
+      "visual_evidence": "该区域材料码为 DEFAULT 黑色，中心 X≈154 mm；原模型和边界预览中对应画面左眼外侧下方的黑色脸颊斑块。"
+    },
+    "P05": {
+      "label": "左耳粉色内耳",
+      "description": "画面左侧猫耳内部的粉色三角区域。",
+      "confidence": "HIGH",
+      "visual_evidence": "原模型图中画面左上耳内为粉色；识别边界图中 P05 的橙色闭环完整围绕左耳粉色三角片。"
+    },
+    "P06": {
+      "label": "右耳粉色内耳",
+      "description": "画面右侧猫耳内部的粉色三角区域。",
+      "confidence": "HIGH",
+      "visual_evidence": "原模型图中画面右上耳内为粉色；识别边界图中 P06 的粉色闭环围绕右耳粉色三角片。"
+    },
+    "P07": {
+      "label": "右侧粉色腮红",
+      "description": "画面右脸颊上的椭圆形粉色腮红。",
+      "confidence": "HIGH",
+      "visual_evidence": "区域中心 X≈202 mm，与原模型图中画面右侧腮红位置一致；边界图中 P07 的紫色闭环围绕此粉色椭圆。"
+    },
+    "P08": {
+      "label": "左侧粉色腮红",
+      "description": "画面左脸颊上的椭圆形粉色腮红。",
+      "confidence": "HIGH",
+      "visual_evidence": "区域中心 X≈148 mm，与原模型图中画面左侧腮红位置一致；边界图中 P08 的绿色闭环围绕此粉色椭圆。"
+    },
+    "P09": {
+      "label": "白色口鼻及下巴区域",
+      "description": "脸中央的大块白色口鼻下方毛色与下巴。",
+      "confidence": "HIGH",
+      "visual_evidence": "原模型图显示面部下半部的大块白色区域；识别边界图中 P09 两个边界环沿中央白区和黑色脸颊斑块的分界延伸。"
+    },
+    "P10": {
+      "label": "左眼白色外圈",
+      "description": "画面左侧眼睛周围的白色环形区域。",
+      "confidence": "HIGH",
+      "visual_evidence": "原模型图中左眼外围为白色圆环；识别边界图的 P10 青绿双环准确落在左眼白圈内外缘。"
+    },
+    "P11": {
+      "label": "右眼白色外圈",
+      "description": "画面右侧眼睛周围的白色环形区域。",
+      "confidence": "HIGH",
+      "visual_evidence": "原模型图中右眼外围为白色圆环；识别边界图的 P11 黄绿色双环落在右眼白圈内外缘。"
+    },
+    "P12": {
+      "label": "右眼高光",
+      "description": "画面右侧黑色眼珠上的白色高光小片。",
+      "confidence": "HIGH",
+      "visual_evidence": "区域中心 X≈195 mm，对应画面右侧眼睛；边界图中 P12 单环落在该白色高光小片位置。"
+    },
+    "P13": {
+      "label": "左眼高光",
+      "description": "画面左侧黑色眼珠上的白色高光小片。",
+      "confidence": "HIGH",
+      "visual_evidence": "区域中心 X≈154 mm，对应画面左侧眼睛；边界图中 P13 单环落在该白色高光小片位置。"
+    }
+  }
+}

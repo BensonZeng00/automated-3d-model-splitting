@@ -16,9 +16,9 @@ def classify_interface_shape(points: np.ndarray) -> dict:
 
     Fit a plane using physical arc-length weights, trim the most deviant 10%
     once, and measure the 90th-percentile sagitta against the smaller in-plane
-    span. Curved requires both at least 1 mm of sagitta and 20% of that span,
-    with deviation distributed over at least 80% of the rim. Thus small local
-    waviness, planar lips, and broad but shallow body contours remain planar.
+    span. Reserve the curved shoulder for a pronounced, sustained crescent:
+    at least 2 mm of sagitta and 20% of that span, with deviation distributed
+    over at least 90% of the rim. Lesser bows use the ordinary connector.
     """
     values = np.asarray(points, dtype=np.float64)
     edges = np.linalg.norm(np.roll(values, -1, axis=0) - values, axis=1)
@@ -52,9 +52,9 @@ def classify_interface_shape(points: np.ndarray) -> dict:
     active_fraction = float(weights[active].sum() / total)
     relative_sagitta = p90 / max(reference_span, 1e-12)
     curved = bool(
-        p90 >= 1.0
+        p90 >= 2.0
         and relative_sagitta >= 0.20
-        and active_fraction >= 0.80
+        and active_fraction >= 0.90
     )
     return {
         "classification": "curved" if curved else "planar",
@@ -66,8 +66,8 @@ def classify_interface_shape(points: np.ndarray) -> dict:
         "distance_max_mm": float(np.max(distances)),
         "outlier_arc_fraction": active_fraction,
         "relative_sagitta_p90": relative_sagitta,
-        "minimum_sagitta_mm": 1.0,
+        "minimum_sagitta_mm": 2.0,
         "minimum_relative_sagitta": 0.20,
-        "minimum_deviating_arc_fraction": 0.80,
+        "minimum_deviating_arc_fraction": 0.90,
         "sample_count": len(values),
     }

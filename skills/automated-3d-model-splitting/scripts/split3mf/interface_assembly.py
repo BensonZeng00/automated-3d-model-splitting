@@ -292,6 +292,7 @@ def build_pairwise_part_meshes(
                         record[f"{side}_surface"]["outer_boundary_cap_face_count"],
                         vertices[np.asarray(_loop["boundary_vertex_ids"], dtype=np.int64)],
                         np.asarray(relation["contact"].get("contact_segments_mm", []), dtype=np.float64).reshape((-1, 2, 3)),
+                        record["mortise_surface"]["plane_alignment_travel_max_mm"],
                     ))
                     continue
                 attachments_by_part[part_id].append(InterfaceAttachment(
@@ -394,7 +395,8 @@ def build_pairwise_part_meshes(
 
         part_positions = {part["part_id"]: index for index, part in enumerate(parts)}
         for (part_id, tenon_part_id, interface_id, pocket_vertices,
-             pocket_faces, outer_count, cap_count, original_points, contact_segments) in imprinted_pockets:
+             pocket_faces, outer_count, cap_count, original_points, contact_segments,
+             plane_alignment_mm) in imprinted_pockets:
             index = part_positions[part_id]
             tenon_index = _part_index(tenon_part_id)
             tenon_vertices, tenon_faces, _, _ = build_local_mesh(
@@ -414,7 +416,7 @@ def build_pairwise_part_meshes(
             carve_imprinted_mortise(
                 parts[index], part_records[index], cutter.vertices, cutter.faces,
                 interface_id, contact_segments,
-                MAX_INTERFACE_EXTENSION_MM + 2.0,
+                MAX_INTERFACE_EXTENSION_MM + plane_alignment_mm + 2.0,
             )
             part_records[part_positions[tenon_part_id]]["interface_roles"][interface_id] = "tenon"
             part_records[index]["interface_roles"][interface_id] = "mortise"

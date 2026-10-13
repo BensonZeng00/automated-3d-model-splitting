@@ -1,0 +1,701 @@
+{
+  "schema_version": 2,
+  "source": "/workspace/automated-3d-model-splitting/example/Kamesennin+AMS.3mf",
+  "source_face_count": 458624,
+  "noise_max_faces": 100,
+  "small_region_max_faces": 999,
+  "max_review_candidates": 10,
+  "total_candidate_count": 8,
+  "automatic_noise_count": 0,
+  "automatic_noise_faces": 0,
+  "automatic_noise_area_mm2": 0,
+  "automatic_noise": [],
+  "review_required": true,
+  "instruction": "Up to the 10 largest candidates by total source surface area are presented for semantic classification. Remaining candidates are automatically classified as noise. Classification never merges, deletes, recolors, or repairs source geometry.",
+  "items": [
+    {
+      "fragment_id": 1,
+      "source_min_face_index": 284216,
+      "color_code": "5C",
+      "faces": 2157,
+      "area_mm2": 34.57680401805952,
+      "bbox_min": [
+        126.355833,
+        177.014486,
+        128.589457
+      ],
+      "bbox_max": [
+        134.547418,
+        184.276423,
+        133.626965
+      ],
+      "center": [
+        131.565874,
+        179.444075,
+        131.767696
+      ],
+      "physical_review_evidence": {
+        "long_thin_candidate": true,
+        "visible_area_mm2": 34.57518061540399,
+        "visible_face_count": 2156,
+        "boundary_length_mm": 60.358803337122545,
+        "width_estimate_mm": 1.1456549402509169,
+        "elongation_estimate": 26.342488133426542,
+        "bbox_diagonal_mm": 12.050488827944934,
+        "measurement": "visible_surface_2A_over_perimeter",
+        "thresholds": {
+          "maximum_width_estimate_mm": 1.2,
+          "minimum_elongation": 12.0,
+          "minimum_span_mm": 10.0
+        }
+      },
+      "review_reason": "long_thin_noise_candidate",
+      "connectivity_color_code": "material:filament-slot:7",
+      "boundary_loop_count": 38,
+      "boundary_edge_count": 635,
+      "shared_boundary_edge_count": 192,
+      "shared_boundary_attachment_ratio": 0.30236220472440944,
+      "neighbor_group_slots": [
+        3,
+        10
+      ],
+      "distinct_neighbor_material": true,
+      "bbox_diagonal_mm": 12.050488813913637,
+      "bbox_diagonal_model_ratio": 0.04965677981240953,
+      "exterior_visible_face_ratio": 0.9995363931386184,
+      "projected_max_span_pixels": 43.0354058010693,
+      "projected_max_footprint_pixels": 1345.14865479595,
+      "projected_readable_view_count": 32,
+      "projected_view_count": 32,
+      "projected_readable_view_ratio": 1.0,
+      "repeated_feature_pair_fragment_id": 2,
+      "repeated_feature_similarity": 0.45938742502924657,
+      "semantic_evidence": [
+        "closed_boundary_loop",
+        "substantial_shared_boundary",
+        "large_projected_span",
+        "large_projected_footprint",
+        "meaningful_model_relative_size",
+        "near_face_threshold",
+        "distinct_neighbor_material",
+        "strong_exterior_visibility"
+      ],
+      "semantic_penalties": [],
+      "geometry_evidence_score": 0.9500000000000001,
+      "geometry_evidence_threshold": 0.55,
+      "review_status": "awaiting_user_classification",
+      "review_category": "long_strip_candidate",
+      "review_image": "example/Kamesennin+AMS_region_review/F001_context_and_zoom.png",
+      "review_layout": {
+        "top_row": "whole-model context with candidate highlighted magenta",
+        "bottom_row": "candidate-centered zoom with local context",
+        "columns": [
+          "+X",
+          "-X",
+          "+Y",
+          "-Y",
+          "+Z",
+          "-Z"
+        ]
+      }
+    },
+    {
+      "fragment_id": 2,
+      "source_min_face_index": 238690,
+      "color_code": "5C",
+      "faces": 280,
+      "area_mm2": 24.985642443390997,
+      "bbox_min": [
+        116.684614,
+        178.619562,
+        127.281835
+      ],
+      "bbox_max": [
+        122.90927,
+        180.648024,
+        132.68646
+      ],
+      "center": [
+        119.504745,
+        179.313576,
+        130.864564
+      ],
+      "physical_review_evidence": {
+        "long_thin_candidate": false,
+        "visible_area_mm2": 24.985642443390997,
+        "visible_face_count": 280,
+        "boundary_length_mm": 23.884255621532002,
+        "width_estimate_mm": 2.0922270167688275,
+        "elongation_estimate": 5.707854699825578,
+        "bbox_diagonal_mm": 8.489461801680877,
+        "measurement": "visible_surface_2A_over_perimeter",
+        "thresholds": {
+          "maximum_width_estimate_mm": 1.2,
+          "minimum_elongation": 12.0,
+          "minimum_span_mm": 10.0
+        }
+      },
+      "review_reason": "face_count_below_threshold",
+      "connectivity_color_code": "material:filament-slot:7",
+      "boundary_loop_count": 6,
+      "boundary_edge_count": 114,
+      "shared_boundary_edge_count": 34,
+      "shared_boundary_attachment_ratio": 0.2982456140350877,
+      "neighbor_group_slots": [
+        3
+      ],
+      "distinct_neighbor_material": true,
+      "bbox_diagonal_mm": 8.489462397254917,
+      "bbox_diagonal_model_ratio": 0.03498276057478103,
+      "exterior_visible_face_ratio": 1.0,
+      "projected_max_span_pixels": 31.445316518387195,
+      "projected_max_footprint_pixels": 883.6623153936467,
+      "projected_readable_view_count": 32,
+      "projected_view_count": 32,
+      "projected_readable_view_ratio": 1.0,
+      "repeated_feature_pair_fragment_id": 3,
+      "repeated_feature_similarity": 0.6408617138837395,
+      "semantic_evidence": [
+        "closed_boundary_loop",
+        "substantial_shared_boundary",
+        "large_projected_span",
+        "large_projected_footprint",
+        "meaningful_model_relative_size",
+        "moderate_face_support",
+        "distinct_neighbor_material",
+        "strong_exterior_visibility"
+      ],
+      "semantic_penalties": [],
+      "geometry_evidence_score": 0.9200000000000002,
+      "geometry_evidence_threshold": 0.55,
+      "review_status": "awaiting_user_classification",
+      "review_category": "small_region_candidate",
+      "review_image": "example/Kamesennin+AMS_region_review/F002_context_and_zoom.png",
+      "review_layout": {
+        "top_row": "whole-model context with candidate highlighted magenta",
+        "bottom_row": "candidate-centered zoom with local context",
+        "columns": [
+          "+X",
+          "-X",
+          "+Y",
+          "-Y",
+          "+Z",
+          "-Z"
+        ]
+      }
+    },
+    {
+      "fragment_id": 3,
+      "source_min_face_index": 287102,
+      "color_code": "5C",
+      "faces": 94,
+      "area_mm2": 23.21030810574529,
+      "bbox_min": [
+        127.051367,
+        180.256343,
+        126.366918
+      ],
+      "bbox_max": [
+        133.168555,
+        184.159084,
+        130.563254
+      ],
+      "center": [
+        130.341035,
+        181.708801,
+        128.742557
+      ],
+      "physical_review_evidence": {
+        "long_thin_candidate": false,
+        "visible_area_mm2": 23.21030810574529,
+        "visible_face_count": 94,
+        "boundary_length_mm": 20.10918239218955,
+        "width_estimate_mm": 2.3084288215278437,
+        "elongation_estimate": 4.355599402644826,
+        "bbox_diagonal_mm": 8.382159944616761,
+        "measurement": "visible_surface_2A_over_perimeter",
+        "thresholds": {
+          "maximum_width_estimate_mm": 1.2,
+          "minimum_elongation": 12.0,
+          "minimum_span_mm": 10.0
+        }
+      },
+      "review_reason": "face_count_below_threshold",
+      "connectivity_color_code": "material:filament-slot:7",
+      "boundary_loop_count": 1,
+      "boundary_edge_count": 36,
+      "shared_boundary_edge_count": 32,
+      "shared_boundary_attachment_ratio": 0.8888888888888888,
+      "neighbor_group_slots": [
+        3
+      ],
+      "distinct_neighbor_material": true,
+      "bbox_diagonal_mm": 8.382160351921286,
+      "bbox_diagonal_model_ratio": 0.03454059809317271,
+      "exterior_visible_face_ratio": 1.0,
+      "projected_max_span_pixels": 30.93888483868567,
+      "projected_max_footprint_pixels": 629.4428689615243,
+      "projected_readable_view_count": 32,
+      "projected_view_count": 32,
+      "projected_readable_view_ratio": 1.0,
+      "repeated_feature_pair_fragment_id": 2,
+      "repeated_feature_similarity": 0.6408617138837395,
+      "semantic_evidence": [
+        "closed_boundary_loop",
+        "substantial_shared_boundary",
+        "boundary_attached_to_neighbor",
+        "large_projected_span",
+        "large_projected_footprint",
+        "meaningful_model_relative_size",
+        "nontrivial_face_support",
+        "distinct_neighbor_material",
+        "strong_exterior_visibility"
+      ],
+      "semantic_penalties": [],
+      "geometry_evidence_score": 1.0,
+      "geometry_evidence_threshold": 0.55,
+      "review_status": "awaiting_user_classification",
+      "review_category": "noise_candidate",
+      "review_image": "example/Kamesennin+AMS_region_review/F003_context_and_zoom.png",
+      "review_layout": {
+        "top_row": "whole-model context with candidate highlighted magenta",
+        "bottom_row": "candidate-centered zoom with local context",
+        "columns": [
+          "+X",
+          "-X",
+          "+Y",
+          "-Y",
+          "+Z",
+          "-Z"
+        ]
+      }
+    },
+    {
+      "fragment_id": 4,
+      "source_min_face_index": 162142,
+      "color_code": "5C",
+      "faces": 131,
+      "area_mm2": 3.721782758645211,
+      "bbox_min": [
+        118.489103,
+        187.183235,
+        105.895898
+      ],
+      "bbox_max": [
+        121.42623,
+        189.574765,
+        107.508559
+      ],
+      "center": [
+        120.207104,
+        188.132481,
+        106.586659
+      ],
+      "physical_review_evidence": {
+        "long_thin_candidate": false,
+        "visible_area_mm2": 3.660340644811855,
+        "visible_face_count": 128,
+        "boundary_length_mm": 16.014528799979228,
+        "width_estimate_mm": 0.45712748598842357,
+        "elongation_estimate": 17.516479856108223,
+        "bbox_diagonal_mm": 4.1166499610866785,
+        "measurement": "visible_surface_2A_over_perimeter",
+        "thresholds": {
+          "maximum_width_estimate_mm": 1.2,
+          "minimum_elongation": 12.0,
+          "minimum_span_mm": 10.0
+        }
+      },
+      "review_reason": "face_count_below_threshold",
+      "connectivity_color_code": "material:filament-slot:7",
+      "boundary_loop_count": 6,
+      "boundary_edge_count": 71,
+      "shared_boundary_edge_count": 20,
+      "shared_boundary_attachment_ratio": 0.28169014084507044,
+      "neighbor_group_slots": [
+        3
+      ],
+      "distinct_neighbor_material": true,
+      "bbox_diagonal_mm": 4.116649882604801,
+      "bbox_diagonal_model_ratio": 0.016963592095057826,
+      "exterior_visible_face_ratio": 0.9770992366412213,
+      "projected_max_span_pixels": 15.615522385132767,
+      "projected_max_footprint_pixels": 208.21567147429258,
+      "projected_readable_view_count": 31,
+      "projected_view_count": 32,
+      "projected_readable_view_ratio": 0.96875,
+      "repeated_feature_pair_fragment_id": 3,
+      "repeated_feature_similarity": 0.48145450975186177,
+      "semantic_evidence": [
+        "closed_boundary_loop",
+        "substantial_shared_boundary",
+        "large_projected_span",
+        "large_projected_footprint",
+        "visible_model_relative_size",
+        "nontrivial_face_support",
+        "distinct_neighbor_material",
+        "strong_exterior_visibility"
+      ],
+      "semantic_penalties": [],
+      "geometry_evidence_score": 0.8300000000000002,
+      "geometry_evidence_threshold": 0.55,
+      "review_status": "awaiting_user_classification",
+      "review_category": "small_region_candidate",
+      "review_image": "example/Kamesennin+AMS_region_review/F004_context_and_zoom.png",
+      "review_layout": {
+        "top_row": "whole-model context with candidate highlighted magenta",
+        "bottom_row": "candidate-centered zoom with local context",
+        "columns": [
+          "+X",
+          "-X",
+          "+Y",
+          "-Y",
+          "+Z",
+          "-Z"
+        ]
+      }
+    },
+    {
+      "fragment_id": 5,
+      "source_min_face_index": 104321,
+      "color_code": "9C",
+      "faces": 276,
+      "area_mm2": 1.8692579142258634,
+      "bbox_min": [
+        96.749834,
+        194.667265,
+        66.609823
+      ],
+      "bbox_max": [
+        100.004482,
+        198.921634,
+        67.409222
+      ],
+      "center": [
+        98.438489,
+        196.410081,
+        66.870138
+      ],
+      "physical_review_evidence": {
+        "long_thin_candidate": false,
+        "visible_area_mm2": 1.8692579142258634,
+        "visible_face_count": 276,
+        "boundary_length_mm": 22.694382333152706,
+        "width_estimate_mm": 0.1647330944535282,
+        "elongation_estimate": 68.8822801770256,
+        "bbox_diagonal_mm": 5.415849299093127,
+        "measurement": "visible_surface_2A_over_perimeter",
+        "thresholds": {
+          "maximum_width_estimate_mm": 1.2,
+          "minimum_elongation": 12.0,
+          "minimum_span_mm": 10.0
+        }
+      },
+      "review_reason": "face_count_below_threshold",
+      "connectivity_color_code": "material:filament-slot:11",
+      "boundary_loop_count": 36,
+      "boundary_edge_count": 256,
+      "shared_boundary_edge_count": 87,
+      "shared_boundary_attachment_ratio": 0.33984375,
+      "neighbor_group_slots": [
+        5
+      ],
+      "distinct_neighbor_material": true,
+      "bbox_diagonal_mm": 5.415849698179052,
+      "bbox_diagonal_model_ratio": 0.022317240413440142,
+      "exterior_visible_face_ratio": 1.0,
+      "projected_max_span_pixels": 21.29576877135011,
+      "projected_max_footprint_pixels": 362.9233746076409,
+      "projected_readable_view_count": 30,
+      "projected_view_count": 32,
+      "projected_readable_view_ratio": 0.9375,
+      "repeated_feature_pair_fragment_id": null,
+      "repeated_feature_similarity": 0.0,
+      "semantic_evidence": [
+        "closed_boundary_loop",
+        "substantial_shared_boundary",
+        "large_projected_span",
+        "large_projected_footprint",
+        "meaningful_model_relative_size",
+        "moderate_face_support",
+        "distinct_neighbor_material",
+        "strong_exterior_visibility"
+      ],
+      "semantic_penalties": [],
+      "geometry_evidence_score": 0.9200000000000002,
+      "geometry_evidence_threshold": 0.55,
+      "review_status": "awaiting_user_classification",
+      "review_category": "small_region_candidate",
+      "review_image": "example/Kamesennin+AMS_region_review/F005_context_and_zoom.png",
+      "review_layout": {
+        "top_row": "whole-model context with candidate highlighted magenta",
+        "bottom_row": "candidate-centered zoom with local context",
+        "columns": [
+          "+X",
+          "-X",
+          "+Y",
+          "-Y",
+          "+Z",
+          "-Z"
+        ]
+      }
+    },
+    {
+      "fragment_id": 6,
+      "source_min_face_index": 323045,
+      "color_code": "DEFAULT",
+      "faces": 19,
+      "area_mm2": 1.5920803200601008,
+      "bbox_min": [
+        124.598149,
+        193.035787,
+        67.607215
+      ],
+      "bbox_max": [
+        127.441261,
+        194.634396,
+        68.39782
+      ],
+      "center": [
+        126.147225,
+        193.68315,
+        67.986029
+      ],
+      "physical_review_evidence": {
+        "long_thin_candidate": false,
+        "visible_area_mm2": 1.5920803200601008,
+        "visible_face_count": 19,
+        "boundary_length_mm": 7.880921975815148,
+        "width_estimate_mm": 0.4040340267156184,
+        "elongation_estimate": 9.752794882004057,
+        "bbox_diagonal_mm": 3.3561726495826485,
+        "measurement": "visible_surface_2A_over_perimeter",
+        "thresholds": {
+          "maximum_width_estimate_mm": 1.2,
+          "minimum_elongation": 12.0,
+          "minimum_span_mm": 10.0
+        }
+      },
+      "review_reason": "face_count_below_threshold",
+      "connectivity_color_code": "material:filament-slot:8",
+      "boundary_loop_count": 1,
+      "boundary_edge_count": 17,
+      "shared_boundary_edge_count": 17,
+      "shared_boundary_attachment_ratio": 1.0,
+      "neighbor_group_slots": [
+        4
+      ],
+      "distinct_neighbor_material": true,
+      "bbox_diagonal_mm": 3.3561723503792202,
+      "bbox_diagonal_model_ratio": 0.013829871467359407,
+      "exterior_visible_face_ratio": 1.0,
+      "projected_max_span_pixels": 14.0130420299634,
+      "projected_max_footprint_pixels": 127.33258271052199,
+      "projected_readable_view_count": 27,
+      "projected_view_count": 32,
+      "projected_readable_view_ratio": 0.84375,
+      "repeated_feature_pair_fragment_id": 7,
+      "repeated_feature_similarity": 0.7431770785493861,
+      "semantic_evidence": [
+        "closed_boundary_loop",
+        "substantial_shared_boundary",
+        "boundary_attached_to_neighbor",
+        "large_projected_span",
+        "large_projected_footprint",
+        "visible_model_relative_size",
+        "possible_repeated_feature_pair",
+        "distinct_neighbor_material",
+        "strong_exterior_visibility"
+      ],
+      "semantic_penalties": [],
+      "geometry_evidence_score": 1.04,
+      "geometry_evidence_threshold": 0.55,
+      "review_status": "awaiting_user_classification",
+      "review_category": "noise_candidate",
+      "review_image": "example/Kamesennin+AMS_region_review/F006_context_and_zoom.png",
+      "review_layout": {
+        "top_row": "whole-model context with candidate highlighted magenta",
+        "bottom_row": "candidate-centered zoom with local context",
+        "columns": [
+          "+X",
+          "-X",
+          "+Y",
+          "-Y",
+          "+Z",
+          "-Z"
+        ]
+      }
+    },
+    {
+      "fragment_id": 7,
+      "source_min_face_index": 130068,
+      "color_code": "DEFAULT",
+      "faces": 35,
+      "area_mm2": 1.5143794095118706,
+      "bbox_min": [
+        103.994873,
+        191.438965,
+        68.643645
+      ],
+      "bbox_max": [
+        106.132636,
+        193.164889,
+        69.21969
+      ],
+      "center": [
+        105.238024,
+        192.421141,
+        68.86399
+      ],
+      "physical_review_evidence": {
+        "long_thin_candidate": false,
+        "visible_area_mm2": 1.3203052631686976,
+        "visible_face_count": 30,
+        "boundary_length_mm": 9.717066088808206,
+        "width_estimate_mm": 0.27174977531322575,
+        "elongation_estimate": 17.878701238313937,
+        "bbox_diagonal_mm": 2.6132589065420464,
+        "measurement": "visible_surface_2A_over_perimeter",
+        "thresholds": {
+          "maximum_width_estimate_mm": 1.2,
+          "minimum_elongation": 12.0,
+          "minimum_span_mm": 10.0
+        }
+      },
+      "review_reason": "face_count_below_threshold",
+      "connectivity_color_code": "material:filament-slot:8",
+      "boundary_loop_count": 1,
+      "boundary_edge_count": 31,
+      "shared_boundary_edge_count": 8,
+      "shared_boundary_attachment_ratio": 0.25806451612903225,
+      "neighbor_group_slots": [
+        4
+      ],
+      "distinct_neighbor_material": true,
+      "bbox_diagonal_mm": 2.8072534869459145,
+      "bbox_diagonal_model_ratio": 0.011567926449418401,
+      "exterior_visible_face_ratio": 0.8571428571428571,
+      "projected_max_span_pixels": 11.510766772178444,
+      "projected_max_footprint_pixels": 105.00597585242807,
+      "projected_readable_view_count": 24,
+      "projected_view_count": 32,
+      "projected_readable_view_ratio": 0.75,
+      "repeated_feature_pair_fragment_id": 6,
+      "repeated_feature_similarity": 0.7431770785493861,
+      "semantic_evidence": [
+        "closed_boundary_loop",
+        "substantial_shared_boundary",
+        "readable_projected_span",
+        "large_projected_footprint",
+        "visible_model_relative_size",
+        "possible_repeated_feature_pair",
+        "distinct_neighbor_material",
+        "strong_exterior_visibility"
+      ],
+      "semantic_penalties": [],
+      "geometry_evidence_score": 0.8500000000000002,
+      "geometry_evidence_threshold": 0.55,
+      "review_status": "awaiting_user_classification",
+      "review_category": "noise_candidate",
+      "review_image": "example/Kamesennin+AMS_region_review/F007_context_and_zoom.png",
+      "review_layout": {
+        "top_row": "whole-model context with candidate highlighted magenta",
+        "bottom_row": "candidate-centered zoom with local context",
+        "columns": [
+          "+X",
+          "-X",
+          "+Y",
+          "-Y",
+          "+Z",
+          "-Z"
+        ]
+      }
+    },
+    {
+      "fragment_id": 8,
+      "source_min_face_index": 292644,
+      "color_code": "DEFAULT",
+      "faces": 92,
+      "area_mm2": 1.4128924680970791,
+      "bbox_min": [
+        123.473806,
+        190.60731,
+        109.960363
+      ],
+      "bbox_max": [
+        125.66337,
+        191.510606,
+        111.096404
+      ],
+      "center": [
+        124.730138,
+        191.160999,
+        110.688627
+      ],
+      "physical_review_evidence": {
+        "long_thin_candidate": false,
+        "visible_area_mm2": 1.4084982334020877,
+        "visible_face_count": 91,
+        "boundary_length_mm": 10.875172875276446,
+        "width_estimate_mm": 0.2590300401760342,
+        "elongation_estimate": 20.992107455733297,
+        "bbox_diagonal_mm": 2.626922653345078,
+        "measurement": "visible_surface_2A_over_perimeter",
+        "thresholds": {
+          "maximum_width_estimate_mm": 1.2,
+          "minimum_elongation": 12.0,
+          "minimum_span_mm": 10.0
+        }
+      },
+      "review_reason": "face_count_below_threshold",
+      "connectivity_color_code": "material:filament-slot:8",
+      "boundary_loop_count": 5,
+      "boundary_edge_count": 66,
+      "shared_boundary_edge_count": 16,
+      "shared_boundary_attachment_ratio": 0.24242424242424243,
+      "neighbor_group_slots": [
+        8
+      ],
+      "distinct_neighbor_material": true,
+      "bbox_diagonal_mm": 2.6269227867208054,
+      "bbox_diagonal_model_ratio": 0.01082483278635,
+      "exterior_visible_face_ratio": 0.9891304347826086,
+      "projected_max_span_pixels": 10.452337831799259,
+      "projected_max_footprint_pixels": 77.21678527046238,
+      "projected_readable_view_count": 18,
+      "projected_view_count": 32,
+      "projected_readable_view_ratio": 0.5625,
+      "repeated_feature_pair_fragment_id": 7,
+      "repeated_feature_similarity": 0.6592970862842378,
+      "semantic_evidence": [
+        "closed_boundary_loop",
+        "substantial_shared_boundary",
+        "readable_projected_span",
+        "large_projected_footprint",
+        "visible_model_relative_size",
+        "nontrivial_face_support",
+        "possible_repeated_feature_pair",
+        "distinct_neighbor_material",
+        "strong_exterior_visibility"
+      ],
+      "semantic_penalties": [],
+      "geometry_evidence_score": 0.8800000000000002,
+      "geometry_evidence_threshold": 0.55,
+      "review_status": "awaiting_user_classification",
+      "review_category": "noise_candidate",
+      "review_image": "example/Kamesennin+AMS_region_review/F008_context_and_zoom.png",
+      "review_layout": {
+        "top_row": "whole-model context with candidate highlighted magenta",
+        "bottom_row": "candidate-centered zoom with local context",
+        "columns": [
+          "+X",
+          "-X",
+          "+Y",
+          "-Y",
+          "+Z",
+          "-Z"
+        ]
+      }
+    }
+  ]
+}

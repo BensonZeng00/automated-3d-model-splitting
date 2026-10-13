@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from collections import Counter, defaultdict
+from itertools import permutations
 
 import numpy as np
 from scipy.spatial import ConvexHull, QhullError, cKDTree
@@ -311,10 +312,11 @@ def compose_part_with_interfaces(
     source_vertices = np.asarray(source_vertices, dtype=np.float64)
     source_faces = np.asarray(source_faces, dtype=np.int64)
     source_triangles = source_vertices[source_faces]
-    source_area_mm2 = float(np.linalg.norm(np.cross(
+    source_twice_areas = np.linalg.norm(np.cross(
         source_triangles[:, 1] - source_triangles[:, 0],
         source_triangles[:, 2] - source_triangles[:, 0],
-    ), axis=1).sum() * 0.5)
+    ), axis=1)
+    source_area_mm2 = float(source_twice_areas.sum() * 0.5)
     loops = _oriented_source_boundary_loops(source_vertices, source_faces)
     if not loops:
         raise ValueError("source exterior has no open boundary to receive the interface")
@@ -349,7 +351,7 @@ def compose_part_with_interfaces(
         _, selected, distances = min(candidates, key=lambda item: item[0])
         span = float(np.linalg.norm(np.ptp(outer_points, axis=0)))
         maximum_distance = float(distances.max())
-        allowed_distance = 0.15 + MAX_RELATIVE_SHAPE_CHANGE * span
+        allowed_distance = min(1.0, 0.15 + MAX_RELATIVE_SHAPE_CHANGE * span)
         if maximum_distance > allowed_distance:
             raise ValueError(
                 f"{attachment.interface_id}: exterior is too far from the simplified interface "
@@ -429,8 +431,24 @@ def compose_part_with_interfaces(
             retained_triangles[:, 1] - retained_triangles[:, 0],
             retained_triangles[:, 2] - retained_triangles[:, 0],
         ), axis=1)
-        if np.any(retained_twice_areas <= 2e-10):
-            continue
+        degenerate = retained_twice_areas <= 2e-10
+        surviving_degenerate_max_displacement_mm = 0.0
+        if np.any(degenerate):
+            degenerate_origins = source_face_origins[degenerate]
+            if (np.any(source_twice_areas[degenerate_origins] > 2e-10)
+                    or len(np.unique(degenerate_origins)) != len(degenerate_origins)):
+                continue
+            retained = retained_triangles[degenerate]
+            original = source_triangles[degenerate_origins]
+            # Match all three vertices one-to-one, independent of face winding.
+            # A surviving source defect may shift by at most 1 mm per vertex.
+            best_displacement = np.full(len(retained), np.inf)
+            for order in permutations(range(3)):
+                displacement = np.linalg.norm(retained - original[:, order], axis=2).max(axis=1)
+                best_displacement = np.minimum(best_displacement, displacement)
+            if np.any(best_displacement > 1.0):
+                continue
+            surviving_degenerate_max_displacement_mm = float(best_displacement.max())
         candidate_loops = _oriented_source_boundary_loops(clipped_vertices, retained_source_faces)
         candidate_assignments = []
         selected_loops = set()
@@ -445,11 +463,11 @@ def compose_part_with_interfaces(
             if not candidates:
                 break
             _, selected, distances = min(candidates, key=lambda item: item[0])
-            permitted_gap = max(
+            permitted_gap = min(1.0, max(
                 1.5 * original_gaps[id(attachment)],
                 1.5 * widths[attachment_positions[id(attachment)]],
                 0.15,
-            )
+            ))
             if float(distances.max()) > permitted_gap + 1e-6:
                 break
             selected_loops.add(selected)
@@ -643,6 +661,8 @@ def compose_part_with_interfaces(
         "source_exterior_faces_preserved": int(len(retained_source_faces)),
         "source_exterior_faces_replaced": int(clip_record["source_faces_removed"]),
         "source_face_origin_indices": source_face_origins.tolist(),
+        "retained_source_degenerate_faces": int(np.count_nonzero(degenerate)),
+        "maximum_source_degenerate_vertex_displacement_mm": surviving_degenerate_max_displacement_mm,
         "source_surface_remesh": clip_record,
         "interface_collars": collar_records,
         "interface_collar_scale": collar_scale,

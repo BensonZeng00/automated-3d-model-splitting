@@ -54,6 +54,26 @@ def test_mortise_probe_skips_start_surface_contact_but_keeps_far_exit():
     assert faces.tolist() == [1]
 
 
+def test_short_surface_recess_is_reported_and_head_wall_is_used():
+    front = trimesh.creation.box(extents=(0.5, 2.0, 2.0))
+    front.apply_translation([0.25, 0, 0])
+    head = trimesh.creation.box(extents=(9.2, 2.0, 2.0))
+    head.apply_translation([5.4, 0, 0])  # entry 0.8, exit 10
+    probe = build_mortise_shell_probe(np.vstack((front.triangles, head.triangles)))
+    origin, axis = [[-1., 0., 0.]], [[1., 0., 0.]]
+    original, _ = probe.exits(origin, axis, 12.)
+    resolved, _faces, gaps = probe.exits_allowing_short_gaps(origin, axis, 12.)
+    np.testing.assert_allclose(original, [1.5])
+    np.testing.assert_allclose(resolved, [11.])
+    assert len(gaps) == 1
+    np.testing.assert_allclose(gaps[0]["gap_mm"], .3)
+    blocked, _faces, gaps = probe.exits_allowing_short_gaps(
+        origin, axis, 12., gap_tolerance_mm=.2
+    )
+    np.testing.assert_allclose(blocked, [1.5])
+    assert not gaps
+
+
 def test_backoff_queries_once_and_keeps_positive_engagement():
     host = trimesh.creation.box(extents=(4., 4., 2.))
     real = build_mortise_shell_probe(host.triangles)

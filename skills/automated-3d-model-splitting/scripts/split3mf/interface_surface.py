@@ -179,11 +179,19 @@ def build_pairwise_interface_surfaces(
         + [f"profile_center_midpoint_{i:03d}" for i in range(sample_count)]
         + ["profile_center"]
     )
-    hits, hit_faces = mortise_shell_probe.exits(
-        samples, np.broadcast_to(axis, samples.shape),
-        alignment + limit + clearance + INTERFACE_WALL_RESERVE_MM,
-        epsilon=MORTISE_RAY_NUMERICAL_EPSILON_MM,
-    )
+    if hasattr(mortise_shell_probe, "exits_allowing_short_gaps"):
+        hits, hit_faces, short_gaps = mortise_shell_probe.exits_allowing_short_gaps(
+            samples, np.broadcast_to(axis, samples.shape),
+            alignment + limit + clearance + INTERFACE_WALL_RESERVE_MM,
+            gap_tolerance_mm=1.0, epsilon=MORTISE_RAY_NUMERICAL_EPSILON_MM,
+        )
+    else:
+        hits, hit_faces = mortise_shell_probe.exits(
+            samples, np.broadcast_to(axis, samples.shape),
+            alignment + limit + clearance + INTERFACE_WALL_RESERVE_MM,
+            epsilon=MORTISE_RAY_NUMERICAL_EPSILON_MM,
+        )
+        short_gaps = []
     depth = limit
     attempts = []
     while True:
@@ -268,6 +276,8 @@ def build_pairwise_interface_surfaces(
             "depth_reference": "frozen_outer_boundary",
             "plane_alignment_travel_max_mm": alignment,
             "depth_probe_query_count": 1, "extension_depth_attempts": attempts,
+            "short_surface_gaps_mm": short_gaps,
+            "short_surface_gap_tolerance_mm": 1.0,
             "wall_reserve_mm": INTERFACE_WALL_RESERVE_MM,
         })
 

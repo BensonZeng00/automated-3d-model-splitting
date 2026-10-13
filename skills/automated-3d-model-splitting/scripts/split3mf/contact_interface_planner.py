@@ -301,14 +301,16 @@ def plan_contact_interfaces(
         ]
         tenon_triangles = vertices[faces[components[tenon - 1].global_faces]]
         mortise_triangles = vertices[faces[components[mortise - 1].global_faces]]
-        local_axis_results = [
-            inward_interface_axis(
-                points, tenon_triangles, source_probe=source_probe,
-                mortise_triangles=mortise_triangles,
-                toward_mortise=toward_host, maximum_mm=source_ray_limit,
-            )
-            for points in tenon_contact_loops
-        ]
+        local_axis_results = []
+        for points in tenon_contact_loops:
+            try:
+                local_axis_results.append(inward_interface_axis(
+                    points, tenon_triangles, source_probe=source_probe,
+                    mortise_triangles=mortise_triangles,
+                    toward_mortise=toward_host, maximum_mm=source_ray_limit,
+                ))
+            except ValueError as exc:
+                raise ValueError(f"{interface_id}: {exc}") from exc
         local_axes = [result[0] for result in local_axis_results]
         local_axis_evidence = [result[1] for result in local_axis_results]
         insertion_axis = np.sum(local_axes, axis=0)
@@ -365,7 +367,7 @@ def plan_contact_interfaces(
                             ]
                         ],
                         "boundary_points_mm": [
-                            point.round(6).tolist()
+                            point.tolist()
                             for point in simplified_loop_points[
                                 (tenon, left_loop if tenon == left else right_loop)
                             ]

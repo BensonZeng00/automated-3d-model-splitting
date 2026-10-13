@@ -24,7 +24,18 @@ class LocalRayProbe:
         """Return the first surface hit, including entries, for side classification."""
         return self._hits(points, directions, maximum_mm, epsilon, outward_only=False)
 
-    def _hits(self, points, directions, maximum_mm, epsilon, *, outward_only):
+    def exits_allowing_short_gaps(self, points, directions, maximum_mm,
+                                  gap_tolerance_mm=1.0, epsilon=1e-7):
+        """Return the material exit after sub-tolerance surface recesses.
+
+        A painted inset may briefly leave and re-enter the original surface.
+        Such gaps are recorded for review instead of being called a thin host.
+        """
+        return self._hits(points, directions, maximum_mm, epsilon,
+                          outward_only=False, short_gap_mm=gap_tolerance_mm)
+
+    def _hits(self, points, directions, maximum_mm, epsilon, *, outward_only,
+              short_gap_mm=None):
         points = np.asarray(points, dtype=float).reshape((-1, 3))
         directions = np.broadcast_to(np.asarray(directions, dtype=float), points.shape).copy()
         lengths = np.linalg.norm(directions, axis=1)
@@ -35,6 +46,7 @@ class LocalRayProbe:
         directions /= lengths[:, None]
         distances = np.full(len(points), np.nan)
         faces = np.full(len(points), -1, dtype=np.int64)
+        gap_records = []
         for i, (point, axis) in enumerate(zip(points, directions)):
             candidates = []
             for tree, bucket_ids, radius in self.buckets:
@@ -68,6 +80,35 @@ class LocalRayProbe:
             hit = (u >= -1e-9) & (v >= -1e-9) & (u+v <= 1+1e-9)
             hit &= (travel > epsilon) & (travel <= maximum_mm)
             if hit.any():
-                best = np.flatnonzero(hit)[np.argmin(travel[hit])]
-                distances[i], faces[i] = travel[best], ids[best]
+                if short_gap_mm is None:
+                    best = np.flatnonzero(hit)[np.argmin(travel[hit])]
+                    distances[i], faces[i] = travel[best], ids[best]
+                else:
+                    ordered = np.flatnonzero(hit)[np.argsort(travel[hit])]
+                    # Multiple triangles on a shared edge describe one event.
+                    events = []
+                    for index in ordered:
+                        if events and travel[index] - events[-1][0] <= 1e-6:
+                            continue
+                        events.append((float(travel[index]), int(ids[index]),
+                                       bool(facing[valid][index] > 0)))
+                    for position, (distance, face, outward) in enumerate(events):
+                        if not outward:
+                            continue
+                        following_entry = next(
+                            (event for event in events[position + 1:] if not event[2]),
+                            None,
+                        )
+                        if (following_entry is not None
+                                and following_entry[0] - distance <= short_gap_mm):
+                            gap_records.append({"probe_index": i,
+                                                "exit_mm": distance,
+                                                "entry_mm": following_entry[0],
+                                                "gap_mm": following_entry[0] - distance,
+                                                "exit_face": face})
+                            continue
+                        distances[i], faces[i] = distance, face
+                        break
+        if short_gap_mm is not None:
+            return distances, faces, gap_records
         return distances, faces

@@ -111,7 +111,10 @@ class BoundarySnapshotBuilder:
                     })
                     continue
                 retained = np.arange(len(source_ids), dtype=np.int64)
-                filtered_source_indices = _remove_isolated_spikes(source_points)
+                spike_filtered_indices = _remove_isolated_spikes(source_points)
+                filtered_source_indices = _remove_short_backtracks(
+                    source_points, spike_filtered_indices
+                )
                 loop_retained_fraction = _retained_fraction_for_loop(
                     len(filtered_source_indices), float(retained_fraction)
                 )
@@ -173,7 +176,10 @@ class BoundarySnapshotBuilder:
                     "simplified_vertex_count": int(len(simplified_ids)),
                     "retained_fraction": float(loop_retained_fraction),
                     "filtered_spike_vertex_count": int(
-                        len(source_ids) - len(filtered_source_indices)
+                        len(source_ids) - len(spike_filtered_indices)
+                    ),
+                    "filtered_backtrack_vertex_count": int(
+                        len(spike_filtered_indices) - len(filtered_source_indices)
                     ),
                     "perimeter_mm": perimeter,
                     "span_mm": span,
@@ -364,6 +370,38 @@ def _remove_isolated_spikes(points: np.ndarray) -> np.ndarray:
         index_to_remove = int(candidate_indices[int(np.argmax(scores))])
         retained.pop(index_to_remove)
         removed += 1
+    return np.asarray(retained, dtype=np.int64)
+
+
+def _remove_short_backtracks(
+    points: np.ndarray, retained_indices: np.ndarray, maximum_mm: float = 1.0
+) -> np.ndarray:
+    """Remove short, collinear walks that double back over the previous edge.
+
+    A T-junction can have distinct vertex IDs while occupying the same line.
+    Keep the source vertices and faces intact; only the frozen interface path
+    omits the tip of the doubled-back walk.
+    """
+    retained = list(map(int, retained_indices))
+    for _ in range(len(retained)):
+        if len(retained) < 4:
+            break
+        ring = np.asarray(points[retained], dtype=np.float64)
+        before = np.roll(ring, 1, axis=0)
+        after = np.roll(ring, -1, axis=0)
+        incoming = ring - before
+        length2 = np.einsum("ij,ij->i", incoming, incoming)
+        fraction = np.einsum("ij,ij->i", after - before, incoming) / np.maximum(length2, 1e-20)
+        nearest = before + fraction[:, None] * incoming
+        deviation = np.linalg.norm(after - nearest, axis=1)
+        retreat = np.linalg.norm(ring - after, axis=1)
+        candidates = np.flatnonzero(
+            (length2 > 1e-16) & (fraction > 0.0) & (fraction < 1.0)
+            & (deviation <= 0.05) & (retreat <= maximum_mm)
+        )
+        if not len(candidates):
+            break
+        retained.pop(int(candidates[0]))
     return np.asarray(retained, dtype=np.int64)
 
 

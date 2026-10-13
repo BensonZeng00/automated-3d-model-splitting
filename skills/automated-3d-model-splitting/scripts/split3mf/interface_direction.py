@@ -232,10 +232,33 @@ def inward_interface_axis(points, triangles, *, source_probe=None,
                 points, axis, triangles, mortise_triangles
             )
             evidence["region_side_evidence"] = region_evidence
+        # Surface proximity identifies the neighboring painted patch, but an
+        # annular host can be closer on the exterior side of an inset.  When
+        # local source normals strongly establish the material side, retain
+        # their inward sign even if that proximity vote points the other way.
+        normal_alignment = abs(float(selected.sum(axis=0) @ axis)) / max(total_area, 1e-30)
+        normal_sign = -1 if signed > 0 else 1
+        if (region_sign is not None and consensus >= 0.90
+                and normal_alignment >= 0.70 and region_sign != normal_sign):
+            region_sign = normal_sign
+            evidence["region_side_conflict"] = True
+            evidence["selection"] = "strong_inward_normals_over_region_proximity"
+        if region_sign is None and consensus < SOURCE_NORMAL_FALLBACK_MIN_CONSENSUS:
+            # A broad interface can lack decisive local surface votes.  A
+            # confirmed part relationship can still orient its stable axis,
+            # provided the part centers clearly differ along that axis.
+            toward = np.asarray(toward_mortise, dtype=float)
+            toward_length = float(np.linalg.norm(toward))
+            alignment = float(axis @ toward) / max(toward_length, 1e-30)
+            if toward_length > 1e-8 and abs(alignment) >= 0.60:
+                region_sign = 1 if alignment > 0 else -1
+                evidence["selection"] = "low_confidence_confirmed_part_direction"
+                evidence["direction_warning"] = "local material side was ambiguous"
+                evidence["center_axis_alignment"] = alignment
         if region_sign is not None:
             if region_sign < 0:
                 axis = -axis
-            evidence["selection"] = "paired_region_ownership_toward_confirmed_mortise"
+            evidence.setdefault("selection", "paired_region_ownership_toward_confirmed_mortise")
         elif not any(supported):
             region_evidence = evidence.get("region_side_evidence", {})
             positive_votes = int(region_evidence.get("positive_axis_votes", 0))

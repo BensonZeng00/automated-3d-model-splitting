@@ -132,6 +132,30 @@ def test_symmetric_rays_and_ambiguous_region_ownership_block_centroid_fallback(m
         )
 
 
+def test_strong_inward_normals_override_outward_surface_proximity(monkeypatch):
+    monkeypatch.setattr("split3mf.interface_direction._source_boundary_orientation",
+                        lambda *args: (None, {"matched": False}))
+    monkeypatch.setattr("split3mf.interface_direction._region_side_direction",
+                        lambda *args: (1, {"direction_confidence": 1.0}))
+    ring = np.array([[-1., -1., 0.], [1., -1., 0.],
+                     [1., 1., 0.], [-1., 1., 0.]])
+    triangles = ring[[[0, 1, 2], [0, 2, 3]]]
+
+    class Probe:
+        def __init__(self, faces):
+            self.triangles = faces
+
+        def first_hits(self, starts, directions, maximum):
+            return np.ones(3), np.zeros(3, dtype=int)
+
+    axis, evidence = inward_interface_axis(
+        ring, triangles, source_probe=Probe(triangles),
+        mortise_triangles=triangles, toward_mortise=[0., 0., 1.], maximum_mm=5.
+    )
+    np.testing.assert_allclose(axis, [0., 0., -1.])
+    assert evidence["region_side_conflict"] is True
+
+
 @pytest.mark.parametrize("reverse", [False, True])
 @pytest.mark.parametrize("sign", [-1., 1.])
 def test_wrapping_host_cannot_reverse_outward_wound_insert(reverse, sign):

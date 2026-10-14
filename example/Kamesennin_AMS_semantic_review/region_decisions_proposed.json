@@ -1,0 +1,67 @@
+{
+  "schema_version": 2,
+  "source": "/workspace/automated-3d-model-splitting/example/Kamesennin+AMS.3mf",
+  "source_face_count": 458624,
+  "noise_max_faces": 100,
+  "small_region_max_faces": 999,
+  "max_review_candidates": 10,
+  "user_confirmed": false,
+  "items": [
+    {
+      "fragment_id": 1,
+      "source_min_face_index": 284216,
+      "semantic_label": "白色头部细长装饰",
+      "visual_confidence": "MED",
+      "classification": "part"
+    },
+    {
+      "fragment_id": 2,
+      "source_min_face_index": 238690,
+      "semantic_label": "眼镜左侧白色细节",
+      "visual_confidence": "MED",
+      "classification": "part"
+    },
+    {
+      "fragment_id": 3,
+      "source_min_face_index": 287102,
+      "semantic_label": "眼镜右侧白色细节",
+      "visual_confidence": "MED",
+      "classification": "part"
+    },
+    {
+      "fragment_id": 4,
+      "source_min_face_index": 162142,
+      "semantic_label": "胡须下缘白色小片",
+      "visual_confidence": "LOW",
+      "classification": "part"
+    },
+    {
+      "fragment_id": 5,
+      "source_min_face_index": 104321,
+      "semantic_label": "蓝色裤装小色块",
+      "visual_confidence": "LOW",
+      "classification": "noise"
+    },
+    {
+      "fragment_id": 6,
+      "source_min_face_index": 323045,
+      "semantic_label": "肤色下肢小片",
+      "visual_confidence": "LOW",
+      "classification": "noise"
+    },
+    {
+      "fragment_id": 7,
+      "source_min_face_index": 130068,
+      "semantic_label": "另一侧肤色下肢小片",
+      "visual_confidence": "LOW",
+      "classification": "noise"
+    },
+    {
+      "fragment_id": 8,
+      "source_min_face_index": 292644,
+      "semantic_label": "肤色躯干小片",
+      "visual_confidence": "LOW",
+      "classification": "noise"
+    }
+  ]
+}

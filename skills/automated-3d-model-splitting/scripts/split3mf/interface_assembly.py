@@ -12,6 +12,7 @@ from .mesh import build_local_mesh
 from .part_interface_composition import InterfaceAttachment, compose_part_with_interfaces
 from .project import color_resolution_status
 from .spatial_intersections import (
+    clean_tiny_boundary_contacts_3d,
     remove_true_self_intersections_3d,
 )
 from .interface_relations import interface_role_index
@@ -40,6 +41,10 @@ def build_pairwise_interface_surfaces(
     """Build paired annular surfaces using only the Stage 04 interface contract."""
     if interface_plan.get("schema") != "contact-interface-plan/v1":
         raise ValueError("interface builder requires contact-interface-plan/v1")
+    unmatched = interface_plan.get("unmatched_contact_segments", [])
+    if unmatched:
+        pairs = ["/".join(item["parts"]) for item in unmatched]
+        raise ValueError(f"Stage 04 has unresolved contact segments: {pairs}")
     interfaces = interface_plan.get("interfaces")
     if not isinstance(interfaces, list):
         raise ValueError("Stage 04 interface plan has no interfaces list")
@@ -96,10 +101,16 @@ def build_pairwise_interface_surfaces(
                 points
             )
             if not np.array_equal(cleaned_points, points):
-                raise ValueError(
-                    f"{interface_id}: frozen Stage 03 boundary crosses itself; "
-                    "repair the shared boundary before Stage 04"
+                _candidate, _ids, tolerance = clean_tiny_boundary_contacts_3d(
+                    points, np.arange(len(points), dtype=np.int64)
                 )
+                if (tolerance["remaining_intersection_count"]
+                        or not tolerance["removed_crossing_loop_count"]):
+                    raise ValueError(
+                        f"{interface_id}: frozen Stage 03 boundary has an unsafe "
+                        "self-intersection"
+                    )
+                boundary_cleanup["tolerated_point_contacts"] = tolerance
             if len(points) < 3:
                 raise ValueError(f"{interface_id}: 3D crossing cleanup left fewer than three boundary points")
             simplified_boundary_point_count = len(points)
@@ -274,9 +285,14 @@ def build_pairwise_part_meshes(
                 if (side == "mortise" and relation["contact"].get("counterpart_mode")
                         == "imprinted_host_surface"):
                     imprinted_pockets.append((
-                        part_id, interface_id,
+                        part_id, roles["tenon_part"], interface_id,
                         interface_arrays[f"{stem}_{side}_vertices"],
                         interface_arrays[f"{stem}_{side}_faces"],
+                        record["densified_boundary_point_count"],
+                        record[f"{side}_surface"]["outer_boundary_cap_face_count"],
+                        vertices[np.asarray(_loop["boundary_vertex_ids"], dtype=np.int64)],
+                        np.asarray(relation["contact"].get("contact_segments_mm", []), dtype=np.float64).reshape((-1, 2, 3)),
+                        record["mortise_surface"]["plane_alignment_travel_max_mm"],
                     ))
                     continue
                 attachments_by_part[part_id].append(InterfaceAttachment(
@@ -378,12 +394,32 @@ def build_pairwise_part_meshes(
         from .imprinted_host_attachment import carve_imprinted_mortise
 
         part_positions = {part["part_id"]: index for index, part in enumerate(parts)}
-        for part_id, interface_id, pocket_vertices, pocket_faces in imprinted_pockets:
+        for (part_id, tenon_part_id, interface_id, pocket_vertices,
+             pocket_faces, outer_count, cap_count, original_points, contact_segments,
+             plane_alignment_mm) in imprinted_pockets:
             index = part_positions[part_id]
-            carve_imprinted_mortise(
-                parts[index], part_records[index], pocket_vertices, pocket_faces,
-                interface_id,
+            tenon_index = _part_index(tenon_part_id)
+            tenon_vertices, tenon_faces, _, _ = build_local_mesh(
+                vertices, faces, components[tenon_index - 1]
             )
+            # Join the open socket surface to its source shell before carving.
+            cutter, _ = compose_part_with_interfaces(
+                tenon_vertices, tenon_faces,
+                [InterfaceAttachment(
+                    interface_id=interface_id, side="mortise",
+                    vertices=pocket_vertices, faces=pocket_faces,
+                    outer_vertex_count=outer_count,
+                    outer_cap_face_count=cap_count,
+                    original_boundary_points=original_points,
+                )],
+            )
+            carve_imprinted_mortise(
+                parts[index], part_records[index], cutter.vertices, cutter.faces,
+                interface_id, contact_segments,
+                MAX_INTERFACE_EXTENSION_MM + plane_alignment_mm + 2.0,
+            )
+            part_records[part_positions[tenon_part_id]]["interface_roles"][interface_id] = "tenon"
+            part_records[index]["interface_roles"][interface_id] = "mortise"
     if remove_detached_micro_shells_part_ids:
         from .detached_micro_shells import remove_detached_micro_shells
 

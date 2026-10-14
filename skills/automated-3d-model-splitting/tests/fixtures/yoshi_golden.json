@@ -1,0 +1,139 @@
+{
+  "schema": "yoshi-golden-regression/v1",
+  "source_sha256": "9035b9b1596b41d9ebd7fe402fffb554d9f30840117e659b2e21437ae2ba4d8e",
+  "source_face_count": 458129,
+  "regions": [
+    {
+      "part": "P01",
+      "source_min_face_index": 0,
+      "face_count": 206206,
+      "color_code": "DEFAULT",
+      "label": "绿色头部与身体主体"
+    },
+    {
+      "part": "P02",
+      "source_min_face_index": 182509,
+      "face_count": 39427,
+      "color_code": "0C",
+      "label": "画面右侧橙色鞋子"
+    },
+    {
+      "part": "P03",
+      "source_min_face_index": 179758,
+      "face_count": 32471,
+      "color_code": "0C",
+      "label": "画面左侧橙色鞋子"
+    },
+    {
+      "part": "P04",
+      "source_min_face_index": 3183,
+      "face_count": 18353,
+      "color_code": "0C",
+      "label": "身体中央橙色块"
+    },
+    {
+      "part": "P05",
+      "source_min_face_index": 515,
+      "face_count": 54656,
+      "color_code": "1C",
+      "label": "白色头身条带"
+    },
+    {
+      "part": "P06",
+      "source_min_face_index": 2564,
+      "face_count": 26496,
+      "color_code": "1C",
+      "label": "白色胸腹边缘区域"
+    }
+  ],
+  "direction_policy_overrides": {
+    "I001": "larger_area_first",
+    "I002": "larger_area_first"
+  },
+  "approved_interface_ids": {
+    "P01/P03": "I001",
+    "P01/P02": "I002",
+    "P01/P05": "I003",
+    "P01/P06": "I004",
+    "P04/P06": "I005"
+  },
+  "interfaces": [
+    {
+      "parts": [
+        "P01",
+        "P03"
+      ],
+      "tenon_part": "P01",
+      "mortise_part": "P03",
+      "insertion_direction": [
+        0.06215,
+        0.420407,
+        -0.905205
+      ]
+    },
+    {
+      "parts": [
+        "P01",
+        "P02"
+      ],
+      "tenon_part": "P01",
+      "mortise_part": "P02",
+      "insertion_direction": [
+        -0.012387,
+        0.409422,
+        -0.912261
+      ]
+    },
+    {
+      "parts": [
+        "P01",
+        "P05"
+      ],
+      "tenon_part": "P05",
+      "mortise_part": "P01",
+      "insertion_direction": [
+        0.002821,
+        -0.997474,
+        0.070973
+      ]
+    },
+    {
+      "parts": [
+        "P01",
+        "P06"
+      ],
+      "tenon_part": "P06",
+      "mortise_part": "P01",
+      "insertion_direction": [
+        -0.037329,
+        0.954055,
+        -0.297296
+      ]
+    },
+    {
+      "parts": [
+        "P04",
+        "P06"
+      ],
+      "tenon_part": "P04",
+      "mortise_part": "P06",
+      "insertion_direction": [
+        -0.040786,
+        0.948207,
+        -0.315024
+      ]
+    }
+  ],
+  "part_colors": {
+    "P01": "#00AE42FF",
+    "P02": "#FF6A13FF",
+    "P03": "#FF6A13FF",
+    "P04": "#FF6A13FF",
+    "P05": "#FFFFFFFF",
+    "P06": "#FFFFFFFF"
+  },
+  "max_axis_angle_degrees": 15,
+  "surface_vertex_p99_mm": 1.0,
+  "bbox_tolerance_mm": 1.0,
+  "approved_sha256": "5f200841b310413849a4d1b51a23f8d2bda191fbccaa35b708a6f73a07229401"
+}

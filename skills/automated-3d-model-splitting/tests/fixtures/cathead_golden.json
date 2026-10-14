@@ -1,0 +1,239 @@
+{
+  "schema": "cathead-golden-regression/v1",
+  "source_sha256": "33e4925462367629622271b657b5a5910f2c63e406207ec6ff8912a3d1313a37",
+  "source_face_count": 238156,
+  "regions": [
+    {
+      "part": "P01",
+      "source_min_face_index": 0,
+      "face_count": 149764,
+      "color_code": "DEFAULT",
+      "label": "头部黑色外壳"
+    },
+    {
+      "part": "P02",
+      "source_min_face_index": 72126,
+      "face_count": 6996,
+      "color_code": "DEFAULT",
+      "label": "黑色鼻口细节"
+    },
+    {
+      "part": "P03",
+      "source_min_face_index": 95024,
+      "face_count": 3765,
+      "color_code": "DEFAULT",
+      "label": "右侧黑色脸颊斑块"
+    },
+    {
+      "part": "P04",
+      "source_min_face_index": 46153,
+      "face_count": 3724,
+      "color_code": "DEFAULT",
+      "label": "左侧黑色脸颊斑块"
+    },
+    {
+      "part": "P05",
+      "source_min_face_index": 11489,
+      "face_count": 5419,
+      "color_code": "0C",
+      "label": "左耳粉色内耳"
+    },
+    {
+      "part": "P06",
+      "source_min_face_index": 121982,
+      "face_count": 5411,
+      "color_code": "0C",
+      "label": "右耳粉色内耳"
+    },
+    {
+      "part": "P07",
+      "source_min_face_index": 121020,
+      "face_count": 1172,
+      "color_code": "0C",
+      "label": "右侧粉色腮红"
+    },
+    {
+      "part": "P08",
+      "source_min_face_index": 223810,
+      "face_count": 1163,
+      "color_code": "0C",
+      "label": "左侧粉色腮红"
+    },
+    {
+      "part": "P09",
+      "source_min_face_index": 36828,
+      "face_count": 48167,
+      "color_code": "7C",
+      "label": "白色口鼻及下巴区域"
+    },
+    {
+      "part": "P10",
+      "source_min_face_index": 42182,
+      "face_count": 5279,
+      "color_code": "7C",
+      "label": "左眼白色外圈"
+    },
+    {
+      "part": "P11",
+      "source_min_face_index": 97135,
+      "face_count": 5187,
+      "color_code": "7C",
+      "label": "右眼白色外圈"
+    },
+    {
+      "part": "P12",
+      "source_min_face_index": 98963,
+      "face_count": 1066,
+      "color_code": "7C",
+      "label": "右眼高光"
+    },
+    {
+      "part": "P13",
+      "source_min_face_index": 50628,
+      "face_count": 1043,
+      "color_code": "7C",
+      "label": "左眼高光"
+    }
+  ],
+  "interfaces": [
+    {
+      "interface_id": "I001",
+      "tenon_part": "P05",
+      "mortise_part": "P01",
+      "insertion_direction": [
+        0.643845,
+        0.761205,
+        -0.077658
+      ]
+    },
+    {
+      "interface_id": "I002",
+      "tenon_part": "P06",
+      "mortise_part": "P01",
+      "insertion_direction": [
+        -0.643397,
+        0.761379,
+        -0.079635
+      ]
+    },
+    {
+      "interface_id": "I003",
+      "tenon_part": "P07",
+      "mortise_part": "P01",
+      "insertion_direction": [
+        -0.022225,
+        0.998665,
+        -0.046637
+      ]
+    },
+    {
+      "interface_id": "I004",
+      "tenon_part": "P08",
+      "mortise_part": "P01",
+      "insertion_direction": [
+        0.023906,
+        0.99859,
+        -0.047397
+      ]
+    },
+    {
+      "interface_id": "I005",
+      "tenon_part": "P09",
+      "mortise_part": "P01",
+      "insertion_direction": [
+        -0.000669,
+        0.202258,
+        0.979332
+      ]
+    },
+    {
+      "interface_id": "I006",
+      "tenon_part": "P10",
+      "mortise_part": "P01",
+      "insertion_direction": [
+        0.278994,
+        0.950353,
+        -0.137809
+      ]
+    },
+    {
+      "interface_id": "I007",
+      "tenon_part": "P11",
+      "mortise_part": "P01",
+      "insertion_direction": [
+        -0.278556,
+        0.950511,
+        -0.137606
+      ]
+    },
+    {
+      "interface_id": "I008",
+      "tenon_part": "P02",
+      "mortise_part": "P09",
+      "insertion_direction": [
+        0.000187,
+        0.997023,
+        -0.0771
+      ]
+    },
+    {
+      "interface_id": "I009",
+      "tenon_part": "P03",
+      "mortise_part": "P11",
+      "insertion_direction": [
+        -0.200412,
+        0.973812,
+        -0.107354
+      ]
+    },
+    {
+      "interface_id": "I010",
+      "tenon_part": "P12",
+      "mortise_part": "P03",
+      "insertion_direction": [
+        -0.125326,
+        0.919123,
+        -0.373505
+      ]
+    },
+    {
+      "interface_id": "I011",
+      "tenon_part": "P04",
+      "mortise_part": "P10",
+      "insertion_direction": [
+        0.201463,
+        0.973493,
+        -0.108279
+      ]
+    },
+    {
+      "interface_id": "I012",
+      "tenon_part": "P13",
+      "mortise_part": "P04",
+      "insertion_direction": [
+        0.163429,
+        0.918338,
+        -0.360482
+      ]
+    }
+  ],
+  "part_colors": {
+    "P01": "#313129FF",
+    "P02": "#313129FF",
+    "P03": "#313129FF",
+    "P04": "#313129FF",
+    "P05": "#DD607CFF",
+    "P06": "#DD607CFF",
+    "P07": "#DD607CFF",
+    "P08": "#DD607CFF",
+    "P09": "#FFFFFFFF",
+    "P10": "#FFFFFFFF",
+    "P11": "#FFFFFFFF",
+    "P12": "#FFFFFFFF",
+    "P13": "#FFFFFFFF"
+  },
+  "max_axis_angle_degrees": 15,
+  "surface_vertex_p99_mm": 1.0,
+  "bbox_tolerance_mm": 1.0,
+  "approved_sha256": "938011a86779e5a0ef7fe64d48ee05e140ca5d43f0f79d012e370d88eb0f9b1b"
+}

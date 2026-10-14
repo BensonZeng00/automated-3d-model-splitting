@@ -30,7 +30,7 @@ python scripts/run_stage05_from_artifacts.py `
 
 The replay validates existing artifact manifests and the frozen boundary fingerprint. It builds complete colored parts and exports a grouped 3MF in a new run directory. The resulting meshes and reloaded package are recorded in the Stage 05 summary.
 
-Curved simplified boundaries automatically use a root-capped shoulder without a protruding connector. Shape classification uses scale-normalized, arc-length-weighted sagitta from the contact rim's best-fit plane. It requires at least 1 mm and 20% of the smaller in-plane span in sustained deviation over at least 80% of the rim; shallow warps and local waviness remain planar. Planar boundaries use the scaled tapered profile; no per-interface routing flags are required or accepted. When changing the classifier, rerun the complete connector harness so square, curved, and concave-V production cases remain valid.
+Curved simplified boundaries automatically use a root-capped shoulder without a protruding connector. Shape classification uses scale-normalized, arc-length-weighted sagitta from the contact rim's best-fit plane. It requires at least 2 mm and 20% of the smaller in-plane span in sustained deviation over at least 90% of the rim; lesser bows use the ordinary scaled tapered connector. No per-interface routing flags are required or accepted. When changing the classifier, rerun the complete connector harness so square, curved, and concave-V production cases remain valid.
 
 If Stage 03 completed but the run stopped before Stage 04 because semantic labels
 were missing or supplied later, reuse its saved mesh, region, and frozen-boundary

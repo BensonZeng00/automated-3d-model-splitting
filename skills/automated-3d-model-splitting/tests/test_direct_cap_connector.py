@@ -10,7 +10,7 @@ load_core_dependencies()
 from split3mf.interface_surface import build_pairwise_interface_surfaces, build_mortise_shell_probe
 
 
-@pytest.mark.parametrize("amplitude", [4., 5., 6.])
+@pytest.mark.parametrize("amplitude", [5., 6., 8.])
 @pytest.mark.parametrize("reverse", [False, True])
 def test_curved_shoulder_automatically_closes_without_connector(amplitude, reverse):
     angles = np.arange(40)*2*np.pi/40

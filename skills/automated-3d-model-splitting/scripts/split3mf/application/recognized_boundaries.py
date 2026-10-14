@@ -18,6 +18,7 @@ class RecognizedBoundaries:
     source_vertex_count: int
     source_face_count: int
     fingerprint: str
+    component_loop_contact_labels: tuple[tuple[tuple[int, ...], ...], ...] = ()
     simplification_records: tuple[dict, ...] = ()
     excluded_components: tuple[dict, ...] = ()
 
@@ -38,15 +39,22 @@ class RecognizedBoundaries:
         loop_offsets = [0]
         vertices: list[int] = []
         points: list[tuple[float, float, float]] = []
-        for loops, point_loops in zip(self.component_loops, self.component_loop_points):
-            for loop, loop_points in zip(loops, point_loops):
+        labels: list[int] = []
+        for part, (loops, point_loops) in enumerate(zip(self.component_loops, self.component_loop_points)):
+            part_labels = self.component_loop_contact_labels[part] if self.component_loop_contact_labels else ()
+            for index, (loop, loop_points) in enumerate(zip(loops, point_loops)):
                 vertices.extend(loop)
                 points.extend(loop_points)
+                edge_labels = part_labels[index] if part_labels else (0,) * len(loop)
+                if len(edge_labels) != len(loop):
+                    raise ValueError("contact labels do not align with frozen boundary")
+                labels.extend(edge_labels)
                 loop_offsets.append(len(vertices))
             component_offsets.append(len(loop_offsets) - 1)
         return {
             "boundary_vertex_ids": np.asarray(vertices, dtype=np.int64),
             "boundary_points": np.asarray(points, dtype=np.float64).reshape((-1, 3)),
+            "boundary_contact_part_ids": np.asarray(labels, dtype=np.int32),
             "boundary_loop_offsets": np.asarray(loop_offsets, dtype=np.int64),
             "component_loop_offsets": np.asarray(component_offsets, dtype=np.int64),
         }

@@ -116,13 +116,15 @@ class ContactInterfacePlannerTests(unittest.TestCase):
             {"component_index": 1, "loop_index": 1, "status": "simplified"},
             {"component_index": 1, "loop_index": 2, "status": "simplified"},
         ]
-        loops, points = _filter_unpaired_component_loops(
+        loops, points, labels = _filter_unpaired_component_loops(
             [(tuple(range(30)), tuple(range(30, 60))), (tuple(range(60, 90)),), (tuple(range(90, 120)),)],
             [(outer, inner), (outer,), (standalone,)],
+            [((0,) * 30, (0,) * 30), ((0,) * 30,), ((0,) * 30,)],
             [1, 2, 3], records,
         )
         self.assertEqual([len(value) for value in loops], [1, 1, 1])
         self.assertEqual([len(value) for value in points], [1, 1, 1])
+        self.assertEqual(labels, [((0,) * 30,), ((0,) * 30,), ((0,) * 30,)])
         self.assertEqual(records[1]["recognition_status"], "unpaired_boundary_ignored")
 
 

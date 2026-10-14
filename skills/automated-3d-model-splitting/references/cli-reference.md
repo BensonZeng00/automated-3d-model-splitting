@@ -2,6 +2,8 @@
 
 Current release: `3.0.0`.
 
+Resolve all relative script paths against the directory containing the loaded `SKILL.md`. From another working directory, invoke the selected Python interpreter with the absolute script path and absolute input, output, and review-file paths. Install runtime dependencies from that skill directory's `requirements.txt`; see [installation and entry location](../SKILL.md#安装与入口定位).
+
 Run `python scripts/split_painted_3mf.py --help` for the active options. The source must be a vendor-painted `.3mf`.
 
 ```powershell

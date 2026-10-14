@@ -32,12 +32,14 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
-          cache-dependency-path: skills/automated-3d-model-splitting/requirements.txt
+          cache-dependency-path: |
+            requirements-dev.txt
+            skills/automated-3d-model-splitting/requirements.txt
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r skills/automated-3d-model-splitting/requirements.txt
+          python -m pip install -r requirements-dev.txt
           python -m pip check
 
       - name: Repository release guard tests
@@ -45,7 +47,7 @@ jobs:
 
       - name: Unit and regression tests
         working-directory: skills/automated-3d-model-splitting
-        run: python -X utf8 -B -m unittest discover -s tests -v
+        run: python -X utf8 -B -m pytest -p no:cacheprovider tests -v
 
       - name: Release consistency checks
         run: python -X utf8 -B tools/validate_release.py

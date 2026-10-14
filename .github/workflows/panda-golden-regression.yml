@@ -16,11 +16,15 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-          cache-dependency-path: skills/automated-3d-model-splitting/requirements.txt
+          cache-dependency-path: |
+            requirements-dev.txt
+            skills/automated-3d-model-splitting/requirements.txt
       - name: Install dependencies
-        run: python -m pip install -r skills/automated-3d-model-splitting/requirements.txt
+        run: |
+          python -m pip install -r requirements-dev.txt
+          python -m pip check
       - name: Rebuild and compare all 15 approved parts
         env:
           RUN_PANDA_GOLDEN: "1"
           PYTHONUTF8: "1"
-        run: python -X utf8 -B -m unittest discover -s skills/automated-3d-model-splitting/tests -p test_panda_golden.py -v
+        run: python -X utf8 -B -m pytest -p no:cacheprovider skills/automated-3d-model-splitting/tests/test_panda_golden.py -v

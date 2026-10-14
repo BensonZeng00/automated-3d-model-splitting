@@ -11,14 +11,16 @@
 在仓库根目录安装依赖：
 
 ```powershell
-python -m pip install -r .\skills\automated-3d-model-splitting\requirements.txt
+python -m pip install -r .\requirements-dev.txt
 ```
+
+开发依赖文件包含运行依赖和 pytest；普通 Skill 安装仍只需技能目录内的 `requirements.txt`。使用 pytest 同时收集 unittest 类和 pytest 函数测试，避免遗漏函数测试。
 
 ## 提交前检查
 
 ```powershell
 Push-Location .\skills\automated-3d-model-splitting
-python -X utf8 -B -m unittest discover -s tests -v
+python -X utf8 -B -m pytest -p no:cacheprovider tests -v
 Pop-Location
 python -X utf8 -B -m unittest discover -s tools/tests -v
 python -X utf8 -B .\tools\validate_release.py
@@ -36,9 +38,9 @@ python -X utf8 -B .\tools\run_synthetic_e2e.py
 ```sh
 python3 -m venv .venv
 . .venv/bin/activate
-python -m pip install -r skills/automated-3d-model-splitting/requirements.txt
+python -m pip install -r requirements-dev.txt
 python -m pip check
-(cd skills/automated-3d-model-splitting && python -X utf8 -B -m unittest discover -s tests -v)
+(cd skills/automated-3d-model-splitting && python -X utf8 -B -m pytest -p no:cacheprovider tests -v)
 python -X utf8 -B -m unittest discover -s tools/tests -v
 python -X utf8 -B tools/validate_release.py
 python -X utf8 -B tools/run_synthetic_e2e.py

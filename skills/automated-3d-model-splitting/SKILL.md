@@ -7,6 +7,18 @@ description: Split externally painted 3MF source regions into an assembled multi
 
 Current release: `3.0.0`, positioned as automated painted-3MF model-part splitting.
 
+## 安装与入口定位
+
+支持 Python 3.10–3.12。安装时必须保留完整技能目录，包括 `SKILL.md`、`scripts/`、`references/`、`agents/`、`requirements.txt` 和许可文件；若有 `tools/` 也一并复制。安装运行依赖使用所选 Python 解释器的 `-m pip install -r`，参数指向该技能目录内的 `requirements.txt`。
+
+本文所有 `scripts/...` 和 `references/...` 路径均相对于实际加载的 `SKILL.md` 所在目录，不是用户项目目录或仓库根目录。从其他目录执行时，使用所选解释器和入口脚本的绝对路径，并传入模型、输出及审核文件的绝对路径。无需切换用户项目目录。不要把本节路径占位符当作真实路径：
+
+```bash
+python -m pip install -r "/ABSOLUTE/SKILL_DIR/requirements.txt"
+python "/ABSOLUTE/SKILL_DIR/scripts/split_painted_3mf.py" --version
+python "/ABSOLUTE/SKILL_DIR/scripts/split_painted_3mf.py" --input "/ABSOLUTE/MODEL_DIR/model.3mf" --preflight-only
+```
+
 ## 职责边界
 
 拆件负责识别 source 区域、确定零件关系、规划双方共用的交接线、生成交接面与装配结构，并导出一个分组 3MF。识别时自动将总表面积小于 `1 mm²` 的连通涂色区域排除为噪声，不作为独立零件候选；原始 3MF 和原始涂色数据不被改写。输出零件在交接边界的邻域需要统一重布网格，使外壳真实服从冻结的平滑边界；其他小碎片、小孔、翻转面、退化面、非流形边和断开壳体默认原样保留。

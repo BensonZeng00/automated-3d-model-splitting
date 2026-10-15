@@ -46,7 +46,7 @@ AI 어시스턴트용 Skill(스킬)입니다. Skill 설치, 모델 파일 접근
 아래 문장을 복사해 보내세요.
 
 ```text
-https://github.com/BensonZeng00/automated-3d-model-splitting 에서 automated-3d-model-splitting 2.1.0 Skill과 필요한 의존성을 설치해 주세요. 설치가 끝나면 포함된 고양이 머리 예제 cathead.3mf로 먼저 사용해 볼지 물어봐 주세요.
+https://github.com/BensonZeng00/automated-3d-model-splitting 에서 automated-3d-model-splitting 3.0.0 Skill과 필요한 의존성을 설치해 주세요. 설치가 끝나면 포함된 고양이 머리 예제 cathead.3mf로 먼저 사용해 볼지 물어봐 주세요.
 ```
 
 예제로 사용 흐름을 익히거나 자신의 모델로 바로 시작할 수 있습니다.
@@ -81,4 +81,4 @@ AI는 생성된 파트 수, 배색 유지 여부, 검사 통과 여부, 확인�
 
 ---
 
-현재 버전: `2.1.0` · [테스트 결과 및 검증 범위](TEST_RESULTS.md) · [기여 안내](CONTRIBUTING.md) · [PolyForm Noncommercial 1.0.0](LICENSE)
+현재 버전: `3.0.0` · [테스트 결과 및 검증 범위](TEST_RESULTS.md) · [기여 안내](CONTRIBUTING.md) · [PolyForm Noncommercial 1.0.0](LICENSE)

@@ -38,9 +38,14 @@ PRODUCTION_URI = "http://schemas.microsoft.com/3dmanufacturing/production/2015/0
 CORE_NS = "{" + CORE_URI + "}"
 MATERIAL_NS = "{" + MATERIAL_URI + "}"
 PRODUCTION_NS = "{" + PRODUCTION_URI + "}"
-VERSION = "2.1.0"
+VERSION = "3.0.0"
+DEFAULT_AREA_PRIORITY_RATIO = 3.0
+DEFAULT_AREA_PRIORITY_RATIO = 3.0
 DEFAULT_EFFECTIVE_MINIMUM_INWARD_DEPTH_MM = 3.0
-MAXIMUM_SAFE_INWARD_DEPTH_MM = 10.0
+# Absolute guard only. A ParentThicknessProbe narrows this to the diagonal of
+# its active parent shell, so hollow models can be measured in centimetres
+# without permitting a ray to wander beyond the source geometry bounds.
+MAXIMUM_SAFE_INWARD_DEPTH_MM = 50.0
 DEFAULT_LEAD_IN_SLOPE_DEGREES = 45.0
 PARENT_THICKNESS_CLEARANCE_MM = 0.05
 # When the measured parent is thinner than the preferred backing depth, a
@@ -48,6 +53,16 @@ PARENT_THICKNESS_CLEARANCE_MM = 0.05
 # curved source rim.  Keep enough depth beyond the 0.60 mm lead-in for a
 # continuous printable skin instead of forcing a folded local-offset cap.
 MINIMUM_COHERENT_PLANAR_FLOOR_DEPTH_MM = 0.08
+# Intersections this close to a seam probe origin belong to the sampled
+# exterior surface neighborhood, not to the opposite wall.  Keep this
+# classification tolerance tied to the geometry policy: a hit that cannot
+# leave both the required clearance and the minimum coherent floor is still
+# inside the unusable local seam band.  This avoids an independent magic
+# threshold while keeping farther opposing walls as real obstacles.
+PARENT_SURFACE_HIT_TOLERANCE_MM = (
+    PARENT_THICKNESS_CLEARANCE_MM
+    + MINIMUM_COHERENT_PLANAR_FLOOR_DEPTH_MM
+)
 MAXIMUM_INWARD_CAP_PLANARITY_ERROR_MM = 0.05
 MINIMUM_INWARD_CAP_NORMAL_COSINE = 0.90
 # Compatibility alias for older call sites and reports. Geometry may go below
@@ -191,6 +206,21 @@ def load_core_dependencies() -> None:
     np = numpy_module
     trimesh = trimesh_module
     cKDTree = scipy_ckdtree
+    # Package modules use this module's public constants and import the lazy
+    # geometry aliases with ``from .common import *``.  Refresh those aliases
+    # after dependency loading so project parsing and the pipeline do not keep
+    # the initial ``None`` bindings.
+    package_prefix = f"{__package__}."
+    for module in tuple(sys.modules.values()):
+        if module is None or not str(getattr(module, "__name__", "")).startswith(package_prefix):
+            continue
+        for name, value in (("np", numpy_module), ("trimesh", trimesh_module),
+                            ("cKDTree", scipy_ckdtree)):
+            if getattr(module, name, value) is None:
+                setattr(module, name, value)
+    geometry_module = sys.modules.get(f"{__package__}.part_geometry")
+    if geometry_module is not None:
+        geometry_module.refresh_runtime_dependencies()
 
 
 class DSU:

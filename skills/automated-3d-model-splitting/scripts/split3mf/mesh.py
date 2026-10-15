@@ -449,7 +449,14 @@ def orient_mesh_faces_consistently(mesh: trimesh.Trimesh) -> dict:
 def build_local_mesh(
     vertices: np.ndarray, faces: np.ndarray, component: Component
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    global_face_array = faces[component.global_faces]
+    return build_local_mesh_from_faces(vertices, faces, component.global_faces)
+
+
+def build_local_mesh_from_faces(
+    vertices: np.ndarray, faces: np.ndarray, global_face_ids: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Extract a local indexed mesh for an arbitrary global face selection."""
+    global_face_array = faces[np.asarray(global_face_ids, dtype=np.int64)]
     global_vertex_ids = np.unique(global_face_array.reshape(-1))
     local_vertices = vertices[global_vertex_ids].copy()
     # Source vertex ids are dense package indices.  A NumPy lookup avoids one
@@ -492,76 +499,162 @@ def face_edges_among_vertices(
     return result
 
 
-def boundary_loops(faces: np.ndarray) -> list[list[int]]:
-    """Return edge-complete simple boundary cycles.
+def boundary_cycles_from_edges(
+    edges: np.ndarray, vertices: np.ndarray | None = None
+) -> list[list[int]]:
+    """Return edge-complete simple cycles from canonical undirected edges.
 
     Painted regions can have several boundary cycles touching at one vertex, so
     the boundary graph may have degree 4 or higher. A greedy previous/next walk
     turns that graph into open paths and then falsely caps the path endpoints.
-    Decompose every even boundary graph into Euler circuits first, then split
-    circuits at repeated vertices into genuine simple cycles.
+    Pair incident edges by straight-through continuation at every vertex, then
+    walk those pairings into simple cycles.  Euler circuits are edge-complete,
+    but an arbitrary neighbor order can splice unrelated contours together at
+    high-degree vertices and create long artificial jumps in a boundary loop.
     """
-    edge_count: collections.Counter[tuple[int, int]] = collections.Counter()
-    for face in faces:
-        for a, b in ((face[0], face[1]), (face[1], face[2]), (face[2], face[0])):
-            a = int(a)
-            b = int(b)
-            if a > b:
-                a, b = b, a
-            edge_count[(a, b)] += 1
-
     adjacency: dict[int, set[int]] = collections.defaultdict(set)
     unused_edges: set[tuple[int, int]] = set()
-    for (a, b), count in edge_count.items():
-        if count == 1:
-            adjacency[a].add(b)
-            adjacency[b].add(a)
-            unused_edges.add((a, b))
+    for raw_a, raw_b in np.asarray(edges, dtype=np.int64):
+        a, b = sorted((int(raw_a), int(raw_b)))
+        adjacency[a].add(b)
+        adjacency[b].add(a)
+        unused_edges.add((a, b))
+    if vertices is None:
+        # Callers that only have edge ids retain the established deterministic
+        # topology walk. Geometry-aware contour pairing is used by recognition,
+        # where source coordinates are available.
+        neighbor_heaps = {vertex: list(neighbors) for vertex, neighbors in adjacency.items()}
+        for neighbors in neighbor_heaps.values():
+            heapq.heapify(neighbors)
+        legacy_loops: list[list[int]] = []
+
+        def split_legacy_trail(trail: list[int]) -> None:
+            if len(trail) < 4 or trail[0] != trail[-1]:
+                return
+            path: list[int] = []
+            positions: dict[int, int] = {}
+            for vertex in trail:
+                start_position = positions.get(int(vertex))
+                if start_position is None:
+                    positions[int(vertex)] = len(path)
+                    path.append(int(vertex))
+                    continue
+                cycle = path[start_position:]
+                if len(cycle) >= 3:
+                    legacy_loops.append(cycle)
+                for removed in path[start_position + 1:]:
+                    positions.pop(int(removed), None)
+                path = path[:start_position + 1]
+
+        while unused_edges:
+            start_edge = min(unused_edges)
+            stack = [int(start_edge[0])]
+            trail: list[int] = []
+            while stack:
+                current_vertex = int(stack[-1])
+                candidates = neighbor_heaps.get(current_vertex, [])
+                while candidates and tuple(sorted((current_vertex, int(candidates[0])))) not in unused_edges:
+                    heapq.heappop(candidates)
+                if candidates:
+                    next_vertex = int(heapq.heappop(candidates))
+                    unused_edges.remove(tuple(sorted((current_vertex, next_vertex))))
+                    stack.append(next_vertex)
+                else:
+                    trail.append(int(stack.pop()))
+            split_legacy_trail(list(reversed(trail)))
+        legacy_loops.sort(key=lambda loop: (-len(loop), tuple(loop)))
+        return legacy_loops
+    if any(len(neighbors) % 2 for neighbors in adjacency.values()):
+        # Keep the historical edge-complete walk for malformed odd-degree
+        # graphs; geometric pairings require every incidence to have a mate.
+        return boundary_cycles_from_edges(np.asarray(edges, dtype=np.int64))
+    # Each edge endpoint has exactly one continuation. At an even-degree
+    # vertex, pair the most opposed outgoing directions first: this preserves
+    # the contour that arrives along one side and leaves along the other.
+    continuations: dict[tuple[int, int], tuple[int, int]] = {}
+    for vertex, neighbors in adjacency.items():
+        ordered = sorted(neighbors)
+        if len(ordered) < 2:
+            continue
+        points = np.asarray(vertices, dtype=np.float64)
+        directions = points[np.asarray(ordered, dtype=np.int64)] - points[int(vertex)]
+        lengths = np.linalg.norm(directions, axis=1)
+        valid = lengths > 1e-12
+        normalized = np.zeros_like(directions)
+        normalized[valid] = directions[valid] / lengths[valid, None]
+        candidates = []
+        for left in range(len(ordered)):
+            for right in range(left + 1, len(ordered)):
+                # Smallest dot product is the straightest continuation.
+                candidates.append((float(np.dot(normalized[left], normalized[right])),
+                                   int(ordered[left]), int(ordered[right])))
+        used: set[int] = set()
+        for _score, left, right in sorted(candidates):
+            if left in used or right in used:
+                continue
+            continuations[(int(vertex), left)] = (int(vertex), right)
+            continuations[(int(vertex), right)] = (int(vertex), left)
+            used.add(left)
+            used.add(right)
 
     loops: list[list[int]] = []
 
-    def split_simple_cycles(closed_trail: list[int]) -> None:
-        pending = [closed_trail]
-        while pending:
-            trail = pending.pop()
-            if len(trail) < 4 or trail[0] != trail[-1]:
+    def append_simple_cycles(closed_trail: list[int]) -> None:
+        if len(closed_trail) < 4 or closed_trail[0] != closed_trail[-1]:
+            return
+        path: list[int] = []
+        positions: dict[int, int] = {}
+        for raw_vertex in closed_trail:
+            vertex = int(raw_vertex)
+            start_position = positions.get(vertex)
+            if start_position is None:
+                positions[vertex] = len(path)
+                path.append(vertex)
                 continue
-            seen: dict[int, int] = {}
-            for position, vertex in enumerate(trail[:-1]):
-                if vertex not in seen:
-                    seen[vertex] = position
-                    continue
-                start_position = seen[vertex]
-                # Stack order preserves the previous depth-first traversal.
-                pending.append(trail[:start_position + 1] + trail[position + 1:])
-                pending.append(trail[start_position:position + 1])
-                break
-            else:
-                loops.append(trail[:-1])
-
+            cycle = path[start_position:]
+            if len(cycle) >= 3:
+                loops.append(cycle)
+            for removed in path[start_position + 1:]:
+                positions.pop(int(removed), None)
+            path = path[:start_position + 1]
+    unused_edges = set(unused_edges)
     while unused_edges:
-        start_edge = min(unused_edges)
-        start = int(start_edge[0])
-        stack = [start]
-        circuit: list[int] = []
-        while stack:
-            current = int(stack[-1])
-            candidates = sorted(
-                neighbor
-                for neighbor in adjacency.get(current, set())
-                if tuple(sorted((current, int(neighbor)))) in unused_edges
-            )
-            if candidates:
-                next_vertex = int(candidates[0])
-                unused_edges.remove(tuple(sorted((current, next_vertex))))
-                stack.append(next_vertex)
-            else:
-                circuit.append(int(stack.pop()))
-        circuit.reverse()
-        split_simple_cycles(circuit)
+        first_edge = min(unused_edges)
+        start = (first_edge[0], first_edge[1])
+        current = start
+        trail = [start[0]]
+        while True:
+            left, right = current
+            edge = tuple(sorted((left, right)))
+            if edge not in unused_edges:
+                break
+            unused_edges.remove(edge)
+            trail.append(right)
+            following = continuations.get((right, left))
+            if following is None:
+                break
+            current = (following[0], following[1])
+            if current == start:
+                append_simple_cycles(trail)
+                break
 
     loops.sort(key=lambda loop: (-len(loop), tuple(loop)))
     return loops
+
+
+def boundary_loops(
+    faces: np.ndarray, vertices: np.ndarray | None = None
+) -> list[list[int]]:
+    """Return simple cycles along edges used by exactly one supplied face."""
+    edge_count: collections.Counter[tuple[int, int]] = collections.Counter()
+    for face in faces:
+        for a, b in ((face[0], face[1]), (face[1], face[2]), (face[2], face[0])):
+            edge_count[tuple(sorted((int(a), int(b))))] += 1
+    boundary_edges = np.asarray(
+        [edge for edge, count in edge_count.items() if count == 1],
+        dtype=np.int64,
+    ).reshape((-1, 2))
+    return boundary_cycles_from_edges(boundary_edges, vertices)
 
 
 def average_outward_normal(local_vertices: np.ndarray, local_faces: np.ndarray, component_center: np.ndarray, model_center: np.ndarray) -> np.ndarray:
@@ -641,6 +734,49 @@ def radial_offset_points(
         outward = np.column_stack((-tangents[:, 1], tangents[:, 0]))
     shifted = xy + outward * float(offset_mm)
     return origin + shifted[:, 0, None] * u + shifted[:, 1, None] * v + normal_s[:, None] * normal
+
+
+def homothetic_loop_points(
+    points: np.ndarray, axis: np.ndarray, scale_ratio: float
+) -> np.ndarray:
+    """Scale a 3D closed loop in its plane while preserving axial height."""
+    values = np.asarray(points, dtype=np.float64)
+    normal = np.asarray(axis, dtype=np.float64)
+    length = float(np.linalg.norm(normal))
+    ratio = float(scale_ratio)
+    if values.ndim != 2 or values.shape[1:] != (3,) or len(values) < 3:
+        raise ValueError("homothetic loop scaling requires at least three 3D points")
+    if not np.isfinite(values).all() or normal.shape != (3,) or not np.isfinite(normal).all():
+        raise ValueError("homothetic loop scaling requires finite points and axis")
+    if length <= 1e-10:
+        raise ValueError("homothetic loop scaling axis is degenerate")
+    if not 0.0 < ratio <= 1.0:
+        raise ValueError("homothetic loop scale ratio must be greater than 0 and at most 1")
+    if abs(ratio - 1.0) <= 1e-12:
+        return values.copy()
+    normal = normal / length
+    origin = values.mean(axis=0)
+    u, v = orthonormal_basis(normal)
+    projected = project_points(values, origin, u, v)
+    area = signed_area(projected)
+    if abs(float(area)) <= 1e-12:
+        raise ValueError("homothetic loop has near-zero projected area")
+    cross = (
+        projected[:, 0] * np.roll(projected[:, 1], -1)
+        - np.roll(projected[:, 0], -1) * projected[:, 1]
+    )
+    center = np.array(
+        [
+            np.sum((projected[:, 0] + np.roll(projected[:, 0], -1)) * cross),
+            np.sum((projected[:, 1] + np.roll(projected[:, 1], -1)) * cross),
+        ],
+        dtype=np.float64,
+    ) / (6.0 * area)
+    scaled = center + ratio * (projected - center)
+    if np.sign(signed_area(scaled)) != np.sign(area):
+        raise ValueError("homothetic loop scaling reversed orientation")
+    axial = (values - origin) @ normal
+    return origin + scaled[:, 0, None] * u + scaled[:, 1, None] * v + axial[:, None] * normal
 
 
 def clearance_offsets(clearance_mode: str, fit_clearance_mm: float) -> tuple[float, float]:

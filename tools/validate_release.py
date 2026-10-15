@@ -17,7 +17,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 SKILL_ROOT = REPOSITORY_ROOT / "skills" / "automated-3d-model-splitting"
 TECHNICAL_ID = "automated-3d-model-splitting"
 DISPLAY_NAME = "自动化3d模型拆件"
-VERSION = "2.1.0"
+VERSION = "3.0.0"
 
 
 def read(relative: str) -> str:
@@ -72,7 +72,7 @@ def main() -> int:
         if f"Current release: `{VERSION}`" not in read("references/cli-reference.md"):
             errors.append("references/cli-reference.md version does not match")
 
-        for schema_name in ("color-map.schema.json", "visual-semantics.schema.json", "tiny-component-review.schema.json"):
+        for schema_name in ("color-map.schema.json", "visual-semantics.schema.json", "source-region-review.schema.json"):
             schema = json.loads(read(f"references/{schema_name}"))
             if TECHNICAL_ID not in str(schema.get("$id", "")):
                 errors.append(f"{schema_name} has an unexpected $id")

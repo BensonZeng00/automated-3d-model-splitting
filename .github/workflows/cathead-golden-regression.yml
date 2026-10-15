@@ -1,0 +1,30 @@
+name: Approved Cathead 3MF regression
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  full-model:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements-dev.txt
+            skills/automated-3d-model-splitting/requirements.txt
+      - name: Install dependencies
+        run: |
+          python -m pip install -r requirements-dev.txt
+          python -m pip check
+      - name: Rebuild and compare all 13 approved parts
+        env:
+          RUN_CATHEAD_GOLDEN: "1"
+          PYTHONUTF8: "1"
+        run: python -X utf8 -B -m pytest -p no:cacheprovider skills/automated-3d-model-splitting/tests/test_cathead_golden.py -v

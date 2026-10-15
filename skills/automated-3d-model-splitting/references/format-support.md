@@ -24,7 +24,7 @@ Reject unsupported input with a specific error. Never reinterpret it as a defaul
 
 ## Recognition Profile
 
-`exterior-visible` is the default. It filters occluded paint from recognition labels using deterministic multi-view depth maps, then passes the resulting regions to the unchanged recursive splitter. `all-faces` is an explicit legacy compatibility profile.
+Recognition always filters occluded paint using deterministic multi-view depth maps before connected-region grouping. There is no surface-profile selector.
 
 The filter does not claim to reconstruct a hidden volumetric material field. It answers only which source paint should participate in exterior part-boundary recognition.
 

@@ -13,9 +13,16 @@ GENERATED_DIRECTORIES = {
     ".mypy_cache", ".ruff_cache", ".venv", "venv", "env", "build", "dist",
 }
 MODEL_SUFFIXES = {".3mf", ".stl", ".obj", ".glb", ".gltf", ".blend", ".blend1", ".npz", ".npy"}
-# Existing public example and the two maintained geometry regression fixtures.
+# Existing tracked public examples and maintained geometry regression fixtures.
 PUBLIC_MODEL_PATHS = {
     "example/cathead.3mf",
+    "example/cathead_split_parts.3mf",
+    "example/yoshisittingonledge_split_parts.3mf",
+    "example/Kamesennin_AMS_split_parts.3mf",
+    "example/Grimmiger+Panda.3mf",
+    "example/Grimmiger+Panda_split_parts.3mf",
+    "example/Kamesennin+AMS.3mf",
+    "example/yoshisittingonledge.3mf",
     "skills/automated-3d-model-splitting/tests/fixtures/concave_strip_fold.npz",
     "skills/automated-3d-model-splitting/tests/fixtures/source_projection_fold.npz",
 }

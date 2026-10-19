@@ -601,15 +601,18 @@ def compose_part_with_interfaces(
         if np.any(near_target):
             # A zero-width ribbon cannot be triangulated. Move only the cut
             # rim of the source shell; the confirmed interface stays fixed.
+            # Fade the small correction across the complete loop so the
+            # 0.5 mm proximity threshold cannot create a displacement kink.
             _, _, axes = np.linalg.svd(target_ring - target_ring.mean(axis=0), full_matrices=False)
-            selected = nearest_index[near_target]
-            tangents = target_ring[(selected + 1) % outer_count] - target_ring[(selected - 1) % outer_count]
+            tangents = target_ring[(nearest_index + 1) % outer_count] - target_ring[(nearest_index - 1) % outer_count]
             lateral = np.cross(axes[-1], tangents)
             lateral /= np.maximum(np.linalg.norm(lateral, axis=1, keepdims=True), 1e-12)
-            radial = source_ring[near_target] - target_ring.mean(axis=0)
+            radial = source_ring - target_ring.mean(axis=0)
             lateral *= np.where(np.sum(lateral * radial, axis=1, keepdims=True) < 0, -1.0, 1.0)
-            source_vertices[source_loop[near_target]] += 0.05 * lateral
-            for vertex_id in source_loop[near_target]:
+            weights = np.clip((0.5 - nearest_distance) / 0.5, 0.0, 1.0)
+            corrections = 0.05 * weights[:, None] * lateral
+            source_vertices[source_loop] += corrections
+            for vertex_id in source_loop:
                 vertices[int(vertex_id)] = source_vertices[int(vertex_id)].tolist()
         offset = len(vertices)
         vertices.extend(interface_vertices.tolist())
@@ -650,7 +653,7 @@ def compose_part_with_interfaces(
             "simplified_interface_boundary_points": int(outer_count),
             "maximum_boundary_gap_mm": float(distances.max()),
             "source_rim_adjusted_points": int(np.count_nonzero(near_target)),
-            "source_rim_adjustment_mm": 0.05 if np.any(near_target) else 0.0,
+            "source_rim_adjustment_mm": float(np.linalg.norm(corrections, axis=1).max()) if np.any(near_target) else 0.0,
             "bridge_maximum_edge_mm": float(bridge_lengths.max()),
             "bridge_minimum_altitude_mm": float(bridge_altitudes.min()),
             "bridge_faces_below_0_01mm_altitude": int(np.count_nonzero(bridge_altitudes < 0.01)),

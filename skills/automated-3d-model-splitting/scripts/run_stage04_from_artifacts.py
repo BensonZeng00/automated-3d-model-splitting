@@ -23,13 +23,13 @@ def main(argv: list[str] | None = None) -> int:
         )
     )
     parser.add_argument("--source-run-dir", required=True, type=Path,
-                        help="Run directory with completed, confirmed Stage 02/03 artifacts.")
+                        help="Run directory with completed Stage 02/03 artifacts; pending Stage 03 confirmation may be validated with --recognition-review-json.")
     parser.add_argument("--input", type=Path,
-                        help="Optional source 3MF; only its path and SHA-256 are checked.")
+                        help="Optional source path constraint; the saved source 3MF SHA-256 is always checked without parsing it.")
     parser.add_argument("--visual-semantics-json", type=Path,
                         help="Image-grounded labels, confidence, and evidence for saved P regions.")
     parser.add_argument("--recognition-review-json", type=Path,
-                        help="Confirmed recognition review matching the saved Stage 03 fingerprint.")
+                        help="Confirmed recognition review; validates saved artifacts and fingerprints, then records pending Stage 03 confirmation.")
     parser.add_argument("--assembly-review-json", type=Path,
                         help="Prior assembly review used only for explicit direction-policy corrections.")
     parser.add_argument("--replace-unconfirmed-plan", action="store_true",

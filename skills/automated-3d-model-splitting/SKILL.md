@@ -69,8 +69,11 @@ python scripts/split_painted_3mf.py --input model.3mf --recognize-only
 python scripts/split_painted_3mf.py \
   --input model.3mf \
   --output model_split_parts.3mf \
-  --region-review-json review/user_decisions.json
+  --region-review-json review/user_decisions.json \
+  --resume-region-review-from STAGE_RUN_DIR
 ```
+
+首次等待小区域审核时会保存阶段 02 网格及审核前的阶段 03 检查点。确认后使用终端打印的 `stage_artifacts` 运行目录续跑；校验源 SHA-256、工件清单、识别参数和实现指纹后，复用可见性与连通区域结果，不再解析源 3MF。旧运行若只有阶段 02 工件，也可使用同一入口；它跳过源 3MF 解析，但需要重算可见性与候选。审核候选变化时仍由原有审核 JSON 校验拒绝旧决定。
 
 审核阈值 CLI：
 
@@ -79,6 +82,7 @@ python scripts/split_painted_3mf.py \
 --small-region-review-max-faces 999
 --max-region-review-candidates 10
 --region-review-json PATH
+--resume-region-review-from RUN_DIR
 --region-review-dir PATH
 --region-review-resolution 320
 ```
@@ -113,7 +117,7 @@ python scripts/split_painted_3mf.py \
 
 已存在 02/03/04 阶段工件时，若只需重跑 05，使用 `scripts/run_stage05_from_artifacts.py --source-run-dir RUN_DIR --output-root OUTPUT_DIR`；该入口直接校验并读取既有 NPZ/JSON，不重读 3MF，也不重建识别边界。
 
-若阶段 03 已完成且用户确认了识别结果，之后才补齐图像语义标签，使用 `scripts/run_stage04_from_artifacts.py --source-run-dir RUN_DIR --input SOURCE.3mf --visual-semantics-json SEMANTICS.json --recognition-review-json RUN_DIR/03_recognition_review.json` 从已保存网格、区域和冻结边界生成阶段 04；不得为补标签重读源 3MF。该入口核验工件清单、源 SHA-256、识别确认指纹和区域分类，并拒绝覆盖已有阶段 04 计划。
+若阶段 03 已完成，使用 `scripts/run_stage04_from_artifacts.py --source-run-dir RUN_DIR --input SOURCE.3mf --visual-semantics-json SEMANTICS.json --recognition-review-json RUN_DIR/03_recognition_review.json` 从已保存网格、区域和冻结边界生成阶段 04；不得为确认识别结果或补标签重读源 3MF。即使 `03_recognition_review_status.json` 仍显示待确认，只要审核 JSON 已由用户确认，该入口也会先核验源 SHA-256、工件清单、识别动作及最终结果指纹，再正式记录确认并继续。入口拒绝覆盖已有阶段 04 计划。
 
 正式输出也可从主 CLI 续跑：
 

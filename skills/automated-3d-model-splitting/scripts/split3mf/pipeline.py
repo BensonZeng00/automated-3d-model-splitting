@@ -39,6 +39,11 @@ from .recognition_metadata import (
 from .domain import SplitConfig
 from .boundary_review import BoundaryReviewService
 from .stage_cache import sha256_file
+from .region_review_checkpoint import (
+    read_region_review_checkpoint,
+    read_saved_stage02,
+    write_region_review_checkpoint,
+)
 from .semantic_partition import apply_semantic_partitions
 from .application import BoundarySnapshotBuilder, StageArtifactStore
 from .application.boundary_review_artifacts import write_boundary_review_artifacts
@@ -81,22 +86,41 @@ class SplitPipeline:
         stage_artifacts = StageArtifactStore(
             artifact_root, run_id=getattr(args, "stage_artifacts_run_id", None)
         )
-        runtime_log(
-            "输入",
-            "source_read_start",
-            "开始读取并标准化源 3MF",
-            input=str(input_path),
-            model_entry=args.model_entry,
-            format_profile=args.format_profile,
-        )
+        resume_region_review_from = getattr(args, "resume_region_review_from", None)
+        checkpoint = None
         try:
             prepare_output_3mf(output_path, args.overwrite)
-            vertices, faces, colors, project_settings = self.reader.read(
-                input_path,
-                model_entry=args.model_entry,
-                format_profile=args.format_profile,
-            )
-        except (OSError, ValueError, zipfile.BadZipFile, ET.ParseError) as exc:
+            if resume_region_review_from is not None:
+                source_run_dir = Path(resume_region_review_from).expanduser().resolve()
+                if (source_run_dir / "03_region_review_checkpoint.json").is_file():
+                    checkpoint = read_region_review_checkpoint(source_run_dir, input_path, args)
+                    vertices, faces, colors = checkpoint.vertices, checkpoint.faces, checkpoint.colors.tolist()
+                    project_settings = checkpoint.project_settings
+                    runtime_log("输入", "source_stage02_reused", "已复用阶段 02 和区域审核检查点",
+                                source_run_dir=str(source_run_dir))
+                else:
+                    loaded_summary, loaded_arrays = read_saved_stage02(source_run_dir, input_path)
+                    vertices, faces = loaded_arrays["vertices"], loaded_arrays["faces"]
+                    colors = loaded_arrays["face_color_tokens"].tolist()
+                    project_settings = loaded_summary["project_settings"]
+                    if (args.model_entry is not None and
+                            args.model_entry != project_settings.get("_selected_model_entry")):
+                        raise ValueError("saved Stage 02 mesh uses a different model entry")
+                    runtime_log("输入", "source_stage02_reused_candidates_recomputed",
+                                "已复用阶段 02，重新计算旧工件缺少的候选检查点",
+                                source_run_dir=str(source_run_dir))
+            else:
+                runtime_log(
+                    "输入", "source_read_start", "开始读取并标准化源 3MF",
+                    input=str(input_path), model_entry=args.model_entry,
+                    format_profile=args.format_profile,
+                )
+                vertices, faces, colors, project_settings = self.reader.read(
+                    input_path,
+                    model_entry=args.model_entry,
+                    format_profile=args.format_profile,
+                )
+        except (OSError, ValueError, KeyError, zipfile.BadZipFile, ET.ParseError) as exc:
             parser.error(str(exc))
         runtime_log(
             "输入",
@@ -129,158 +153,186 @@ class SplitPipeline:
             Path(args.color_map_json).expanduser() if args.color_map_json else None,
         )
         COLOR_CATALOG.replace(new_color_info, new_color_order)
-        boundary_review = BoundaryReviewService(
-            output_path.with_name(output_path.stem + "_boundary_review"),
-            getattr(args, "boundary_review_json", None),
-        )
-        source_owners, _ = material_connectivity_labels(colors)
-        boundary_display_colors = {
-            owner: COLOR_INFO.get(color, {}).get("hex", "#aaaaaa")
-            for owner, color in zip(source_owners, colors)
-        }
-        clarified_owners, clarity_record = boundary_review.prepare(
-            vertices, faces, source_owners, context="input",
-            display_colors=boundary_display_colors,
-        )
-        ownership_changed = np.flatnonzero(np.asarray(source_owners) != clarified_owners)
-        if getattr(args, "boundary_check_only", False):
-            print("boundary_check=" + json.dumps(clarity_record, ensure_ascii=False), flush=True)
-            return
-        source_filament_colors = project_settings.get("filament_colour") or []
-        if not isinstance(source_filament_colors, list):
-            source_filament_colors = []
-        progress(
-            "颜色",
-            "已按厂商 paint_color 槽位编码解析材料颜色",
-            mapping={code: {"hex": info.get("hex"), "slot": info.get("filament_slot"), "source": info.get("mapping_source")} for code, info in COLOR_INFO.items()},
-        )
-        runtime_log(
-            "识别",
-            "exterior_visibility_start",
-            "开始外表面多视角深度识别",
-            views=int(args.exterior_view_count),
-            resolution=int(args.exterior_depth_map_resolution),
-        )
-        progress(
-            "识别",
-            "正在从模型外部多方向采样可见表面颜色",
-            views=args.exterior_view_count,
-            resolution=args.exterior_depth_map_resolution,
-            depth_tolerance_mm=args.exterior_depth_tolerance_mm,
-        )
-        visible_faces, exterior_visibility = exterior_visible_face_mask(
-            vertices,
-            faces,
-            view_count=args.exterior_view_count,
-            depth_map_resolution=args.exterior_depth_map_resolution,
-            depth_tolerance_mm=args.exterior_depth_tolerance_mm,
-        )
-        recognition_token_colors, exterior_color_filter = recognition_colors_from_exterior(
-            colors,
-            visible_faces,
-            faces=faces,
-        )
-        runtime_log(
-            "识别",
-            "exterior_visibility_done",
-            "外表面可见性识别完成",
-            visible_faces=int(exterior_visibility["visible_faces"]),
-            occluded_faces=int(exterior_visibility["occluded_faces"]),
-            profile=str(exterior_visibility["profile"]),
-        )
-        exterior_visibility["color_filter"] = exterior_color_filter
-        print(
-            "exterior_surface_recognition="
-            + json.dumps(exterior_visibility, ensure_ascii=False, sort_keys=True),
-            flush=True,
-        )
-        recognition_colors, material_connectivity = material_connectivity_labels(recognition_token_colors)
-        if len(ownership_changed):
-            recognition_colors = np.asarray(recognition_colors, dtype=object)
-            recognition_colors[ownership_changed] = clarified_owners[ownership_changed]
-            recognition_colors = recognition_colors.tolist()
-        if material_connectivity["merged_material_groups"]:
+        if checkpoint is not None:
+            visible_faces = checkpoint.visible_faces
+            recognition_token_colors = checkpoint.recognition_token_colors.tolist()
+            recognition_colors = checkpoint.recognition_colors.tolist()
+            groups = checkpoint.groups
+            normalized_groups = groups
+            raw_group_count = checkpoint.raw_group_count
+            automatic_noise_exclusions = checkpoint.automatic_noise_exclusions
+            review_candidates = checkpoint.review_candidates
+            review_limit_noise_exclusions = checkpoint.review_limit_noise_exclusions
+            review_records = checkpoint.review_records
+            review_groups = [group for group, _ in review_candidates]
+        else:
+            boundary_review = BoundaryReviewService(
+                output_path.with_name(output_path.stem + "_boundary_review"),
+                getattr(args, "boundary_review_json", None),
+            )
+            source_owners, _ = material_connectivity_labels(colors)
+            boundary_display_colors = {
+                owner: COLOR_INFO.get(color, {}).get("hex", "#aaaaaa")
+                for owner, color in zip(source_owners, colors)
+            }
+            clarified_owners, clarity_record = boundary_review.prepare(
+                vertices, faces, source_owners, context="input",
+                display_colors=boundary_display_colors,
+            )
+            ownership_changed = np.flatnonzero(np.asarray(source_owners) != clarified_owners)
+            if getattr(args, "boundary_check_only", False):
+                print("boundary_check=" + json.dumps(clarity_record, ensure_ascii=False), flush=True)
+                return
+            source_filament_colors = project_settings.get("filament_colour") or []
+            if not isinstance(source_filament_colors, list):
+                source_filament_colors = []
             progress(
                 "颜色",
-                "已按源文件解析后的实际耗材槽合并等价 paint_color token 的连通边界",
-                merged_groups=material_connectivity["merged_material_groups"],
+                "已按厂商 paint_color 槽位编码解析材料颜色",
+                mapping={code: {"hex": info.get("hex"), "slot": info.get("filament_slot"), "source": info.get("mapping_source")} for code, info in COLOR_INFO.items()},
             )
-        runtime_log(
-            "识别",
-            "component_connectivity_start",
-            "开始按材料和共享边识别连通部件",
-            source_faces=int(len(faces)),
-            small_region_review_max_faces=int(args.small_region_review_max_faces),
-            max_region_review_candidates=int(args.max_region_review_candidates),
-        )
-        groups = connected_components_by_color(faces, recognition_colors)
-        raw_group_count = len(groups)
-        groups, automatic_noise_exclusions = filter_groups_below_area(
-            vertices,
-            faces,
-            recognition_token_colors,
-            groups,
-            minimum_area_mm2=1.0,
-        )
-        if automatic_noise_exclusions:
             runtime_log(
                 "识别",
-                "subthreshold_regions_filtered",
-                "已将面积小于 1 mm² 的连通区域过滤为噪声",
-                minimum_area_mm2=1.0,
-                filtered_regions=len(automatic_noise_exclusions),
-                filtered_faces=sum(item["faces"] for item in automatic_noise_exclusions),
-                filtered_area_mm2=sum(item["area_mm2"] for item in automatic_noise_exclusions),
+                "exterior_visibility_start",
+                "开始外表面多视角深度识别",
+                views=int(args.exterior_view_count),
+                resolution=int(args.exterior_depth_map_resolution),
             )
-        if len(groups) > 1000:
-            # Dense triangle-selector paint commonly leaves thousands of
-            # microscopic same-material islands.  Reviewing each island is
-            # quadratic in practice and cannot produce thousands of printable
-            # parts.  Retain every substantial island plus the largest island
-            # of each material, then attach only <= noise-threshold fragments
-            # to a same-material component by shared edge or nearest bbox.
-            largest_by_material = {}
-            for group in groups:
-                identity = material_identity(str(recognition_token_colors[int(group[0])]))
-                if identity not in largest_by_material or len(group) > len(largest_by_material[identity]):
-                    largest_by_material[identity] = group
-            consolidation_limit = int(args.small_region_review_max_faces)
-            anchors = [group for group in groups
-                       if len(group) > consolidation_limit
-                       or any(group is anchor for anchor in largest_by_material.values())]
-            anchor_ids = {id(group) for group in anchors}
-            fragments = [group for group in groups if id(group) not in anchor_ids]
-            merged, ignored_fragments, merged_records = _merge_partitioned_groups_into_components(
-                vertices, faces, recognition_colors, anchors, fragments,
-                display_colors=recognition_token_colors)
-            groups = [component.global_faces for component in merged]
-            runtime_log('识别', 'dense_paint_fragments_consolidated',
-                        '密集涂色微小岛已按同材料邻接或距离合并',
-                        raw_groups=len(anchors) + len(fragments),
-                        effective_groups=len(groups), fragments=len(fragments),
-                        merged_fragments=len(merged_records),
-                        ignored_fragments=len(ignored_fragments),
-                        maximum_fragment_faces=consolidation_limit)
-        region_review = None
-        normalized_groups = [np.asarray(group, dtype=np.int64) for group in groups]
-        from .region_review import (
-            limit_region_review_candidates,
-            select_region_review_groups,
-        )
-        _, review_candidates = select_region_review_groups(
-            vertices, faces, normalized_groups, args.noise_review_max_faces,
-            args.small_region_review_max_faces, visible_faces)
-        review_candidates, review_limit_noise_exclusions = limit_region_review_candidates(
-            vertices, faces, review_candidates,
-            args.max_region_review_candidates,
-        )
-        review_groups = [group for group, _ in review_candidates]
-        review_records = classify_review_groups_semantically(
-            vertices=vertices, faces=faces, connectivity_colors=recognition_colors,
-            display_colors=recognition_token_colors, all_groups=normalized_groups,
-            review_groups=review_groups, min_faces=args.small_region_review_max_faces + 1,
-            visible_faces=visible_faces, view_count=args.exterior_view_count,
-            depth_map_resolution=args.exterior_depth_map_resolution)
+            progress(
+                "识别",
+                "正在从模型外部多方向采样可见表面颜色",
+                views=args.exterior_view_count,
+                resolution=args.exterior_depth_map_resolution,
+                depth_tolerance_mm=args.exterior_depth_tolerance_mm,
+            )
+            visible_faces, exterior_visibility = exterior_visible_face_mask(
+                vertices,
+                faces,
+                view_count=args.exterior_view_count,
+                depth_map_resolution=args.exterior_depth_map_resolution,
+                depth_tolerance_mm=args.exterior_depth_tolerance_mm,
+            )
+            recognition_token_colors, exterior_color_filter = recognition_colors_from_exterior(
+                colors,
+                visible_faces,
+                faces=faces,
+            )
+            runtime_log(
+                "识别",
+                "exterior_visibility_done",
+                "外表面可见性识别完成",
+                visible_faces=int(exterior_visibility["visible_faces"]),
+                occluded_faces=int(exterior_visibility["occluded_faces"]),
+                profile=str(exterior_visibility["profile"]),
+            )
+            exterior_visibility["color_filter"] = exterior_color_filter
+            print(
+                "exterior_surface_recognition="
+                + json.dumps(exterior_visibility, ensure_ascii=False, sort_keys=True),
+                flush=True,
+            )
+            recognition_colors, material_connectivity = material_connectivity_labels(recognition_token_colors)
+            if len(ownership_changed):
+                recognition_colors = np.asarray(recognition_colors, dtype=object)
+                recognition_colors[ownership_changed] = clarified_owners[ownership_changed]
+                recognition_colors = recognition_colors.tolist()
+            if material_connectivity["merged_material_groups"]:
+                progress(
+                    "颜色",
+                    "已按源文件解析后的实际耗材槽合并等价 paint_color token 的连通边界",
+                    merged_groups=material_connectivity["merged_material_groups"],
+                )
+            runtime_log(
+                "识别",
+                "component_connectivity_start",
+                "开始按材料和共享边识别连通部件",
+                source_faces=int(len(faces)),
+                small_region_review_max_faces=int(args.small_region_review_max_faces),
+                max_region_review_candidates=int(args.max_region_review_candidates),
+            )
+            groups = connected_components_by_color(faces, recognition_colors)
+            raw_group_count = len(groups)
+            groups, automatic_noise_exclusions = filter_groups_below_area(
+                vertices,
+                faces,
+                recognition_token_colors,
+                groups,
+                minimum_area_mm2=1.0,
+            )
+            if automatic_noise_exclusions:
+                runtime_log(
+                    "识别",
+                    "subthreshold_regions_filtered",
+                    "已将面积小于 1 mm² 的连通区域过滤为噪声",
+                    minimum_area_mm2=1.0,
+                    filtered_regions=len(automatic_noise_exclusions),
+                    filtered_faces=sum(item["faces"] for item in automatic_noise_exclusions),
+                    filtered_area_mm2=sum(item["area_mm2"] for item in automatic_noise_exclusions),
+                )
+            if len(groups) > 1000:
+                # Dense triangle-selector paint commonly leaves thousands of
+                # microscopic same-material islands.  Reviewing each island is
+                # quadratic in practice and cannot produce thousands of printable
+                # parts.  Retain every substantial island plus the largest island
+                # of each material, then attach only <= noise-threshold fragments
+                # to a same-material component by shared edge or nearest bbox.
+                largest_by_material = {}
+                for group in groups:
+                    identity = material_identity(str(recognition_token_colors[int(group[0])]))
+                    if identity not in largest_by_material or len(group) > len(largest_by_material[identity]):
+                        largest_by_material[identity] = group
+                consolidation_limit = int(args.small_region_review_max_faces)
+                anchors = [group for group in groups
+                           if len(group) > consolidation_limit
+                           or any(group is anchor for anchor in largest_by_material.values())]
+                anchor_ids = {id(group) for group in anchors}
+                fragments = [group for group in groups if id(group) not in anchor_ids]
+                merged, ignored_fragments, merged_records = _merge_partitioned_groups_into_components(
+                    vertices, faces, recognition_colors, anchors, fragments,
+                    display_colors=recognition_token_colors)
+                groups = [component.global_faces for component in merged]
+                runtime_log('识别', 'dense_paint_fragments_consolidated',
+                            '密集涂色微小岛已按同材料邻接或距离合并',
+                            raw_groups=len(anchors) + len(fragments),
+                            effective_groups=len(groups), fragments=len(fragments),
+                            merged_fragments=len(merged_records),
+                            ignored_fragments=len(ignored_fragments),
+                            maximum_fragment_faces=consolidation_limit)
+            region_review = None
+            normalized_groups = [np.asarray(group, dtype=np.int64) for group in groups]
+            from .region_review import (
+                limit_region_review_candidates,
+                select_region_review_groups,
+            )
+            _, review_candidates = select_region_review_groups(
+                vertices, faces, normalized_groups, args.noise_review_max_faces,
+                args.small_region_review_max_faces, visible_faces)
+            review_candidates, review_limit_noise_exclusions = limit_region_review_candidates(
+                vertices, faces, review_candidates,
+                args.max_region_review_candidates,
+            )
+            review_groups = [group for group, _ in review_candidates]
+            review_records = classify_review_groups_semantically(
+                vertices=vertices, faces=faces, connectivity_colors=recognition_colors,
+                display_colors=recognition_token_colors, all_groups=normalized_groups,
+                review_groups=review_groups, min_faces=args.small_region_review_max_faces + 1,
+                visible_faces=visible_faces, view_count=args.exterior_view_count,
+                depth_map_resolution=args.exterior_depth_map_resolution)
+            if review_groups and not args.region_review_json:
+                write_region_review_checkpoint(
+                    stage_artifacts,
+                    source_sha256=source_sha256,
+                    args=args,
+                    visible_faces=visible_faces,
+                    recognition_token_colors=recognition_token_colors,
+                    recognition_colors=recognition_colors,
+                    groups=normalized_groups,
+                    raw_group_count=raw_group_count,
+                    automatic_noise_exclusions=automatic_noise_exclusions,
+                    review_candidates=review_candidates,
+                    review_limit_noise_exclusions=review_limit_noise_exclusions,
+                    review_records=review_records,
+                )
         if review_groups and not args.region_review_json:
             review_dir = (Path(args.region_review_dir).expanduser()
                           if args.region_review_dir else default_region_review_dir(input_path))

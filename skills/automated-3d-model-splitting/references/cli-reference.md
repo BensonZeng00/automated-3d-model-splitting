@@ -17,6 +17,7 @@ python scripts/split_painted_3mf.py --input model.3mf --output model_parts.3mf -
 | `--stage-artifacts-dir DIR` | Save inspectable JSON/NPZ artifacts under a new run ID. |
 | `--stop-after-stage STAGE` | Stop after `preflight`, `load`, `recognize`, `assembly`, or `interface-assembly`. |
 | `--region-review-json FILE` | Apply confirmed small-region classifications. |
+| `--resume-region-review-from RUN_DIR` | Continue from saved Stage 02 and, when present, the pre-review Stage 03 checkpoint; requires `--region-review-json`. |
 | `--recognition-review-json FILE` | Apply fingerprint-bound recognition actions and confirmation. |
 | `--boundary-review-json FILE` | Apply confirmed boundary-ownership decisions. |
 | `--visual-semantics-json FILE` | Supply optional part labels and physical partitions. |

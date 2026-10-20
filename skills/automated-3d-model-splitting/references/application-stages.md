@@ -6,7 +6,7 @@
 |---|---|---|
 | 01 preflight | Source path and environment | `01_preflight.json` |
 | 02 load | Vendor-painted 3MF | `02_loaded_project.npz`, `02_loaded_project_summary.json` |
-| 03 recognize | Source mesh, exterior paint and review decisions | `03_recognition_regions.npz`, `03_recognized_boundaries.npz`, `03_recognition_summary.json`, review image and decision files |
+| 03 recognize | Source mesh, exterior paint and review decisions | `03_region_review_checkpoint.npz` when source-region review pauses; then `03_recognition_regions.npz`, `03_recognized_boundaries.npz`, `03_recognition_summary.json`, review image and decision files |
 | 04 assembly | Frozen simplified boundaries and region geometry | `04_assembly_plan.json`, `04_interface_table.md`, `04_assembly_review.json` |
 | 05 interface-assembly | Stage 04 relations, frozen boundaries, scale and clearance | `05_interface_surfaces.npz`, `05_interface_assembly_meshes.npz`, `05_interface_assembly_summary.json` |
 | 08 publication | Closed parts and source project metadata | `08_validated_publish.json`, grouped 3MF |
@@ -16,6 +16,17 @@ Stage 03 selects equal-arc source samples (approximately 5% for large loops, wit
 Boundary pairing uses one symmetric coverage rule for both closed-loop counterparts and fragmented host boundary unions. Distances are measured from samples to line segments in both directions; each direction must have at least 80% coverage within the existing scale-derived tolerance. Reports retain tolerance, P50/P90/maximum distances, and directional coverage. Fragmented-host candidates retain the existing unique-host check.
 
 Use `--stop-after-stage` with `preflight`, `load`, `recognize`, `assembly`, or `interface-assembly` to inspect a stage. `--stage-artifacts-dir` selects its output root. Each NPZ has a manifest listing its arrays and checksums.
+
+When a source-region review pauses Stage 03, confirm its `user_decisions.json` and continue with the saved run ID:
+
+```powershell
+python scripts/split_painted_3mf.py `
+  --input .\model.3mf `
+  --region-review-json .\review\user_decisions.json `
+  --resume-region-review-from .\artifacts\model_stages\<run-id>
+```
+
+The checkpoint preserves visibility, connectivity, candidate identities and automatic noise exclusions. Resume validates source SHA-256, Stage 02/03 manifests, recognition options and producer code before applying decisions. Runs created before this checkpoint existed reuse Stage 02 and recalculate candidate work, still avoiding 3MF parsing. The continued run writes a new artifact directory and follows the normal Stage 03 review gate.
 
 To rerun Stage 05 from completed 02–04 artifacts without rereading the input model:
 
@@ -44,8 +55,11 @@ python scripts/run_stage04_from_artifacts.py `
   --recognition-review-json .\artifacts\model_stages\<run-id>\03_recognition_review.json
 ```
 
-The command verifies the source hash, Stage 02/03 artifact manifests, confirmed
+The command verifies the source hash, Stage 02/03 artifact manifests, saved
 recognition fingerprint, saved source-region classifications, and semantic labels.
+If Stage 03 is still pending confirmation, pass a confirmed recognition review
+JSON. The command compares its source, actions, and fingerprints with the saved
+result, records the confirmation, and continues without rereading the 3MF mesh.
 It adds Stage 04 artifacts to the same run only when that run has no existing
 Stage 04 plan. Existing plans are preserved for review or Stage 05 resume.
 

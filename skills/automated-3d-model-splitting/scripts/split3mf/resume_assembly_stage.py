@@ -10,6 +10,7 @@ from pathlib import Path
 import numpy as np
 
 from .application.stage_artifact_reader import read_stage_arrays, read_stage_json, restore_boundaries
+from .application.recognition_review import RECOGNITION_REVIEW_SCHEMA_VERSION, result_fingerprint
 from .application.stage_artifacts import StageArtifactStore
 from .assembly_review import (
     AssemblyReviewRequired,
@@ -56,46 +57,17 @@ def resume_assembly_stage(
     source_hash = str(loaded_summary.get("source_sha256", ""))
     if not source_hash:
         raise ValueError("Stage 02 summary has no source SHA-256")
-    if expected_source is not None:
-        source = Path(expected_source).expanduser().resolve()
-        if Path(str(loaded_summary.get("source", ""))).resolve() != source:
-            raise ValueError("Stage 02 artifacts belong to a different source path")
-        if sha256_file(source) != source_hash:
-            raise ValueError("source 3MF changed since Stage 02; rerun recognition")
+    source = Path(str(loaded_summary.get("source", ""))).resolve()
+    if expected_source is not None and Path(expected_source).expanduser().resolve() != source:
+        raise ValueError("Stage 02 artifacts belong to a different source path")
+    if sha256_file(source) != source_hash:
+        raise ValueError("source 3MF changed since Stage 02; rerun recognition")
 
     recognition_status = read_stage_json(run_dir, "03_recognition_review_status")
-    if recognition_status.get("status") != "user_confirmed":
-        raise ValueError("confirmed Stage 03 recognition review is required")
     recognition_summary = read_stage_json(run_dir, "03_recognition_summary")
     region_review = recognition_summary.get("region_review", {})
     if region_review.get("status") not in {"not_required", "user_confirmed"}:
         raise ValueError("confirmed source-region classifications are required")
-    if visual_semantics_path is not None:
-        from .recognition_metadata import annotate_recognition_with_visual_semantics, load_visual_semantics
-
-        semantics = load_visual_semantics(Path(visual_semantics_path).expanduser())
-        recognition_summary["regions"] = annotate_recognition_with_visual_semantics(
-            recognition_summary.get("regions", []), semantics.get("parts", {})
-        )
-        require_recognition_semantics(recognition_summary["regions"])
-        (run_dir / "03_visual_semantics.json").write_text(
-            json.dumps({"source": str(Path(visual_semantics_path).resolve()), "parts": semantics.get("parts", {})}, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-    else:
-        require_recognition_semantics(recognition_summary.get("regions", []))
-
-    if recognition_review_path is not None:
-        review = json.loads(Path(recognition_review_path).expanduser().read_text(encoding="utf-8"))
-        if review.get("user_confirmed") is not True:
-            raise ValueError("recognition review JSON is not confirmed")
-        if Path(str(review.get("source", ""))).resolve() != Path(str(loaded_summary.get("source", ""))).resolve():
-            raise ValueError("recognition review belongs to a different source 3MF")
-        if int(review.get("source_face_count", -1)) != int(loaded_summary.get("face_count", -2)):
-            raise ValueError("recognition review source face count does not match Stage 02")
-        if review.get("expected_result_fingerprint") != recognition_status.get("result_fingerprint"):
-            raise ValueError("recognition review does not match the saved Stage 03 result")
-
     loaded_arrays = read_stage_arrays(run_dir, "02_loaded_project")
     region_arrays = read_stage_arrays(run_dir, "03_recognition_regions")
     boundary_arrays = read_stage_arrays(run_dir, "03_recognized_boundaries")
@@ -124,6 +96,26 @@ def resume_assembly_stage(
             center=np.asarray(record["center"], dtype=np.float64),
         ))
     boundaries = restore_boundaries(boundary_arrays, recognition_summary)
+    _confirm_saved_recognition(
+        run_dir, source, int(loaded_summary.get("face_count", -2)),
+        recognition_status, recognition_review_path, components, boundaries,
+    )
+
+    if visual_semantics_path is not None:
+        from .recognition_metadata import annotate_recognition_with_visual_semantics, load_visual_semantics
+
+        semantics = load_visual_semantics(Path(visual_semantics_path).expanduser())
+        recognition_summary["regions"] = annotate_recognition_with_visual_semantics(
+            recognition_summary.get("regions", []), semantics.get("parts", {})
+        )
+        require_recognition_semantics(recognition_summary["regions"])
+        (run_dir / "03_visual_semantics.json").write_text(
+            json.dumps({"source": str(Path(visual_semantics_path).resolve()), "parts": semantics.get("parts", {})}, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+    else:
+        require_recognition_semantics(recognition_summary.get("regions", []))
+
     model_center = vertices.mean(axis=0)
     plan = plan_contact_interfaces(
         area_priority_ratio=area_priority_ratio,
@@ -135,8 +127,6 @@ def resume_assembly_stage(
         recognition_records=recognition_summary["regions"],
         direction_policy_overrides=load_direction_policy_corrections(prior_assembly_review_path),
     )
-    if not recognition_status.get("result_fingerprint"):
-        raise ValueError("Stage 03 confirmation is missing its result fingerprint")
     plan["interface_table"] = interface_table(plan)
 
     store = StageArtifactStore(run_dir.parent, run_id=run_dir.name)
@@ -179,3 +169,42 @@ def resume_assembly_stage(
             "table": str(table_path),
         })
     return store.run_dir
+
+
+def _confirm_saved_recognition(
+    run_dir: Path,
+    source: Path,
+    source_face_count: int,
+    recognition_status: dict,
+    recognition_review_path: Path | None,
+    components: list[Component],
+    boundaries,
+) -> None:
+    """Accept only a confirmation for the validated, frozen Stage 03 result."""
+    actual_result_fingerprint = result_fingerprint(components, boundaries)
+    if recognition_status.get("result_fingerprint") != actual_result_fingerprint:
+        raise ValueError("saved Stage 03 result fingerprint does not match its artifacts")
+    if recognition_status.get("status") not in {"user_confirmed", "needs_user_confirmation"}:
+        raise ValueError("Stage 03 recognition review status is invalid")
+    if recognition_review_path is None and recognition_status.get("status") != "user_confirmed":
+        raise ValueError("confirmed Stage 03 recognition review is required")
+    if recognition_review_path is not None:
+        review = json.loads(Path(recognition_review_path).expanduser().read_text(encoding="utf-8"))
+        if not isinstance(review, dict) or review.get("schema_version") != RECOGNITION_REVIEW_SCHEMA_VERSION:
+            raise ValueError("recognition review JSON has an unsupported schema_version")
+        if review.get("user_confirmed") is not True:
+            raise ValueError("recognition review JSON is not confirmed")
+        if Path(str(review.get("source", ""))).resolve() != source:
+            raise ValueError("recognition review belongs to a different source 3MF")
+        if int(review.get("source_face_count", -1)) != source_face_count:
+            raise ValueError("recognition review source face count does not match Stage 02")
+        if (review.get("recognition_fingerprint") != recognition_status.get("recognition_fingerprint")
+                or review.get("actions") != recognition_status.get("actions")
+                or review.get("expected_result_fingerprint") != actual_result_fingerprint):
+            raise ValueError("recognition review does not match the saved Stage 03 result")
+        if recognition_status.get("status") != "user_confirmed":
+            recognition_status["status"] = "user_confirmed"
+            recognition_status["decision_file"] = str(Path(recognition_review_path).expanduser().resolve())
+            StageArtifactStore(run_dir.parent, run_id=run_dir.name).write_json(
+                "03_recognition_review_status", recognition_status
+            )

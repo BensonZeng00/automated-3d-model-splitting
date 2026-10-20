@@ -56,6 +56,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--boundary-review-json", help="Confirmed source boundary ownership JSON.")
     parser.add_argument("--boundary-check-only", action="store_true")
     parser.add_argument("--region-review-json", help="Confirmed small-region classifications JSON.")
+    parser.add_argument(
+        "--resume-region-review-from", type=Path,
+        help="Continue Stage 03 from a saved pre-review checkpoint and confirmed --region-review-json without rereading the source 3MF.",
+    )
     parser.add_argument("--region-review-dir", help="Where source-region review images are written.")
     parser.add_argument("--region-review-resolution", type=int, default=320)
     parser.add_argument("--recognition-review-json", help="Confirmed recognition actions JSON.")
@@ -97,6 +101,13 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
         parser.error("--exterior-depth-tolerance-mm must be non-negative")
     if args.micro_defect_area_mm2 < 0 or args.print_surface_tolerance_mm < 0:
         parser.error("print tolerances must be non-negative")
+    if args.resume_region_review_from is not None:
+        if not args.region_review_json:
+            parser.error("--resume-region-review-from requires --region-review-json")
+        if args.resume_stage05_from is not None:
+            parser.error("--resume-region-review-from cannot be combined with --resume-stage05-from")
+        if args.boundary_check_only:
+            parser.error("--resume-region-review-from cannot be combined with --boundary-check-only")
 
 
 def main(argv: list[str] | None = None) -> None:

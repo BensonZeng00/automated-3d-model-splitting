@@ -20,8 +20,11 @@ def _run(command: list[str], root: Path) -> subprocess.CompletedProcess[str]:
 
 
 def _run_dir(result: subprocess.CompletedProcess[str]) -> Path:
-    return Path(next(line.split("=", 1)[1] for line in result.stdout.splitlines()
-                     if line.startswith("stage_artifacts=")))
+    return Path(json.loads(result.stdout.splitlines()[-1])["stage_artifacts"])
+
+
+def _log(result):
+    return Path(json.loads(result.stdout.splitlines()[-1])["log_path"]).read_text(encoding="utf8")
 
 
 def _result(run_dir: Path, name: str) -> dict:
@@ -52,7 +55,7 @@ def test_region_review_resume_matches_fresh_recognition(tmp_path: Path) -> None:
     resumed = _run(base + ["--region-review-json", str(review_path),
                            "--resume-region-review-from", str(initial_run)], tmp_path)
     assert resumed.returncode == 0, resumed.stdout[-1000:] + resumed.stderr[-1000:]
-    assert "source_stage02_reused" in resumed.stdout
+    assert "source_stage02_reused" in _log(resumed)
 
     fresh = _run(base + ["--region-review-json", str(review_path)], tmp_path)
     assert fresh.returncode == 0, fresh.stdout[-1000:] + fresh.stderr[-1000:]
@@ -69,7 +72,7 @@ def test_region_review_resume_matches_fresh_recognition(tmp_path: Path) -> None:
     legacy = _run(base + ["--region-review-json", str(review_path),
                           "--resume-region-review-from", str(legacy_run)], tmp_path)
     assert legacy.returncode == 0, legacy.stdout[-1000:] + legacy.stderr[-1000:]
-    assert "source_stage02_reused_candidates_recomputed" in legacy.stdout
+    assert "source_stage02_reused_candidates_recomputed" in _log(legacy)
     legacy_summary = _result(_run_dir(legacy), "03_recognition_summary")
     assert legacy_summary["regions"] == fresh_summary["regions"]
     assert (legacy_summary["recognized_boundaries"]["fingerprint"]
@@ -79,11 +82,11 @@ def test_region_review_resume_matches_fresh_recognition(tmp_path: Path) -> None:
                                    "--resume-region-review-from", str(initial_run),
                                    "--max-region-review-candidates", "5"], tmp_path)
     assert changed_options.returncode == 2
-    assert "checkpoint options changed" in changed_options.stderr
+    assert "checkpoint options changed" in _log(changed_options)
 
     with (initial_run / "03_region_review_checkpoint.npz").open("ab") as checkpoint_file:
         checkpoint_file.write(b"tampered")
     changed_artifact = _run(base + ["--region-review-json", str(review_path),
                                     "--resume-region-review-from", str(initial_run)], tmp_path)
     assert changed_artifact.returncode == 2
-    assert "checksum mismatch" in changed_artifact.stderr
+    assert "checksum mismatch" in _log(changed_artifact)

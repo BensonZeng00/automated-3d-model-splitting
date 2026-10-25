@@ -1,7 +1,6 @@
 """Shared elliptical profiles for tapered and curved-shoulder interfaces."""
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from types import SimpleNamespace
 
@@ -26,6 +25,9 @@ MORTISE_RAY_NUMERICAL_EPSILON_MM = 1e-7
 
 class InterfaceDepthError(ValueError):
     """An unsafe connector must not silently fall back to another shape."""
+    def __init__(self, message, *, record=None):
+        self.record = record or {}
+        super().__init__(message)
 
 
 @dataclass(frozen=True)
@@ -239,8 +241,8 @@ def build_pairwise_interface_surfaces(
                 "attempts": attempts,
             }
             raise InterfaceDepthError(
-                f"{interface_id}: minimum connector depth exceeds host thickness; "
-                f"diagnostic={json.dumps(diagnostic, ensure_ascii=False, separators=(',', ':'))}"
+                f"{interface_id}: minimum connector depth exceeds host thickness",
+                record=diagnostic,
             )
         depth = max(depth*.5, MIN_INTERFACE_EXTENSION_MM)
 

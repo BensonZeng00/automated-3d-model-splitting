@@ -4,6 +4,7 @@ import time
 
 from .common import *
 from .reporting import runtime_log
+from .admission import check
 
 
 def expand_vendor_paint_mesh(
@@ -18,6 +19,7 @@ def expand_vendor_paint_mesh(
     topology by projecting every generated vertex back onto source geometry.
     """
     started_at = time.perf_counter()
+    check("paint-expansion", paint_token_chars=max(map(len, paint_tokens), default=0))
     if len(source_faces) != len(paint_tokens):
         raise ValueError("Source face and vendor paint token counts do not match")
 
@@ -661,15 +663,31 @@ def parse_3mf_model(
     format_profile: str = "auto",
 ) -> tuple[np.ndarray, np.ndarray, list[str], dict]:
     with zipfile.ZipFile(path) as archive:
-        mesh_entries = discover_mesh_model_entries(archive)
-        if not mesh_entries:
-            raise ValueError(f"No mesh model entries found in {path}")
-        selected_entry = model_entry or mesh_entries[0][0]
+        if model_entry is None:
+            from .model_inventory import inspect_models, select_model
+            selected = select_model(inspect_models(path))
+            if selected is None:
+                raise ValueError("selection_required: multiple mesh objects; run inspect and specify --object-id")
+            model_entry = selected["object_id"]
+        selected_entry, _, selected_mesh_id = model_entry.partition("#")
+        mesh_entries = [(selected_entry, 0)]
         if selected_entry not in archive.namelist():
             raise ValueError(f"Requested model entry not found in 3MF: {selected_entry}")
+        check("inventory", model_xml_bytes=archive.getinfo(selected_entry).file_size)
         model_xml = archive.read(selected_entry)
         root = ET.fromstring(model_xml)
+        mesh_objects = [obj for obj in root.findall(f".//{CORE_NS}object") if obj.find(CORE_NS + "mesh") is not None]
+        if not selected_mesh_id and len(mesh_objects) > 1:
+            raise ValueError("selection_required: multiple meshes in entry; use entry#object-id")
+        if selected_mesh_id:
+            selected_objects = [obj for obj in mesh_objects if obj.get("id") == selected_mesh_id]
+            if len(selected_objects) != 1:
+                raise ValueError("selected mesh object is missing")
+            for obj in mesh_objects:
+                if obj not in selected_objects:
+                    obj.remove(obj.find(CORE_NS + "mesh"))
         project_settings = load_json_if_exists(archive, "Metadata/project_settings.config")
+        project_settings["_selected_mesh_object_id"] = selected_mesh_id or mesh_objects[0].get("id")
         default_filament = infer_default_filament_slot(archive, selected_entry, root)
         source_unit = root.attrib.get("unit", "millimeter").lower()
         if source_unit not in UNIT_TO_MM:

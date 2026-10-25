@@ -11,10 +11,7 @@ from .interface_surface import (
 from .mesh import build_local_mesh
 from .part_interface_composition import InterfaceAttachment, compose_part_with_interfaces
 from .project import color_resolution_status
-from .spatial_intersections import (
-    clean_tiny_boundary_contacts_3d,
-    remove_true_self_intersections_3d,
-)
+from .admission import audit_frozen_boundary
 from .interface_relations import interface_role_index
 from .interface_direction import inward_interface_axis
 from .local_ray_probe import LocalRayProbe
@@ -97,20 +94,7 @@ def build_pairwise_interface_surfaces(
                 raise ValueError(f"{interface_id}: shared boundary points must be an N×3 array")
             if not np.isfinite(points).all():
                 raise ValueError(f"{interface_id}: shared boundary contains non-finite coordinates")
-            cleaned_points, _ephemeral_ids, boundary_cleanup = remove_true_self_intersections_3d(
-                points
-            )
-            if not np.array_equal(cleaned_points, points):
-                _candidate, _ids, tolerance = clean_tiny_boundary_contacts_3d(
-                    points, np.arange(len(points), dtype=np.int64)
-                )
-                if (tolerance["remaining_intersection_count"]
-                        or not tolerance["removed_crossing_loop_count"]):
-                    raise ValueError(
-                        f"{interface_id}: frozen Stage 03 boundary has an unsafe "
-                        "self-intersection"
-                    )
-                boundary_cleanup["tolerated_point_contacts"] = tolerance
+            boundary_cleanup = audit_frozen_boundary(points)
             if len(points) < 3:
                 raise ValueError(f"{interface_id}: 3D crossing cleanup left fewer than three boundary points")
             simplified_boundary_point_count = len(points)

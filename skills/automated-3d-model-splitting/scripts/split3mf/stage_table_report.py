@@ -62,11 +62,13 @@ def interface_table(plan: dict) -> dict:
             part_label(str(interface["tenon_part"])),
             part_label(str(interface["mortise_part"])),
             len(contact.get("shared_boundary_loops", [])),
+            sum(len(loop.get("boundary_points_mm", []))
+                for loop in contact.get("shared_boundary_loops", [])),
             int(contact.get("shared_boundary_sample_count", 0)),
             direction_label,
         ])
     return {
-        "columns": ["接口", "榫方", "卯方", "共用简化边界数", "边界采样点数", "方向依据"],
+        "columns": ["接口", "榫方", "卯方", "共用简化边界数", "冻结边界点数", "源共享边证据数", "方向依据"],
         "rows": rows,
     }
 

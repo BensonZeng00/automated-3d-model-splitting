@@ -12,6 +12,9 @@ from .stage_cache import sha256_file
 
 
 _UPSTREAM_MODULES = (
+    "admission.py",
+    "model_inventory.py",
+    "spatial_intersections.py",
     "project.py",
     "recognition.py",
     "recognition_metadata.py",

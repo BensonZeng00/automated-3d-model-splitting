@@ -13,9 +13,11 @@ sys.path.insert(0, str(SCRIPT_DIR))
 from split3mf.common import load_core_dependencies
 from split3mf.resume_assembly_stage import resume_assembly_stage
 from split3mf.contact_interface_planner import DEFAULT_AREA_PRIORITY_RATIO
+from split3mf.execution_log import add_execution_arguments, logged_cli
+from split3mf.admission import AdmissionError
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser():
     parser = argparse.ArgumentParser(
         description=(
             "Plan Stage 04 interfaces from saved Stage 02/03 artifacts. "
@@ -36,7 +38,11 @@ def main(argv: list[str] | None = None) -> int:
                         help="Refresh an existing pending Stage 04 plan; confirmed plans and recorded corrections are protected.")
     parser.add_argument("--area-priority-ratio", type=float, default=DEFAULT_AREA_PRIORITY_RATIO,
                         help="Prefer smaller-area tenon at or above this ratio (default: 3; must be >1).")
-    args = parser.parse_args(argv)
+    add_execution_arguments(parser)
+    return parser
+
+
+def _run(args, parser):
     import math
     if not math.isfinite(args.area_priority_ratio) or args.area_priority_ratio <= 1:
         parser.error("--area-priority-ratio must be finite and greater than 1")
@@ -52,6 +58,8 @@ def main(argv: list[str] | None = None) -> int:
             area_priority_ratio=args.area_priority_ratio,
         )
     except (OSError, ValueError, KeyError) as exc:
+        if isinstance(exc, AdmissionError):
+            raise
         parser.exit(3, f"Stage 04 resume failed: {exc}\n")
     print(f"stage04_artifacts={run_dir}")
     status_path = run_dir / "04_assembly_review_status.json"
@@ -63,6 +71,12 @@ def main(argv: list[str] | None = None) -> int:
             print(f"assembly_review={status.get('review_json')}")
             print(f"interface_table={status.get('table')}")
     return 0
+
+
+def main(argv=None):
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    return logged_cli(lambda: _run(args, parser), args, args.source_run_dir / "logs")
 
 
 if __name__ == "__main__":

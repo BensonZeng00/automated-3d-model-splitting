@@ -442,12 +442,12 @@ def clean_tiny_boundary_contacts_3d(
     points: np.ndarray,
     vertex_ids: np.ndarray,
     *,
-    maximum_change_mm: float = 1.0,
+    maximum_change_mm: float = 2.0,
 ) -> tuple[np.ndarray, np.ndarray, dict]:
     """Remove only small vertex-on-segment loops without inventing source IDs.
 
     A general interior crossing needs a new intersection vertex and remains a
-    blocking geometry error. The same one-millimetre budget bounds total
+    blocking geometry error. The same two-millimetre budget bounds total
     discarded perimeter and the deviation from the original contour.
     """
     ring = np.asarray(points, dtype=np.float64)
@@ -475,7 +475,7 @@ def clean_tiny_boundary_contacts_3d(
         candidate, _, cleanup = remove_true_self_intersections_3d(
             ring, maximum_removed_loops=1
         )
-        if cleanup["removed_crossing_loop_count"] != 1 or len(candidate) != len(ring) - 1:
+        if cleanup["removed_crossing_loop_count"] != 1 or len(candidate) >= len(ring):
             break
         perimeter = cleanup["removed_loops"][0]["discarded_path_perimeter_mm"]
         if total_perimeter + perimeter > maximum_change_mm:

@@ -1,5 +1,7 @@
 # Stages and artifacts
 
+Selection, complexity gates, strict failure behavior and log reading follow [execution-policy.md](execution-policy.md). These rules also apply to artifact replay.
+
 `split3mf.pipeline.SplitPipeline` runs the current painted-3MF workflow. `StageArtifactStore` writes stage JSON/NPZ files under a unique run ID. The source 3MF is read only once in a full run.
 
 | Stage | Input | Artifacts |

@@ -13,6 +13,8 @@ sys.path.insert(0, str(SCRIPT_DIR))
 from split3mf.common import load_core_dependencies
 from split3mf.resume_interface_stage import resume_interface_stage
 from split3mf.assembly_review import AssemblyReviewRequired
+from split3mf.execution_log import add_execution_arguments, logged_cli
+from split3mf.admission import AdmissionError
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -54,12 +56,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--remove-detached-micro-shells-part", action="append", default=[],
         metavar="PXX", help="Remove negligible detached shells from this part after assembly; repeatable.",
     )
+    add_execution_arguments(parser)
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
+def _run(args, parser) -> int:
     if not 0.0 < args.interface_scale_ratio <= 1.0:
         parser.error("--interface-scale-ratio must be greater than 0 and at most 1")
     if args.interface_clearance_mm < 0.0:
@@ -79,9 +80,19 @@ def main(argv: list[str] | None = None) -> int:
     except AssemblyReviewRequired as exc:
         parser.exit(4, f"Stage 04 review required: {exc.review_path}\nTable: {exc.table_path}\n")
     except (OSError, ValueError, KeyError) as exc:
+        if isinstance(exc, AdmissionError):
+            raise
+        from split3mf.execution_log import emit
+        emit("interface-assembly", "execution_failed", str(exc), level="ERROR", diagnostic=getattr(exc, "record", {}))
         parser.exit(3, f"Stage 05 resume failed: {exc}\n")
     print(f"stage05_artifacts={run_dir}")
     return 0
+
+
+def main(argv=None):
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    return logged_cli(lambda: _run(args, parser), args, args.output_root)
 
 
 if __name__ == "__main__":

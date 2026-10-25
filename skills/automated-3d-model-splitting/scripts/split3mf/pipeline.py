@@ -9,6 +9,7 @@ from xml.etree import ElementTree as ET
 import numpy as np
 
 from .common import COLOR_CATALOG, COLOR_INFO, progress
+from .admission import AdmissionError, assess_mesh
 from .project import ThreeMFReader, build_color_info_map, material_connectivity_labels
 from .recognition import (
     classify_review_groups_semantically,
@@ -19,7 +20,6 @@ from .recognition import (
     recognition_colors_from_exterior,
     summarize_components,
 )
-from .recognition import _merge_partitioned_groups_into_components
 from .package_io import ThreeMFWriter, default_output_3mf, prepare_output_3mf
 from .validation import ValidationService
 from .reporting import runtime_log
@@ -103,8 +103,10 @@ class SplitPipeline:
                     vertices, faces = loaded_arrays["vertices"], loaded_arrays["faces"]
                     colors = loaded_arrays["face_color_tokens"].tolist()
                     project_settings = loaded_summary["project_settings"]
-                    if (args.model_entry is not None and
-                            args.model_entry != project_settings.get("_selected_model_entry")):
+                    saved_entry = project_settings.get("_selected_model_entry")
+                    saved_id = project_settings.get("_selected_mesh_object_id")
+                    saved_identity = saved_entry + "#" + saved_id if saved_id else saved_entry
+                    if (args.model_entry is not None and args.model_entry not in (saved_entry, saved_identity)):
                         raise ValueError("saved Stage 02 mesh uses a different model entry")
                     runtime_log("输入", "source_stage02_reused_candidates_recomputed",
                                 "已复用阶段 02，重新计算旧工件缺少的候选检查点",
@@ -121,6 +123,8 @@ class SplitPipeline:
                     format_profile=args.format_profile,
                 )
         except (OSError, ValueError, KeyError, zipfile.BadZipFile, ET.ParseError) as exc:
+            if isinstance(exc, AdmissionError):
+                raise
             parser.error(str(exc))
         runtime_log(
             "输入",
@@ -145,6 +149,13 @@ class SplitPipeline:
              "vertex_count": len(vertices), "face_count": len(faces),
              "project_settings": project_settings},
         )
+        admission = assess_mesh(vertices, faces, colors)
+        stage_artifacts.write_json("02_complexity_assessment", admission)
+        if getattr(args, "command", None) == "assess":
+            from .execution_log import summary
+            summary({"status": "undetermined", "assessment": admission,
+                     "pending_checks": admission["pending_checks"],
+                     "message": "Load and region statistics completed; boundary relationships and interface feasibility remain unchecked."})
         if getattr(args, "stop_after_stage", None) == "load":
             return
         new_color_info, new_color_order = build_color_info_map(
@@ -269,35 +280,6 @@ class SplitPipeline:
                     filtered_faces=sum(item["faces"] for item in automatic_noise_exclusions),
                     filtered_area_mm2=sum(item["area_mm2"] for item in automatic_noise_exclusions),
                 )
-            if len(groups) > 1000:
-                # Dense triangle-selector paint commonly leaves thousands of
-                # microscopic same-material islands.  Reviewing each island is
-                # quadratic in practice and cannot produce thousands of printable
-                # parts.  Retain every substantial island plus the largest island
-                # of each material, then attach only <= noise-threshold fragments
-                # to a same-material component by shared edge or nearest bbox.
-                largest_by_material = {}
-                for group in groups:
-                    identity = material_identity(str(recognition_token_colors[int(group[0])]))
-                    if identity not in largest_by_material or len(group) > len(largest_by_material[identity]):
-                        largest_by_material[identity] = group
-                consolidation_limit = int(args.small_region_review_max_faces)
-                anchors = [group for group in groups
-                           if len(group) > consolidation_limit
-                           or any(group is anchor for anchor in largest_by_material.values())]
-                anchor_ids = {id(group) for group in anchors}
-                fragments = [group for group in groups if id(group) not in anchor_ids]
-                merged, ignored_fragments, merged_records = _merge_partitioned_groups_into_components(
-                    vertices, faces, recognition_colors, anchors, fragments,
-                    display_colors=recognition_token_colors)
-                groups = [component.global_faces for component in merged]
-                runtime_log('识别', 'dense_paint_fragments_consolidated',
-                            '密集涂色微小岛已按同材料邻接或距离合并',
-                            raw_groups=len(anchors) + len(fragments),
-                            effective_groups=len(groups), fragments=len(fragments),
-                            merged_fragments=len(merged_records),
-                            ignored_fragments=len(ignored_fragments),
-                            maximum_fragment_faces=consolidation_limit)
             region_review = None
             normalized_groups = [np.asarray(group, dtype=np.int64) for group in groups]
             from .region_review import (
@@ -439,6 +421,8 @@ class SplitPipeline:
                 )
             )
         except ValueError as exc:
+            if isinstance(exc, AdmissionError):
+                raise
             parser.error(str(exc))
         original_recognition_components = list(components)
         try:

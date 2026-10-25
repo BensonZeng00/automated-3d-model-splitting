@@ -12,6 +12,8 @@ import sys
 import tempfile
 import unittest
 
+from golden_cli import artifact_directory, golden_directory
+
 import numpy as np
 from scipy.spatial import cKDTree
 
@@ -64,7 +66,7 @@ class PandaGoldenRegression(unittest.TestCase):
         self.assertTrue(APPROVED.is_file())
         self.assertEqual(hashlib.sha256(APPROVED.read_bytes()).hexdigest(),
                          fixture["approved_sha256"])
-        with tempfile.TemporaryDirectory(prefix="panda-golden-") as directory:
+        with golden_directory(prefix="panda-golden-") as directory:
             root = Path(directory)
             env = {**os.environ, "MPLCONFIGDIR": str(root / "matplotlib")}
             first = _run([
@@ -76,9 +78,7 @@ class PandaGoldenRegression(unittest.TestCase):
                 "--visual-semantics-json", str(FIXTURES / "panda_visual_semantics.json"),
                 "--stop-after-stage", "recognize",
             ], root / "recognize.log", env=env)
-            run_line = next(line for line in first.splitlines()
-                            if line.startswith("stage_artifacts="))
-            run_dir = Path(run_line.split("=", 1)[1])
+            run_dir = artifact_directory(first, "stage_artifacts")
 
             recognition = _read(run_dir / "03_recognition_review.json")
             self.assertEqual(recognition["source_face_count"], fixture["source_face_count"])
@@ -138,8 +138,7 @@ class PandaGoldenRegression(unittest.TestCase):
                 "--input", str(SOURCE), "--assembly-review-json", str(review_path),
                 "--semantic-review-json", str(proposal_path),
             ], root / "interfaces.log", env=env)
-            final_dir = Path(next(line.split("=", 1)[1] for line in output.splitlines()
-                                  if line.startswith("stage05_artifacts=")))
+            final_dir = artifact_directory(output, "stage05_artifacts")
             result = _read(final_dir / "05_interface_assembly_summary.json")["result"]
             self.assertEqual(result["interface_surface_count"], len(fixture["interfaces"]))
             self.assertTrue(result["package_validation"]["valid"])

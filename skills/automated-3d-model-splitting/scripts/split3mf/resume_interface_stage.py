@@ -7,6 +7,7 @@ import numpy as np
 
 from .application import StageArtifactStore
 from .common import Component
+from .admission import assess_mesh
 from .common import COLOR_CATALOG
 from .interface_assembly import build_pairwise_interface_surfaces
 from .interface_assembly import build_pairwise_part_meshes
@@ -79,6 +80,7 @@ def resume_interface_stage(
     faces = loaded_arrays.get("faces")
     if vertices is None or faces is None:
         raise ValueError("02 loaded-project artifact must contain vertices and faces")
+    assess_mesh(vertices, faces, loaded_arrays["face_color_tokens"])
     regions = sorted(
         recognition_summary.get("regions", []),
         key=lambda item: int(item["part_index"]),

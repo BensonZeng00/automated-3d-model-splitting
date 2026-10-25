@@ -38,8 +38,7 @@ class CliPreflightTests(unittest.TestCase):
             result = self.run_without_dependencies("--input", str(source), "--preflight-only")
         self.assertEqual(result.returncode, 2, result.stderr)
         self.assertNotIn("Traceback", result.stderr)
-        record = json.loads(next(line.removeprefix("preflight=") for line in result.stdout.splitlines()
-                                 if line.startswith("preflight=")))
+        record = json.loads(result.stdout.splitlines()[-1])["preflight"]
         self.assertTrue(record["input_exists"])
         self.assertFalse(record["dependency_ready"])
         self.assertEqual(set(record["missing_dependencies"]), set(CORE_DEPENDENCIES))

@@ -303,7 +303,10 @@ def build_source_region_review(
                 "classification": "",
             }
         )
+    from .review_overview import build_review_overviews
+    overview_paths = build_review_overviews(manifest_items, review_dir)
     manifest = {
+        "overview_images": overview_paths,
         "schema_version": REVIEW_SCHEMA_VERSION,
         "source": str(input_path.resolve()),
         "source_face_count": int(len(faces)),

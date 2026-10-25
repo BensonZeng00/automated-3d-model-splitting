@@ -46,7 +46,7 @@ This is a Skill for an AI assistant. Use an assistant environment that supports 
 Copy and send this prompt:
 
 ```text
-Install the automated-3d-model-splitting 3.0.0 Skill and its required dependencies from https://github.com/BensonZeng00/automated-3d-model-splitting. Once installed, ask whether I'd like to try the bundled cathead.3mf example.
+Before installing, ask whether I have a Coding Plan (a coding assistant subscription or usage allowance). Explain that splitting may consume many tokens, and complex models have a relatively high risk of splitting failure; failed runs can still consume substantial tokens, and that allowances and charges depend on my provider. Wait for my plan answer and explicit acceptance of the usage before installing; this installation request is not that confirmation. Install the automated-3d-model-splitting 3.0.0 Skill and its required dependencies from https://github.com/BensonZeng00/automated-3d-model-splitting. Once installed, ask whether I'd like to try the bundled cathead.3mf example.
 ```
 
 Start with the example to get familiar with the process, or provide your own model.

@@ -176,11 +176,8 @@ def fit_plane_normal(points: np.ndarray, fallback_normal: np.ndarray) -> np.ndar
 
 
 def progress(stage: str, message: str, **details) -> None:
-    """Emit a readable Chinese progress annotation plus optional structured data."""
-    suffix = ""
-    if details:
-        suffix = " " + json.dumps(details, ensure_ascii=False, sort_keys=True)
-    print(f"[{stage}] {message}{suffix}", flush=True)
+    from .execution_log import emit
+    emit(stage, "progress", message, level="WARNING" if stage == "警告" else "INFO", **details)
 
 
 def dependency_install_command() -> str:

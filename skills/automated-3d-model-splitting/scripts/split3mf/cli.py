@@ -28,6 +28,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
     parser.add_argument("--input", required=True, help="Vendor-painted source .3mf.")
+    parser.add_argument("command", nargs="?", choices=["inspect", "assess", "split"], default="split")
+    parser.add_argument("--object-id", help="Exact mesh object ID from inspect (entry#id). Required for multi-object packages.")
+    parser.add_argument("--complexity-config", type=Path, help="JSON overrides for conservative complexity limits.")
+    parser.add_argument("--log-file", type=Path, help="Full JSONL log; defaults to a unique file in the artifact root.")
+    parser.add_argument("--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR"], default="WARNING",
+                        help="Console verbosity; complete diagnostics are always saved locally.")
     parser.add_argument("--output", help="Final colored .3mf path.")
     parser.add_argument("--overwrite", action="store_true", help="Replace an existing output 3MF.")
     parser.add_argument("--model-entry", help="Internal .model entry to read.")
@@ -110,10 +116,7 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
             parser.error("--resume-region-review-from cannot be combined with --boundary-check-only")
 
 
-def main(argv: list[str] | None = None) -> None:
-    parser = build_parser()
-    args = parser.parse_args(argv)
-    _validate_args(parser, args)
+def _run(args, parser) -> None:
     input_path = Path(args.input).expanduser()
     progress("预检", "检查输入文件和 Python 依赖", input=str(input_path))
     checks = preflight(input_path)
@@ -174,6 +177,11 @@ def main(argv: list[str] | None = None) -> None:
             }, ensure_ascii=False), flush=True)
             raise SystemExit(4) from None
         except (OSError, ValueError, KeyError) as exc:
+            from .admission import AdmissionError
+            if isinstance(exc, AdmissionError):
+                raise
+            from .execution_log import emit
+            emit("interface-assembly", "execution_failed", str(exc), level="ERROR", diagnostic=getattr(exc, "record", {}))
             parser.exit(3, f"Stage 05 resume failed: {exc}\n")
         print("stage05_artifacts=" + str(resumed_run), flush=True)
         print("output_3mf=" + str(output_path), flush=True)
@@ -204,7 +212,60 @@ def main(argv: list[str] | None = None) -> None:
         }, ensure_ascii=False), flush=True)
         raise SystemExit(4) from None
     except ValueError as exc:
-        print("split_failure=" + json.dumps({
-            "error": str(exc), "detail": getattr(exc, "record", {})
-        }, ensure_ascii=False), flush=True)
+        from .admission import AdmissionError
+        if isinstance(exc, AdmissionError):
+            raise
+        from .execution_log import emit
+        emit("split", "execution_failed", str(exc), level="ERROR", diagnostic=getattr(exc, "record", {}))
         raise SystemExit(3) from None
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    _validate_args(parser, args)
+    from .admission import ComplexityLimits, check, limits_scope
+    from .execution_log import run_logged, summary
+    from .model_inventory import inspect_models, select_model
+
+    root = args.stage_artifacts_dir or (
+        Path(args.output).with_name(Path(args.output).stem + "_stages")
+        if args.output else Path.cwd() / "runs"
+    )
+    log_path = args.log_file or Path(root) / (uuid.uuid4().hex + ".jsonl")
+
+    def execute():
+        with limits_scope(ComplexityLimits.load(args.complexity_config)):
+            if args.preflight_only or args.stop_after_stage == "preflight":
+                return _run(args, parser)
+            # Replays validate source identity and saved dimensions in their own service.
+            if args.resume_stage05_from or args.resume_region_review_from:
+                from .application.stage_artifact_reader import read_stage_json
+                saved_run = args.resume_stage05_from or args.resume_region_review_from
+                saved = read_stage_json(saved_run, "02_loaded_project_summary")
+                settings = saved["project_settings"]
+                entry = settings.get("_selected_model_entry")
+                mesh_id = settings.get("_selected_mesh_object_id")
+                identity = entry + "#" + mesh_id if mesh_id else entry
+                if args.object_id and args.object_id != identity:
+                    raise ValueError("selected object differs from saved artifacts")
+                if args.model_entry and args.model_entry not in (entry, identity):
+                    raise ValueError("selected model entry differs from saved artifacts")
+                args.model_entry = identity
+                summary({"object_id": identity})
+                return _run(args, parser)
+            entry_filter = (args.object_id or args.model_entry or "").partition("#")[0] or None
+            items = inspect_models(Path(args.input), entry_filter=entry_filter)
+            selected = select_model(items, args.object_id, args.model_entry)
+            if args.command == "inspect" or selected is None:
+                summary({"status": "inspected" if args.command == "inspect" else "selection_required",
+                         "objects": [{key: item[key] for key in ("object_id", "name", "source_faces", "size_source_units", "unit", "literal_color_tokens")} for item in items]})
+                return 0 if args.command == "inspect" else 5
+            args.model_entry = selected["object_id"]
+            summary({"object_id": selected["object_id"], "name": selected["name"]})
+            check("inventory", paint_token_chars=selected["paint_token_chars"])
+            if args.command == "assess":
+                args.stop_after_stage = "load"
+            return _run(args, parser)
+
+    raise SystemExit(run_logged(execute, log_path, level=args.log_level, object_id=args.object_id or args.model_entry))

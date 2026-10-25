@@ -51,12 +51,9 @@ def main(*, entry_script: Path = ENTRY_SCRIPT, working_directory: Path | None = 
             print(completed.stdout)
             print(completed.stderr, file=sys.stderr)
             raise SystemExit(f"expected recognition review exit code 4, got {completed.returncode}")
-        review_lines = [line.removeprefix("recognition_review_required=")
-                        for line in completed.stdout.splitlines()
-                        if line.startswith("recognition_review_required=")]
-        if len(review_lines) != 1:
+        review = json.loads(completed.stdout.splitlines()[-1])
+        if review.get("status") != "review_required" or not review.get("review_json"):
             raise AssertionError("synthetic run did not request recognition review")
-        review = json.loads(review_lines[0])
         review_path = Path(review["review_json"])
         summary_path = review_path.with_name("03_recognition_summary.json")
         summary = json.loads(summary_path.read_text(encoding="utf-8"))

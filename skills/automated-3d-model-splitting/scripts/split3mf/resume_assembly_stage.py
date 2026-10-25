@@ -8,6 +8,7 @@ import uuid
 from pathlib import Path
 
 import numpy as np
+from .admission import assess_mesh
 
 from .application.stage_artifact_reader import read_stage_arrays, read_stage_json, restore_boundaries
 from .application.recognition_review import RECOGNITION_REVIEW_SCHEMA_VERSION, result_fingerprint
@@ -75,6 +76,7 @@ def resume_assembly_stage(
     faces = loaded_arrays.get("faces")
     if vertices is None or faces is None:
         raise ValueError("02 loaded-project artifact must contain vertices and faces")
+    assess_mesh(vertices, faces, loaded_arrays["face_color_tokens"])
 
     regions = sorted(recognition_summary.get("regions", []), key=lambda item: int(item["part_index"]))
     components = []

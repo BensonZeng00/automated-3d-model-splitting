@@ -46,8 +46,10 @@
 复制下面这段话发给 AI 助手：
 
 ```text
-安装前，请先询问我是否有 Coding Plan（编程助手订阅或额度套餐），并说明拆件可能消耗较多 token，复杂模型拆件失败的概率较高，即使失败也可能消耗较多 token 和额度，实际额度与费用以所用服务为准。等我回答套餐情况并明确确认接受消耗、继续安装后，再执行安装；不要把本条安装请求当作已确认。请从 https://github.com/BensonZeng00/automated-3d-model-splitting 安装 automated-3d-model-splitting 3.0.0 Skill 和所需依赖。装好后，问我是否用仓库自带的小猫头 cathead.3mf 试一次。
+请从 https://github.com/BensonZeng00/automated-3d-model-splitting 安装 automated-3d-model-splitting Skill 和所需依赖。
 ```
+
+AI 助手会获取仓库，按[安装说明](tools/INSTALL.md)选择可用的 Python 和安装目录，调用安装脚本并验证结果。你只需回答 Coding Plan 情况，并在了解 token 与额度消耗后明确确认继续。安装完成后可另行选择是否试用小猫头示例。
 
 可以先用示例熟悉流程，也可以直接提供自己的模型。
 

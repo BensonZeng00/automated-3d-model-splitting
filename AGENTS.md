@@ -1,5 +1,11 @@
 # Repository work rules
 
+## Plain-language installation requests
+
+A request to install this Skill and its dependencies from this repository is sufficient to start the installation workflow. The user does not need to name an installer, provide shell commands, choose a Python path, specify a version, or repeat the consent policy in their request. Read [tools/INSTALL.md](tools/INSTALL.md) and use `tools/install_skill.py`; do not stop at giving the user manual commands or copy only `SKILL.md`. Select an available supported Python and the current assistant's Skill destination from the environment. For Codex, the installer supplies the default destination; for other assistants, pass their known destination with `--target` and ask only if it cannot be determined.
+
+The initial request starts the workflow but does not satisfy the installation-consent gate below. Collect the plan answer and explicit consent in chat when there is no interactive terminal, then pass the actual answer with `--plan` and `--accept-usage` in the same session. After a successful installation, verify the installed CLI with `--version` and `--help` from an unrelated working directory before reporting success. If the environment cannot run the installer, report the concrete blocker rather than claiming installation succeeded.
+
 ## Knowledge base after pulling code
 
 Whenever you run `git pull` or otherwise incorporate code from a remote branch into this checkout, review the incoming commits and update `knowledge/` in the same task. Extract reusable development guidance: invariants, failure patterns, diagnostic steps, decision rules, and trade-offs. Keep model-specific incidents, commit ranges, and test run logs in the task or commit record rather than the general guidance page. Link new or revised guidance from `knowledge/README.md`. If the pull yields no reusable lesson, record that finding briefly rather than inventing one.

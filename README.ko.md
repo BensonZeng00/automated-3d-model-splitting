@@ -46,8 +46,10 @@ AI 어시스턴트용 Skill(스킬)입니다. Skill 설치, 모델 파일 접근
 아래 문장을 복사해 보내세요.
 
 ```text
-설치 전에 Coding Plan(코딩 도우미 구독 또는 사용량 요금제)이 있는지 물어봐 주세요. 분할 과정에서 많은 토큰을 사용할 수 있고 복잡한 모델은 분할 실패 가능성이 비교적 높고 실패해도 많은 토큰과 사용량이 소모될 수 있으며, 한도와 요금은 서비스에 따라 다름을 설명해 주세요. 요금제에 대한 답변과 사용량을 이해하고 설치를 계속하겠다는 명시적 확인을 받은 후 설치해 주세요. 이 설치 요청 자체를 확인으로 간주하지 마세요. https://github.com/BensonZeng00/automated-3d-model-splitting 에서 automated-3d-model-splitting 3.0.0 Skill과 필요한 의존성을 설치해 주세요. 설치가 끝나면 포함된 고양이 머리 예제 cathead.3mf로 먼저 사용해 볼지 물어봐 주세요.
+https://github.com/BensonZeng00/automated-3d-model-splitting 에서 automated-3d-model-splitting Skill과 필요한 의존성을 설치해 주세요.
 ```
+
+AI가 [설치 안내](tools/INSTALL.md)에 따라 저장소를 가져오고, Python과 설치 경로를 선택하고, 스크립트를 실행하여 결과를 확인합니다. 사용자는 Coding Plan 여부에 답하고 토큰과 사용량 소모에 대한 설명을 들은 뒤 명시적으로 동의하면 됩니다. 예제 실행은 설치 후 별도로 선택할 수 있습니다.
 
 예제로 사용 흐름을 익히거나 자신의 모델로 바로 시작할 수 있습니다.
 

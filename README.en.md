@@ -46,8 +46,10 @@ This is a Skill for an AI assistant. Use an assistant environment that supports 
 Copy and send this prompt:
 
 ```text
-Before installing, ask whether I have a Coding Plan (a coding assistant subscription or usage allowance). Explain that splitting may consume many tokens, and complex models have a relatively high risk of splitting failure; failed runs can still consume substantial tokens, and that allowances and charges depend on my provider. Wait for my plan answer and explicit acceptance of the usage before installing; this installation request is not that confirmation. Install the automated-3d-model-splitting 3.0.0 Skill and its required dependencies from https://github.com/BensonZeng00/automated-3d-model-splitting. Once installed, ask whether I'd like to try the bundled cathead.3mf example.
+Install the automated-3d-model-splitting Skill and its required dependencies from https://github.com/BensonZeng00/automated-3d-model-splitting.
 ```
+
+Your assistant obtains the repository, selects Python and the destination, runs the installer, and verifies the result using the [installation guide](tools/INSTALL.md). You answer the Coding Plan question and explicitly accept the explained token and allowance usage before installation. Trying the cathead example is a separate choice afterward.
 
 Start with the example to get familiar with the process, or provide your own model.
 

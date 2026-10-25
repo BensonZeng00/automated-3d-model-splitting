@@ -73,7 +73,8 @@ class InstallTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="install test ")
         self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        # Match the installer's canonical paths (e.g. macOS temporary-directory aliases).
+        self.root = Path(self.temporary.name).resolve()
         self.source = self.root / "source"
         self.target = self.root / "user" / "skills" / "test-skill"
         for name in ("SKILL.md", "requirements.txt", "LICENSE", "NOTICE",

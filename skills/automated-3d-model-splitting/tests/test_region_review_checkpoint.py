@@ -16,7 +16,9 @@ from synthetic_fixture import write_fixture
 
 def _run(command: list[str], root: Path) -> subprocess.CompletedProcess[str]:
     env = {**os.environ, "TEMP": str(root), "TMP": str(root), "MPLCONFIGDIR": str(root / "mpl")}
-    return subprocess.run(command, capture_output=True, text=True, env=env, cwd=REPO)
+    return subprocess.run(
+        command, capture_output=True, text=True, encoding="utf-8", env=env, cwd=REPO,
+    )
 
 
 def _run_dir(result: subprocess.CompletedProcess[str]) -> Path:
@@ -34,7 +36,7 @@ def _result(run_dir: Path, name: str) -> dict:
 def test_region_review_resume_matches_fresh_recognition(tmp_path: Path) -> None:
     source = write_fixture(tmp_path / "painted.3mf")
     base = [
-        sys.executable, str(ENTRY), "--input", str(source),
+        sys.executable, "-X", "utf8", "-B", str(ENTRY), "--input", str(source),
         "--output", str(tmp_path / "out.3mf"),
         "--stage-artifacts-dir", str(tmp_path / "stages"),
         "--exterior-view-count", "8", "--exterior-depth-map-resolution", "64",

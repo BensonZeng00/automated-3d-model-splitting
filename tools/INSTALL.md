@@ -34,7 +34,7 @@ Use an existing Python 3.10–3.12 environment. The launching interpreter is use
 
 ## 安装确认 / Consent
 
-脚本先说明：拆件可能消耗较多 token，复杂模型拆件失败的概率较高；即使失败也可能消耗较多 token 和额度。实际额度与费用以所用服务为准，Coding Plan 不代表无限或免费使用。
+脚本先说明：如果没有 Coding Plan，请谨慎使用，并对 token 消耗做好预期。拆件可能消耗较多 token，复杂模型有可能失败；即使失败也可能消耗较多 token 和额度。实际额度与费用以所用服务为准，Coding Plan 不代表无限或免费使用。
 
 然后分别收集：
 
@@ -43,7 +43,7 @@ Use an existing Python 3.10–3.12 environment. The launching interpreter is use
 
 没有套餐也可同意安装。首次安装请求、仅回答套餐情况、空输入和 `ok` 都不构成完整确认。确认前不复制技能、不执行 pip、不运行示例。
 
-The script explains that splitting can consume substantial tokens and allowance, complex models have a relatively high failure risk, and failed runs still consume usage. Actual limits and charges depend on the provider; a plan does not imply unlimited or free usage. It separately collects a plan answer and explicit acceptance. A plan is not required to proceed.
+The script explains that splitting can consume substantial tokens and allowance, complex models may fail; without a Coding Plan, use cautiously and plan for token usage, and failed runs still consume usage. Actual limits and charges depend on the provider; a plan does not imply unlimited or free usage. It separately collects a plan answer and explicit acceptance. A plan is not required to proceed.
 
 ## AI 助手调用 / Assistant invocation
 
@@ -52,7 +52,7 @@ The script explains that splitting can consume substantial tokens and allowance,
 1. 读取仓库 `AGENTS.md` 与本说明；通过可用的 Git 或 ZIP 获取完整仓库。已有对应仓库时复用，避免覆盖用户改动。用户未指定版本时使用所获取仓库的版本。
 2. 只读检查可用 Python，遵守用户已有环境配置，选择 3.10–3.12；自动判断当前助手的技能目标目录。Codex 使用脚本默认值，其他助手通过 `--target` 指定已知目录。仅在缺少必要环境或无法确定目录时询问用户。
 3. 展示上述安装消耗说明并获得两项确认；同一会话已有完整确认则复用。
-4. 使用所选解释器和安装脚本的绝对路径执行，参数由助手根据实际回答组装。普通后台执行通常没有交互终端，应先在对话中问用户，再使用 `--plan` 与 `--accept-usage`，不要启动一个等待终端输入的安装进程。
+4. 使用所选解释器和安装脚本的绝对路径执行，参数由助手根据实际回答组装。普通后台执行通常没有交互终端，应先在对话中问用户，再使用 `--plan` 与 `--accept-usage`，不要启动一个等待终端输入的安装进程。不得自行填写确认参数，也不得手动复制技能或单独执行 pip 绕过安装器。
 5. 检查退出码。成功后，从仓库以外的工作目录运行安装目标内 `scripts/split_painted_3mf.py` 的 `--version` 和 `--help`；均成功后才报告安装目录、解释器及验证结果。失败时按错误定位原因，未完整确认前不重试安装；不得把下载成功或单独复制文件称为安装成功。
 6. 安装完成后询问是否试用 `cathead.3mf`，等用户选择后再运行模型。
 

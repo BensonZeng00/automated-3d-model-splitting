@@ -15,13 +15,14 @@ from release_files import GENERATED_DIRECTORIES
 
 SKILL_NAME = "automated-3d-model-splitting"
 USAGE_NOTICE = (
-    "拆件可能消耗较多 token，复杂模型拆件失败的概率较高；"
-    "即使失败也可能消耗较多 token 和额度。实际额度与费用以所用服务为准，"
-    "Coding Plan 不代表无限或免费使用。没有套餐也可以在了解消耗后继续安装。\n"
-    "Splitting may consume substantial tokens. Complex models have a relatively high "
-    "risk of failure; failed runs can still consume substantial tokens and allowance. "
-    "Actual allowances and charges depend on your provider. A Coding Plan does not "
-    "mean unlimited or free usage, and purchasing a plan is not required."
+    "拆件可能消耗较多 token，复杂模型有可能失败，即使失败也可能消耗额度。"
+    "如果没有 Coding Plan（编程助手订阅或额度套餐），请谨慎使用，"
+    "并对 token 消耗做好预期。实际额度与费用以所用服务为准，"
+    "Coding Plan 不代表无限或免费使用。确认接受上述风险后再安装。\n"
+    "Splitting may consume substantial tokens, and complex models may fail; failed runs "
+    "can still consume allowance. If you do not have a Coding Plan, use cautiously and "
+    "plan for token usage. Actual limits and charges depend on your provider; a plan "
+    "does not mean unlimited or free usage. Confirm acceptance before installation."
 )
 
 

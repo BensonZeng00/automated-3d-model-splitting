@@ -49,6 +49,8 @@ Copy and send this prompt:
 Install the automated-3d-model-splitting Skill and its required dependencies from https://github.com/BensonZeng00/automated-3d-model-splitting.
 ```
 
+Before installation: splitting may consume substantial tokens and complex models may fail. Without a Coding Plan, use cautiously and plan for token usage. Explicit confirmation is required before installation.
+
 Your assistant obtains the repository, selects Python and the destination, runs the installer, and verifies the result using the [installation guide](tools/INSTALL.md). You answer the Coding Plan question and explicitly accept the explained token and allowance usage before installation. Trying the cathead example is a separate choice afterward.
 
 Start with the example to get familiar with the process, or provide your own model.

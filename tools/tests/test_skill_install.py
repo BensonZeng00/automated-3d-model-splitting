@@ -35,7 +35,9 @@ class ConsentTests(unittest.TestCase):
 
         consent = request_consent(None, False, interactive=True, read=read, write=events.append)
         self.assertEqual(consent, InstallConsent("unsure", True))
-        self.assertIn("失败", events[0])
+        self.assertIn("复杂模型有可能失败", events[0])
+        self.assertIn("请谨慎使用", events[0])
+        self.assertIn("对 token 消耗做好预期", events[0])
         self.assertIn("Coding Plan", events[1])
         self.assertIn("继续安装", events[2])
 

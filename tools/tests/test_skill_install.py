@@ -9,49 +9,63 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from install_skill import main, request_consent
-from skill_install import InstallConsent, install_skill
+from skill_install import InstallConsent, InstallResult, USAGE_NOTICE, install_skill
 
 
 class ConsentTests(unittest.TestCase):
-    def test_all_plan_answers_require_separate_explicit_acceptance(self):
-        for plan in ("yes", "no", "unsure"):
-            with self.subTest(plan=plan):
-                with self.assertRaises(ValueError):
-                    request_consent(plan, False, interactive=False, write=lambda _: None)
-                consent = request_consent(plan, True, interactive=False, write=lambda _: None)
-                self.assertEqual(consent, InstallConsent(plan, True))
-
-    def test_acceptance_alone_does_not_supply_plan(self):
+    def test_explicit_acceptance_required_without_terminal(self):
         with self.assertRaises(ValueError):
-            request_consent(None, True, interactive=False, write=lambda _: None)
+            request_consent(False, interactive=False, write=lambda _: None)
+        self.assertEqual(request_consent(True, interactive=False, write=lambda _: None),
+                         InstallConsent(True))
 
-    def test_interactive_notice_precedes_both_answers(self):
+    def test_interactive_notice_precedes_single_confirmation(self):
         events = []
-        answers = iter(("不确定", "同意"))
 
         def read(prompt):
             events.append(prompt)
-            return next(answers)
+            return "同意"
 
-        consent = request_consent(None, False, interactive=True, read=read, write=events.append)
-        self.assertEqual(consent, InstallConsent("unsure", True))
-        self.assertIn("复杂模型有可能失败", events[0])
-        self.assertIn("请谨慎使用", events[0])
-        self.assertIn("对 token 消耗做好预期", events[0])
-        self.assertIn("Coding Plan", events[1])
-        self.assertIn("继续安装", events[2])
+        consent = request_consent(False, interactive=True, read=read, write=events.append)
+        self.assertEqual(consent, InstallConsent(True))
+        self.assertEqual(events, [USAGE_NOTICE, "[同意 / yes] > "])
+
+    def test_success_repeats_exact_notice_after_installation(self):
+        events = []
+
+        def install(*args):
+            events.append("INSTALL")
+            return InstallResult(Path("installed-skill"))
+
+        with patch("install_skill.sys.stdin.isatty", return_value=False), \
+                patch("install_skill.install_skill", side_effect=install), \
+                patch("builtins.print", side_effect=lambda value: events.append(value)):
+            self.assertEqual(main(["--accept-usage"]), 0)
+        self.assertEqual(events[0], USAGE_NOTICE)
+        self.assertEqual(events[1], "INSTALL")
+        self.assertEqual(events[-1], USAGE_NOTICE)
+        self.assertEqual(events.count(USAGE_NOTICE), 2)
+
+    def test_failure_does_not_report_completion_or_repeat_notice(self):
+        events = []
+        with patch("install_skill.sys.stdin.isatty", return_value=False), \
+                patch("install_skill.install_skill", side_effect=OSError("failed")), \
+                patch("builtins.print", side_effect=lambda value, **kwargs: events.append(value)):
+            self.assertEqual(main(["--accept-usage"]), 1)
+        self.assertEqual(events.count(USAGE_NOTICE), 1)
+        self.assertFalse(any("安装完成" in event for event in events))
 
     def test_blank_or_vague_acceptance_cancels(self):
         for answer in ("", "ok", "no"):
             with self.subTest(answer=answer), self.assertRaises(ValueError):
-                request_consent("yes", False, interactive=True,
+                request_consent(False, interactive=True,
                                 read=lambda _: answer, write=lambda _: None)
 
     def test_cli_does_not_call_installer_without_consent(self):
         with patch("install_skill.sys.stdin.isatty", return_value=False), \
                 patch("install_skill.install_skill") as install, \
                 patch("builtins.print"):
-            self.assertEqual(main(["--plan", "yes"]), 2)
+            self.assertEqual(main([]), 2)
             install.assert_not_called()
 
 
@@ -76,12 +90,12 @@ class InstallTests(unittest.TestCase):
 
     def install(self, **kwargs):
         return install_skill(self.source, self.target, "selected-python",
-                             InstallConsent("no", True), runner=kwargs.get("runner", self.runner))
+                             InstallConsent(True), runner=kwargs.get("runner", self.runner))
 
     def test_invalid_consent_has_no_side_effects(self):
         with self.assertRaises(ValueError):
             install_skill(self.source, self.target, "selected-python",
-                          InstallConsent("yes", False), runner=self.runner)
+                          InstallConsent(False), runner=self.runner)
         self.assertEqual(self.calls, [])
         self.assertFalse(self.target.parent.exists())
 
@@ -164,7 +178,7 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(self.calls, [])
         with self.assertRaises(ValueError):
             install_skill(self.source, self.source / "nested", "selected-python",
-                          InstallConsent("yes", True), runner=self.runner)
+                          InstallConsent(True), runner=self.runner)
         self.assertEqual(self.calls, [])
 
     def test_unsupported_python_does_not_copy_or_install_dependencies(self):

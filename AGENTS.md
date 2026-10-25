@@ -4,7 +4,7 @@
 
 A request to install this Skill and its dependencies from this repository is sufficient to start the installation workflow. The user does not need to name an installer, provide shell commands, choose a Python path, specify a version, or repeat the consent policy in their request. Read [tools/INSTALL.md](tools/INSTALL.md) and use `tools/install_skill.py`; do not stop at giving the user manual commands or copy only `SKILL.md`. Select an available supported Python and the current assistant's Skill destination from the environment. For Codex, the installer supplies the default destination; for other assistants, pass their known destination with `--target` and ask only if it cannot be determined.
 
-The initial request starts the workflow but does not satisfy the installation-consent gate below. Collect the plan answer and explicit consent in chat when there is no interactive terminal, then pass the actual answer with `--plan` and `--accept-usage` in the same session. After a successful installation, verify the installed CLI with `--version` and `--help` from an unrelated working directory before reporting success. If the environment cannot run the installer, report the concrete blocker rather than claiming installation succeeded.
+The initial request starts the workflow but does not satisfy the installation-consent gate below. Show the exact notice below and collect explicit consent in chat when there is no interactive terminal, then use `--accept-usage` only for that consent in the same session. After a successful installation, verify the installed CLI with `--version` and `--help` from an unrelated working directory before reporting success. If the environment cannot run the installer, report the concrete blocker rather than claiming installation succeeded.
 
 ## Knowledge base after pulling code
 
@@ -16,6 +16,10 @@ Generated model files are ignored by default. Add one only when the user explici
 
 ## Installation consent
 
-Before installing this skill or its dependencies for a user, ask whether they have a Coding Plan (coding assistant subscription or usage allowance). Explain that model splitting may consume substantial tokens, complex models may fail; users without a Coding Plan should use cautiously and plan for token usage, and failed runs still consume usage, and actual allowances and charges depend on the provider; a plan does not imply unlimited or free usage. Obtain both the user's plan answer (yes, no, or unsure) and explicit consent to proceed after this notice. An initial install request or a plan answer alone is not consent. Without consent, stop before copying the skill, installing dependencies, or running a sample. Do not require purchasing a plan, inspect billing credentials, or repeatedly ask when informed consent is already recorded in the current installation session. This gate applies to user installations, not isolated packaging tests or development edits.
+Before installation, display this exact notice and wait for explicit acceptance. Repeat the same notice after successful installation without requesting confirmation again:
+
+> 拆件可能消耗较多 token，复杂模型有可能失败；如果没有 Coding Plan，请谨慎使用，并对 token 消耗做好预期。明确确认后才安装
+
+Do not separately ask about Coding Plan status. The initial installation request is not consent. Without explicit acceptance, stop before copying the Skill, installing dependencies, or running a sample. Reuse informed consent already recorded in the current installation session; do not invent or persist it for future installations. This gate applies to user installations, not development edits or isolated packaging tests.
 
 All assistant-managed user installations must use tools/install_skill.py. Never invent consent flags or bypass the installer by copying files or running pip separately.

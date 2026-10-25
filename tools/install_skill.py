@@ -11,20 +11,15 @@ import sys
 from skill_install import InstallConsent, SKILL_NAME, USAGE_NOTICE, install_skill
 
 
-def request_consent(plan: str | None, accepted: bool, *, interactive: bool,
-                    read=input, write=print) -> InstallConsent:
+def request_consent(accepted: bool, *, interactive: bool,
+                    read=input, write=None) -> InstallConsent:
+    if write is None:
+        write = print
     write(USAGE_NOTICE)
-    if plan is None and interactive:
-        answer = read("是否有 Coding Plan（编程助手订阅或额度套餐）？"
-                      "有/没有/不确定 [yes/no/unsure]: ").strip().lower()
-        plan = {"有": "yes", "没有": "no", "不确定": "unsure"}.get(answer, answer)
-    if plan not in {"yes", "no", "unsure"}:
-        raise ValueError("请先回答套餐情况 / Answer yes, no or unsure before installation.")
     if not accepted and interactive:
-        answer = read("已了解上述消耗，是否继续安装？输入“同意”或 yes 确认，"
-                      "其他输入取消 / Accept usage and install? [yes/NO]: ").strip().lower()
+        answer = read("[同意 / yes] > ").strip().lower()
         accepted = answer in {"同意", "yes"}
-    consent = InstallConsent(plan, accepted)
+    consent = InstallConsent(accepted)
     consent.validate()
     return consent
 
@@ -44,18 +39,16 @@ def parser() -> argparse.ArgumentParser:
                              "then the new version is installed without backup or rollback.")
     result.add_argument("--python", default=sys.executable,
                         help="Python 3.10–3.12 executable (default: current interpreter).")
-    result.add_argument("--plan", choices=("yes", "no", "unsure"),
-                        help="User's actual Coding Plan answer from this installation session.")
     result.add_argument("--accept-usage", action="store_true",
                         help="Use ONLY after the user explicitly accepts the notice in this session; "
-                             "does not replace --plan. Otherwise prompt interactively.")
+                             "otherwise prompt interactively.")
     return result
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
-        consent = request_consent(args.plan, args.accept_usage, interactive=sys.stdin.isatty())
+        consent = request_consent(args.accept_usage, interactive=sys.stdin.isatty())
     except (ValueError, EOFError) as error:
         print(f"未安装 / Not installed: {error}", file=sys.stderr)
         return 2
@@ -68,6 +61,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     print(f"已安装 / Installed: {result.target}")
     print("安装完成。可另行选择是否试用 cathead.3mf。 / You can separately choose to try cathead.3mf.")
+    print(USAGE_NOTICE)
     return 0
 
 

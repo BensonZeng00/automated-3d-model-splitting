@@ -5,6 +5,7 @@ from pathlib import Path
 
 import numpy as np
 
+from .quality_report import quality_check, published
 from .application import StageArtifactStore
 from .common import Component
 from .admission import assess_mesh
@@ -15,7 +16,7 @@ from .interface_package_validation import validate_reloaded_interface_parts
 from .package_io import ThreeMFWriter
 from .project import build_color_info_map
 from .source_face_ownership import complete_component_face_ownership, confirmed_part_ids
-from .validation import ValidationService
+from .validation import ValidationService, validate_part_meshes
 from .stage_cache import sha256_file
 from .stage_reuse_provenance import validate_provenance
 from .assembly_review import ensure_assembly_review
@@ -138,6 +139,7 @@ def resume_interface_stage(
         face_color_tokens=face_color_tokens,
         remove_detached_micro_shells_part_ids=remove_detached_micro_shells_part_ids,
     )
+    mesh_audits = validate_part_meshes(completed_parts)
     store.write_arrays(
         "05_interface_assembly_meshes",
         **{
@@ -175,13 +177,13 @@ def resume_interface_stage(
             output_layout="assembly",
         )
         if not package_validation.get("valid"):
-            raise ValueError("Stage 05 3MF validation failed: " + json.dumps(
-                package_validation.get("errors", []), ensure_ascii=False
-            ))
+            quality_check(False, 'Stage 05 3MF validation has findings', stage='08', identity='package',
+                          errors=package_validation.get('errors', []))
         reloaded_part_audits = validate_reloaded_interface_parts(
             temporary_output, completed_parts, part_records
         )
         temporary_output.replace(output_3mf)
+        published(output_3mf)
     except Exception:
         temporary_output.unlink(missing_ok=True)
         raise
@@ -198,6 +200,7 @@ def resume_interface_stage(
         "export": export_summary,
         "package_validation": package_validation,
         "reloaded_part_audits": reloaded_part_audits,
+        "mesh_validation": mesh_audits,
     })
     store.write_json(
         "05_interface_assembly_summary",

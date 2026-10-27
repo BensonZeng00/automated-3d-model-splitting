@@ -27,6 +27,19 @@ def validate_mesh_in_memory(mesh: trimesh.Trimesh) -> dict:
     return audit_mesh_topology(mesh)
 
 
+def validate_part_meshes(parts: list[dict]) -> list[dict]:
+    """One topology policy for full builds and Stage 05 artifact replay."""
+    from .quality_report import quality_check
+    audits = [{"part_id": part["part_id"], **validate_mesh_in_memory(part["mesh"])} for part in parts]
+    for audit in audits:
+        quality_check(bool(audit['watertight'] and audit['winding_consistent']
+                           and not audit['open_edges'] and not audit['over_shared_edges']),
+                      'part mesh has topology defects', stage='05', identity=audit['part_id'],
+                      audit=audit, thresholds=dict(open_edges=0, over_shared_edges=0,
+                                                  winding_consistent=True, watertight=True))
+    return audits
+
+
 def finalize_mesh(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
     finalize_face_counts = {"input": int(len(mesh.faces))}
     mesh.merge_vertices(digits_vertex=6)

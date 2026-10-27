@@ -9,6 +9,7 @@ from itertools import permutations
 import numpy as np
 from scipy.spatial import ConvexHull, QhullError, cKDTree
 import trimesh
+from .quality_report import quality_check
 from .boundary_matching import distances_to_loop
 from .boundary_smoothing import MAX_RELATIVE_SHAPE_CHANGE
 
@@ -264,14 +265,11 @@ def _append_planar_convex_cap(
     hull_ratio = float(hull.volume / abs(signed_area))
     cap_area_fraction = float(hull.volume / max(source_area_mm2, 1e-12))
     if hull_ratio > 1.05:
-        raise ValueError(
-            f"nonplanar source rim is too concave for a planar hull cap ({hull_ratio:.3f})"
-        )
+        quality_check(False, 'nonplanar source rim is too concave for a planar hull cap',
+                      stage='05', identity='source_cap', measured=hull_ratio, threshold=1.05)
     if cap_area_fraction < 0.10:
-        raise ValueError(
-            "nonplanar source rim is a minor fraction of its part surface "
-            f"({cap_area_fraction:.3f})"
-        )
+        quality_check(False, 'nonplanar source rim is a minor fraction of its part surface',
+                      stage='05', identity='source_cap', measured=cap_area_fraction, minimum=0.10)
     plane_normal = basis[2]
     touches = np.isin(source_faces, np.asarray(loop, dtype=np.int64)).sum(axis=1) >= 2
     adjacent_centers = source_vertices[source_faces[touches]].mean(axis=1)
@@ -321,6 +319,10 @@ def compose_part_with_interfaces(
     source_area_mm2 = float(source_twice_areas.sum() * 0.5)
     loops = _oriented_source_boundary_loops(source_vertices, source_faces)
     if not loops:
+        if not attachments:
+            return trimesh.Trimesh(source_vertices, source_faces, process=False), dict(
+                interfaces=[], source_face_origin_indices=np.arange(len(source_faces)),
+                source_geometry_mutation='none')
         raise ValueError("source exterior has no open boundary to receive the interface")
     assignments: list[tuple[InterfaceAttachment, int, np.ndarray]] = []
     selected_loops: set[int] = set()
@@ -358,10 +360,10 @@ def compose_part_with_interfaces(
             0.15 + MAX_RELATIVE_SHAPE_CHANGE * span,
         )
         if maximum_distance > allowed_distance:
-            raise ValueError(
+            quality_check(False,
                 f"{attachment.interface_id}: exterior is too far from the simplified interface "
-                f"({maximum_distance:.4f} mm; limit {allowed_distance:.4f} mm)"
-            )
+                f"({maximum_distance:.4f} mm; limit {allowed_distance:.4f} mm)",
+                stage='05', identity=attachment.interface_id, measured_mm=maximum_distance, threshold_mm=allowed_distance)
         selected_loops.add(selected)
         assignments.append((attachment, selected, distances))
 
@@ -636,12 +638,12 @@ def compose_part_with_interfaces(
         bridge_altitudes = bridge_twice_areas / np.maximum(bridge_lengths.max(axis=1), 1e-12)
         if np.any(bridge_twice_areas <= 1e-10):
             bad = np.flatnonzero(bridge_twice_areas <= 1e-10)
-            raise ValueError(
+            quality_check(False,
                 f"{attachment.interface_id}: surface transition has degenerate triangles "
                 f"(count={len(bad)}, first={int(bad[0])}, "
                 f"maximum_edge_mm={float(bridge_lengths[bad].max()):.6f}, "
-                f"minimum_area_mm2={float(bridge_twice_areas[bad].min() * .5):.9g})"
-            )
+                f"minimum_area_mm2={float(bridge_twice_areas[bad].min() * .5):.9g})",
+                stage='05', identity=attachment.interface_id, degenerate_faces=int(len(bad)), double_area_threshold_mm2=1e-10)
         faces.extend(bridge_faces)
         kept = (interface_faces[:-attachment.outer_cap_face_count]
                 if attachment.outer_cap_face_count else interface_faces)

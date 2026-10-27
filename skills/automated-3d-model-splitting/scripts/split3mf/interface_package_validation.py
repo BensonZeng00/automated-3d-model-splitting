@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 from scipy.spatial import cKDTree
 
+from .quality_report import quality_check
 from .topology import audit_mesh_topology, topology_defects_within_tolerance
 from .package_io import load_colored_mesh_objects_3mf
 
@@ -20,11 +21,15 @@ def validate_reloaded_interface_parts(
     expected = {part["part_id"]: part for part in expected_parts}
     records = {record["part_id"]: record for record in part_records}
     if len(loaded) != len(expected) or {part["part_id"] for part in loaded} != set(expected):
-        raise ValueError("exported 3MF does not contain exactly the planned parts")
+        quality_check(False, 'exported 3MF does not contain exactly the planned parts',
+                      stage='08', identity='package', expected_parts=sorted(expected),
+                      loaded_parts=[part['part_id'] for part in loaded])
     audits = []
     for part in loaded:
         part_id = part["part_id"]
         mesh = part["mesh"]
+        if part_id not in expected:
+            continue
         original = expected[part_id]["mesh"]
         source_degenerate = int(records[part_id]["source_degenerate_face_count"])
         boolean_allowance = int(records[part_id].get("boolean_microface_allowance", 0))
@@ -60,6 +65,9 @@ def validate_reloaded_interface_parts(
             or len(mesh.faces) != len(original.faces)
             or maximum_shift > 1e-4
         ):
-            raise ValueError(f"{part_id}: exported 3MF geometry failed readback: {audit}")
+            quality_check(False, f"{part_id}: exported 3MF geometry failed readback: {audit}",
+                          stage='08', identity=part_id, audit=audit,
+                          thresholds=dict(maximum_vertex_shift_mm=1e-4, component_count=expected_component_count,
+                                          face_count=len(original.faces), degenerate_face_budget=source_degenerate + boolean_allowance))
         audits.append(audit)
     return audits

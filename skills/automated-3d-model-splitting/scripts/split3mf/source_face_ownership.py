@@ -7,6 +7,7 @@ from collections import defaultdict
 import numpy as np
 from scipy.spatial import cKDTree
 
+from .quality_report import quality_check
 from .common import Component, DSU
 
 
@@ -54,7 +55,10 @@ def complete_component_face_ownership(
     for part_index, component in enumerate(components):
         selected = np.asarray(component.global_faces, dtype=np.int64)
         if np.any(owner[selected] >= 0):
-            raise ValueError("recognized parts have overlapping source-face ownership")
+            quality_check(False, 'recognized parts have overlapping source-face ownership',
+                          stage='05', identity=f'P{part_index + 1:02d}',
+                          overlap_faces=int(np.count_nonzero(owner[selected] >= 0)), threshold=0,
+                          action='保留原区域选择并继续；输出零件可能包含重复表面')
         owner[selected] = part_index
         recognized_vertices.append(np.unique(faces[selected]))
     if not recognized_vertices:

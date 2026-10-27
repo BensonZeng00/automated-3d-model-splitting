@@ -1,6 +1,7 @@
 """Shared elliptical profiles for tapered and curved-shoulder interfaces."""
 from __future__ import annotations
 
+from .quality_report import quality_check
 from dataclasses import dataclass
 from types import SimpleNamespace
 
@@ -65,11 +66,15 @@ def _surface(vertices, faces, record):
         mesh.triangles[:, 2]-mesh.triangles[:, 0]), axis=1)
     if (open_edges != expected or np.any(counts > 2)
             or not mesh.is_winding_consistent or np.any(areas <= 1e-12)):
-        raise ValueError(f"{record['interface_id']}: generated patch topology invalid")
+        quality_check(False, f"{record['interface_id']}: generated patch topology invalid",
+                      stage='05', identity=record['interface_id'],
+                      open_edges_match=open_edges == expected, over_shared_edges=int(np.count_nonzero(counts > 2)),
+                      winding_consistent=bool(mesh.is_winding_consistent),
+                      degenerate_faces=int(np.count_nonzero(areas <= 1e-12)), double_area_threshold_mm2=1e-12)
     record["topology_audit"] = {
-        "valid": True, "open_outer_interface_edges": n,
-        "over_shared_edges": 0, "winding_consistent": True,
-        "degenerate_face_count": 0,
+        "valid": bool(open_edges == expected and not np.any(counts > 2) and mesh.is_winding_consistent and not np.any(areas <= 1e-12)), "open_outer_interface_edges": n,
+        "over_shared_edges": int(np.count_nonzero(counts > 2)), "winding_consistent": bool(mesh.is_winding_consistent),
+        "degenerate_face_count": int(np.count_nonzero(areas <= 1e-12)),
     }
     return InterfaceSurface(vertices, np.asarray(mesh.faces), record)
 

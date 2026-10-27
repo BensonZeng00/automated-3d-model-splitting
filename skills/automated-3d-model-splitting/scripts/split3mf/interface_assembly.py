@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import re
 
+from .quality_report import best_effort, warn, quality_check, record_parts, record_interfaces, preserve_part, strict_construction_checks, quality_identity
+
 import numpy as np
 
 from .interface_surface import (
@@ -26,7 +28,7 @@ def _part_index(part_id: str) -> int:
     return int(match.group(1))
 
 
-def build_pairwise_interface_surfaces(
+def _build_pairwise_interface_surfaces_strict(
     interface_plan: dict,
     *,
     vertices: np.ndarray,
@@ -210,6 +212,56 @@ def build_pairwise_interface_surfaces(
     return arrays, result
 
 
+def build_pairwise_interface_surfaces(interface_plan, **kwargs):
+    if not best_effort():
+        built, result = _build_pairwise_interface_surfaces_strict(interface_plan, **kwargs)
+        record_interfaces(interface_plan, result)
+        return built, result
+    roles = interface_role_index(interface_plan)
+    try:
+        with strict_construction_checks():
+            built, result = _build_pairwise_interface_surfaces_strict(interface_plan, **kwargs)
+        record_interfaces(interface_plan, result)
+        return built, result
+    except (ValueError, RuntimeError):
+        pass  # Retry at interface granularity so one failed construction cannot discard the rest.
+    arrays, records, skipped = {}, [], []
+    if interface_plan.get('unmatched_contact_segments'):
+        warn('05', 'plan', '存在未解决的接触段', action='保留已规划接口；未解决的接触段不生成接口',
+             segments=interface_plan['unmatched_contact_segments'])
+    summary = None
+    for relation in interface_plan['interfaces']:
+        single = {**interface_plan, 'interfaces': [relation], 'unmatched_contact_segments': [],
+                  'relation_table': {**interface_plan['relation_table'], 'rows': [
+                      row for row in interface_plan['relation_table']['rows']
+                      if str(row[0]).strip() == str(relation['interface_id']).strip()]}}
+        try:
+            try:
+                with strict_construction_checks():
+                    built, result = _build_pairwise_interface_surfaces_strict(single, **kwargs)
+            except (ValueError, RuntimeError):
+                built, result = _build_pairwise_interface_surfaces_strict(single, **kwargs)
+        except (ValueError, RuntimeError) as exc:
+            skipped.append(str(relation['interface_id']))
+            warn('05', str(relation['interface_id']), exc,
+                 action='跳过该接口，继续其他接口；相关零件可能缺少榫或卯',
+                 diagnostic=getattr(exc, 'record', {}))
+            continue
+        arrays.update(built)
+        records.extend(result['interfaces'])
+        summary = result
+    if summary is None:
+        summary = dict(schema='pairwise-interface-surfaces/v1',
+                       source_interface_schema=interface_plan['schema'],
+                       recognized_boundary_fingerprint=interface_plan.get('recognized_boundary_fingerprint'),
+                       scale_ratio=float(kwargs['scale_ratio']), total_clearance_mm=float(kwargs['clearance_mm']))
+    summary.update(interface_role_index=roles, interface_role_index_sha256=fingerprint_payload(roles),
+                   interfaces=records, interface_surface_count=len(records), skipped_interfaces=skipped,
+                   quality_gates_blocking=False)
+    record_interfaces(interface_plan, summary)
+    return arrays, summary
+
+
 def _color_info_for_component(color_code: str) -> dict:
     from .common import COLOR_INFO
 
@@ -250,7 +302,7 @@ def build_pairwise_part_meshes(
                 f"{interface_id}: built interface roles do not match the hashed role table"
             )
         summary_roles[interface_id] = roles
-    if set(summary_roles) != set(role_index):
+    if set(summary_roles) != set(role_index) and not best_effort():
         raise ValueError("built interface surfaces do not match the hashed role table")
     attachments_by_part: dict[str, list[InterfaceAttachment]] = {
         f"P{index:02d}": [] for index in range(1, len(components) + 1)
@@ -262,6 +314,8 @@ def build_pairwise_part_meshes(
         for loop_position, _loop in enumerate(
             relation["contact"]["shared_boundary_loops"]
         ):
+            if (interface_id, loop_position) not in records and best_effort():
+                continue
             record = records[(interface_id, loop_position)]
             stem = f"{interface_id.lower()}_loop_{loop_position:03d}"
             for side in ("tenon", "mortise"):
@@ -296,11 +350,26 @@ def build_pairwise_part_meshes(
             vertices, faces, component
         )
         try:
-            mesh, composition = compose_part_with_interfaces(
-                source_vertices, source_faces, attachments_by_part[part_id]
-            )
-        except ValueError as exc:
-            raise ValueError(f"{part_id}: {exc}") from exc
+            try:
+                with strict_construction_checks(), quality_identity(part_id):
+                    mesh, composition = compose_part_with_interfaces(
+                        source_vertices, source_faces, attachments_by_part[part_id]
+                    )
+            except (ValueError, RuntimeError):
+                if not best_effort():
+                    raise
+                with quality_identity(part_id):
+                    mesh, composition = compose_part_with_interfaces(
+                        source_vertices, source_faces, attachments_by_part[part_id]
+                    )
+        except (ValueError, RuntimeError) as exc:
+            if not best_effort():
+                raise ValueError(f"{part_id}: {exc}") from exc
+            warn('05', part_id, exc, action='保留原始区域网格作为参考；该零件接口未完成',
+                 interfaces=[a.interface_id for a in attachments_by_part[part_id]])
+            mesh = trimesh.Trimesh(source_vertices, source_faces, process=False)
+            composition = dict(source_face_origin_indices=np.arange(len(source_faces)),
+                               interfaces=[], build_status='reference_source_mesh')
         source_face_origin_indices = np.asarray(
             composition.pop("source_face_origin_indices"), dtype=np.int64
         )
@@ -313,13 +382,16 @@ def build_pairwise_part_meshes(
             edge_counts = np.bincount(
                 mesh.edges_unique_inverse, minlength=len(mesh.edges_unique)
             )
-            raise ValueError(
-                f"{part_id}: joined exterior and interfaces are not a valid closed mesh "
-                f"(watertight={mesh.is_watertight}, winding={mesh.is_winding_consistent}, "
-                f"degenerate_faces={degenerate}, source_degenerate_faces={source_degenerate}, "
-                f"open_edges={int(np.count_nonzero(edge_counts == 1))}, "
-                f"over_shared_edges={int(np.count_nonzero(edge_counts > 2))})"
-            )
+            quality_check(False, f"{part_id}: joined exterior and interfaces have geometry defects",
+                          stage='05', identity=part_id, watertight=bool(mesh.is_watertight),
+                          winding_consistent=bool(mesh.is_winding_consistent),
+                          degenerate_faces=degenerate, source_degenerate_faces=source_degenerate,
+                          open_edges=int(np.count_nonzero(edge_counts == 1)),
+                          over_shared_edges=int(np.count_nonzero(edge_counts > 2)),
+                          threshold='winding consistent; degenerates <= source budget')
+
+        if best_effort() and (not mesh.is_winding_consistent or degenerate > source_degenerate):
+            composition.setdefault('build_status', 'geometry_warning')
         color_code = str(component.color_code)
         color_info = _color_info_for_component(color_code)
         part = {
@@ -362,6 +434,10 @@ def build_pairwise_part_meshes(
         parts.append(part)
         part_records.append({
             "part_id": part_id,
+            "build_status": composition.get("build_status", "missing_interface" if any(
+                part_id in (role["tenon_part"], role["mortise_part"])
+                for key, role in role_index.items() if key in interface_summary.get("skipped_interfaces", [])
+            ) else "constructed"),
             "face_count": int(len(mesh.faces)),
             "watertight": bool(mesh.is_watertight),
             "winding_consistent": bool(mesh.is_winding_consistent),
@@ -374,6 +450,8 @@ def build_pairwise_part_meshes(
             },
             "composition": composition,
         })
+        preserve_part(part, part_records[-1])
+        record_parts(part_records)
     if imprinted_pockets:
         from .imprinted_host_attachment import carve_imprinted_mortise
 
@@ -386,24 +464,32 @@ def build_pairwise_part_meshes(
             tenon_vertices, tenon_faces, _, _ = build_local_mesh(
                 vertices, faces, components[tenon_index - 1]
             )
-            # Join the open socket surface to its source shell before carving.
-            cutter, _ = compose_part_with_interfaces(
-                tenon_vertices, tenon_faces,
-                [InterfaceAttachment(
-                    interface_id=interface_id, side="mortise",
-                    vertices=pocket_vertices, faces=pocket_faces,
-                    outer_vertex_count=outer_count,
-                    outer_cap_face_count=cap_count,
-                    original_boundary_points=original_points,
-                )],
-            )
-            carve_imprinted_mortise(
-                parts[index], part_records[index], cutter.vertices, cutter.faces,
-                interface_id, contact_segments,
-                MAX_INTERFACE_EXTENSION_MM + plane_alignment_mm + 2.0,
-            )
-            part_records[part_positions[tenon_part_id]]["interface_roles"][interface_id] = "tenon"
-            part_records[index]["interface_roles"][interface_id] = "mortise"
+            try:
+                # Join the open socket surface to its source shell before carving.
+                cutter, _ = compose_part_with_interfaces(
+                    tenon_vertices, tenon_faces,
+                    [InterfaceAttachment(
+                        interface_id=interface_id, side="mortise",
+                        vertices=pocket_vertices, faces=pocket_faces,
+                        outer_vertex_count=outer_count,
+                        outer_cap_face_count=cap_count,
+                        original_boundary_points=original_points,
+                    )],
+                )
+                carve_imprinted_mortise(
+                    parts[index], part_records[index], cutter.vertices, cutter.faces,
+                    interface_id, contact_segments,
+                    MAX_INTERFACE_EXTENSION_MM + plane_alignment_mm + 2.0,
+                )
+                part_records[part_positions[tenon_part_id]]["interface_roles"][interface_id] = "tenon"
+                part_records[index]["interface_roles"][interface_id] = "mortise"
+            except (ValueError, RuntimeError) as exc:
+                if not best_effort():
+                    raise
+                warn('05', interface_id, exc, action='保留切槽前的宿主零件；该卯槽未生成', part_id=part_id,
+                     diagnostic=getattr(exc, 'record', {}))
+                part_records[index]['build_status'] = 'missing_mortise'
+
     if remove_detached_micro_shells_part_ids:
         from .detached_micro_shells import remove_detached_micro_shells
 
@@ -420,4 +506,7 @@ def build_pairwise_part_meshes(
             record["face_count"] = len(part["mesh"].faces)
             record["watertight"] = bool(part["mesh"].is_watertight)
             record["winding_consistent"] = bool(part["mesh"].is_winding_consistent)
+    for part, record in zip(parts, part_records):
+        preserve_part(part, record)
+    record_parts(part_records)
     return parts, part_records

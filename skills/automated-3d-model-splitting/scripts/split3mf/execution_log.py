@@ -150,6 +150,7 @@ def run_logged(callback, path, *, level="WARNING", object_id=None):
 
 
 def add_execution_arguments(parser):
+    parser.add_argument("--strict-quality", action="store_true", help="Stop on geometry quality failures.")
     parser.add_argument("--complexity-config", type=Path, help="JSON complexity limit overrides.")
     parser.add_argument("--log-file", type=Path, help="Full local JSONL diagnostics.")
     parser.add_argument("--log-level", choices=list(_LEVELS), default="WARNING", help="Console threshold; full log remains local.")
@@ -158,7 +159,10 @@ def add_execution_arguments(parser):
 def logged_cli(callback, args, default_root):
     from .admission import ComplexityLimits, limits_scope
     def execute():
+        from .quality_report import report_scope
         with limits_scope(ComplexityLimits.load(args.complexity_config)):
-            return callback()
+            with report_scope(Path(default_root) / (uuid.uuid4().hex + '_split_report.md'),
+                              strict=getattr(args, 'strict_quality', False)):
+                return callback()
     path = args.log_file or Path(default_root) / (uuid.uuid4().hex + ".jsonl")
     return run_logged(execute, path, level=args.log_level)

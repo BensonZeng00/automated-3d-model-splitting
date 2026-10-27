@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .quality_report import quality_check
+
 import numpy as np
 import trimesh
 from scipy.spatial import cKDTree
@@ -63,8 +65,11 @@ def carve_imprinted_mortise(
         raise ValueError(f"{interface_id}: mortise cutter is not a closed solid")
     original = host_part["mesh"]
     carved = trimesh.boolean.difference([original, cutter], engine="manifold")
-    if not carved.is_watertight or not carved.is_winding_consistent:
-        raise ValueError(f"{interface_id}: imprinted host is not a closed solid")
+    if not len(carved.faces):
+        raise ValueError(f"{interface_id}: boolean result has no faces")
+    quality_check(bool(carved.is_watertight and carved.is_winding_consistent),
+                  f"{interface_id}: imprinted host is not a closed solid", stage='05', identity=interface_id,
+                  watertight=bool(carved.is_watertight), winding_consistent=bool(carved.is_winding_consistent))
     degenerates = int(np.count_nonzero(carved.area_faces <= 1e-10))
     collapse = boolean_collapsed_face_audit(carved)
     new_degenerates = max(
@@ -73,13 +78,13 @@ def carve_imprinted_mortise(
     micro_limit = int(len(carved.faces) * 0.005)
     if (new_degenerates > micro_limit
             or int(collapse["collapsed_face_count"]) > micro_limit):
-        raise ValueError(
+        quality_check(False,
             f"{interface_id}: imprinted host gained nonlocal or excessive microfaces "
             f"({degenerates} after, {host_record['degenerate_face_count']} before, "
             f"{host_record['source_degenerate_face_count']} source, "
             f"collapsed={collapse['collapsed_face_count']}, "
-            f"maximum_allowed={micro_limit})"
-        )
+            f"maximum_allowed={micro_limit})",
+            stage='05', identity=interface_id, new_degenerate_faces=new_degenerates, collapsed_faces=int(collapse['collapsed_face_count']), maximum_allowed=micro_limit, ratio_limit=0.005)
     removed_volume = float(original.volume - carved.volume)
     if removed_volume <= 1e-4:
         raise ValueError(f"{interface_id}: mortise cutter missed the host solid")
@@ -94,12 +99,12 @@ def carve_imprinted_mortise(
             maximum_changed_distance = float(distances.max())
             if maximum_changed_distance > maximum_contact_distance_mm:
                 far = np.flatnonzero(changed)[np.argmax(distances)]
-                raise ValueError(
+                quality_check(False,
                     f"{interface_id}: host carving extends {maximum_changed_distance:.3f} mm "
                     f"from its confirmed contact segments (limit {maximum_contact_distance_mm:.3f} mm); "
                     f"far_face={far}, center={carved.triangles_center[far].tolist()}, "
-                    f"distance_to_old={surface_distances[far]:.6f}, changed_faces={int(changed.sum())}"
-                )
+                    f"distance_to_old={surface_distances[far]:.6f}, changed_faces={int(changed.sum())}",
+                    stage='05', identity=interface_id, measured_mm=maximum_changed_distance, threshold_mm=maximum_contact_distance_mm)
     infos = [COLOR_INFO.get(token, {}) for token in tokens]
     host_part["mesh"] = carved
     host_part["face_paint_color_tokens"] = tokens
@@ -110,8 +115,8 @@ def carve_imprinted_mortise(
         info.get("filament_slot") for info in infos
     ]
     host_record["face_count"] = int(len(carved.faces))
-    host_record["watertight"] = True
-    host_record["winding_consistent"] = True
+    host_record["watertight"] = bool(carved.is_watertight)
+    host_record["winding_consistent"] = bool(carved.is_winding_consistent)
     host_record["degenerate_face_count"] = degenerates
     host_record["boolean_microface_allowance"] = new_degenerates
     host_record["boolean_collapsed_face_audit"] = collapse

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .quality_report import quality_check, published
+
 import json
 import re
 import zipfile
@@ -765,20 +767,8 @@ class SplitPipeline:
                 getattr(args, "remove_detached_micro_shells_part", [])
             ),
         )
-        mesh_audits = [
-            {"part_id": part["part_id"], **self.validator.validate_mesh(part["mesh"])}
-            for part in built_parts
-        ]
-        invalid_meshes = [
-            item for item in mesh_audits
-            if not item.get("watertight") or not item.get("winding_consistent")
-            or int(item.get("open_edges", 0)) or int(item.get("over_shared_edges", 0))
-        ]
-        if invalid_meshes:
-            raise ValueError(
-                "05 produced invalid part meshes: "
-                + json.dumps(invalid_meshes, ensure_ascii=False, sort_keys=True)
-            )
+        from .validation import validate_part_meshes
+        mesh_audits = validate_part_meshes(built_parts)
         part_arrays = {}
         for part in built_parts:
             array_key = re.sub(r"[^a-z0-9_]+", "_", part["part_id"].lower()).strip("_")
@@ -826,15 +816,14 @@ class SplitPipeline:
                 output_layout=getattr(args, "output_layout", None) or "assembly",
             )
             if not package_validation.get("valid"):
-                raise ValueError(
-                    "08 final 3MF validation failed: "
-                    + json.dumps(package_validation.get("errors", []), ensure_ascii=False)
-                )
+                quality_check(False, "08 final 3MF validation has findings", stage='08', identity='package',
+                              errors=package_validation.get('errors', []))
             from .interface_package_validation import validate_reloaded_interface_parts
             reloaded_part_audits = validate_reloaded_interface_parts(
                 temporary_output, built_parts, part_records
             )
             temporary_output.replace(output_path)
+            published(output_path)
         except Exception:
             temporary_output.unlink(missing_ok=True)
             raise

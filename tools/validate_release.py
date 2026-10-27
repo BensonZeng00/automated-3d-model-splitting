@@ -108,7 +108,13 @@ def main() -> int:
                 encoding="utf-8",
                 errors="replace",
             )
-        if preflight.returncode != 0 or '"dependency_ready": true' not in preflight.stdout:
+        # Parse the shared CLI summary contract; JSON whitespace is not semantic.
+        try:
+            preflight_summary = json.loads(preflight.stdout.strip().splitlines()[-1])
+            dependency_ready = preflight_summary.get('preflight', {}).get('dependency_ready') is True
+        except (ValueError, IndexError, AttributeError):
+            dependency_ready = False
+        if preflight.returncode != 0 or not dependency_ready:
             errors.append(
                 "entry script --preflight-only failed: "
                 + (preflight.stderr.strip() or preflight.stdout.strip() or str(preflight.returncode))

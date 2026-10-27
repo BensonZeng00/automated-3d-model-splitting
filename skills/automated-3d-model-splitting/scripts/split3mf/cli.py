@@ -26,6 +26,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Recognize painted 3MF parts and build pairwise tenon/mortise interfaces."
     )
+    parser.add_argument("--strict-quality", action="store_true", help="Stop on geometry validation failures instead of exporting with warnings.")
     parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
     parser.add_argument("--input", required=True, help="Vendor-painted source .3mf.")
     parser.add_argument("command", nargs="?", choices=["inspect", "assess", "split"], default="split")
@@ -167,6 +168,8 @@ def _run(args, parser) -> None:
             try:
                 shutil.copyfile(completed_3mf, temporary_output)
                 os.replace(temporary_output, output_path)
+                from .quality_report import published
+                published(output_path)
             finally:
                 temporary_output.unlink(missing_ok=True)
         except AssemblyReviewRequired as exc:
@@ -268,4 +271,13 @@ def main(argv: list[str] | None = None) -> None:
                 args.stop_after_stage = "load"
             return _run(args, parser)
 
-    raise SystemExit(run_logged(execute, log_path, level=args.log_level, object_id=args.object_id or args.model_entry))
+    def execute_with_report():
+        from .quality_report import report_scope
+        report_output = Path(args.output).expanduser() if args.output else Path(args.input).expanduser().resolve().with_name(
+            f"{sanitize_name(Path(args.input).stem) or 'model'}_split_parts.3mf")
+        report_path = report_output.with_name(report_output.stem + '_split_report.md')
+        if report_path.exists():
+            report_path = report_path.with_name(report_path.stem + '_' + uuid.uuid4().hex + '.md')
+        with report_scope(report_path, strict=args.strict_quality):
+            return execute()
+    raise SystemExit(run_logged(execute_with_report, log_path, level=args.log_level, object_id=args.object_id or args.model_entry))

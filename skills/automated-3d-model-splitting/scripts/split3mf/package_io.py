@@ -1131,4 +1131,20 @@ def prepare_debug_directory(path: Path, overwrite: bool = False) -> Path:
 class ThreeMFWriter:
     """Write the deterministic multi-object 3MF package."""
 
-    write = staticmethod(export_colored_parts_3mf)
+    @staticmethod
+    def write(path, parts, title, **kwargs):
+        from .quality_report import best_effort, warn
+        if not parts or not any(len(part['mesh'].faces) for part in parts):
+            raise ValueError('no exportable part meshes')
+        try:
+            return export_colored_parts_3mf(path, parts, title, **kwargs)
+        except ValueError as exc:
+            if not best_effort():
+                raise
+            # Geometry stays identical; only optional palette/vendor metadata is removed.
+            warn('08', 'package', exc, action='回退为基础颜色 3MF；源材料槽或逐面颜色可能丢失')
+            basic = [{key: value for key, value in part.items() if key in (
+                'part_id', 'mesh', 'color_hex', 'color_code', 'color_name')}
+                for part in parts]
+            return export_colored_parts_3mf(path, basic, title,
+                                           output_layout=kwargs.get('output_layout', 'assembly'))

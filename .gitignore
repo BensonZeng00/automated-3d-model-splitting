@@ -26,8 +26,8 @@ dist/
 artifacts/
 test-output/
 outputs/
-/runs/
-/split3mf_runs/
+runs/
+split3mf_runs/
 /example/*_stages/
 /example/*_recovery/
 /example/*_split_parts_stages/

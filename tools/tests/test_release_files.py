@@ -70,6 +70,43 @@ class ReleaseFilesTests(unittest.TestCase):
         self.assertIn(path, candidates)
         self.assertTrue(audit_public_files(self.root, candidates))
 
+    def test_nested_runtime_logs_are_ignored_but_tracked_logs_are_rejected(self):
+        self.git("init", "--quiet")
+        ignore = Path(__file__).resolve().parents[2] / ".gitignore"
+        self.write(".gitignore", ignore.read_text(encoding="utf-8"))
+        for directory in ("runs", "split3mf_runs", "skills/demo/runs", "skills/demo/split3mf_runs"):
+            with self.subTest(directory=directory):
+                log = self.write(f"{directory}/run.jsonl")
+                summary = self.write(f"{directory}/run.summary.json")
+                self.assertNotIn(log, release_candidate_paths(self.root))
+                self.assertNotIn(summary, release_candidate_paths(self.root))
+                self.git("add", "--force", str(summary.relative_to(self.root)))
+                candidates = release_candidate_paths(self.root)
+                self.assertIn(summary, candidates)
+                self.assertTrue(any("generated artifact" in error
+                                    for error in audit_public_files(self.root, [summary])))
+
+    def test_validator_preflight_uses_temporary_working_directory_and_log(self):
+        import validate_release
+        from contextlib import redirect_stdout
+        import io
+        calls = []
+        def run(arguments, **kwargs):
+            calls.append(arguments)
+            if "--preflight-only" in arguments:
+                source = Path(arguments[arguments.index("--input") + 1])
+                log = Path(arguments[arguments.index("--log-file") + 1])
+                self.assertEqual(log.parent, source.parent)
+                self.assertEqual(Path(kwargs["cwd"]), source.parent)
+                self.assertTrue(source.is_file())
+                return subprocess.CompletedProcess(arguments, 0,
+                    stdout='{"preflight":{"dependency_ready":true}}', stderr="")
+            return subprocess.CompletedProcess(arguments, 0, stdout="3.0.0", stderr="")
+        with patch("validate_release.release_candidate_paths", return_value=[]), \
+             patch("validate_release.subprocess.run", side_effect=run), redirect_stdout(io.StringIO()):
+            self.assertEqual(validate_release.main(), 0)
+        self.assertTrue(any("--preflight-only" in arguments for arguments in calls))
+
     def test_fingerprint_is_portable_and_changes_with_content_or_name(self):
         skill = self.root / "skills/demo"
         first = self.write("skills/demo/SKILL.md", "instructions")

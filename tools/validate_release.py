@@ -102,7 +102,9 @@ def main() -> int:
         with tempfile.TemporaryDirectory(prefix="split3mf-preflight-") as temporary:
             source = write_fixture(Path(temporary) / "synthetic.3mf")
             preflight = subprocess.run(
-                [sys.executable, "-X", "utf8", "-B", str(entry_script), "--input", str(source), "--preflight-only"],
+                [sys.executable, "-X", "utf8", "-B", str(entry_script), "--input", str(source),
+                 "--preflight-only", "--log-file", str(Path(temporary) / "preflight.jsonl")],
+                cwd=temporary,
                 capture_output=True,
                 text=True,
                 encoding="utf-8",

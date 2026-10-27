@@ -9,7 +9,7 @@ import subprocess
 
 
 GENERATED_DIRECTORIES = {
-    "outputs", "artifacts", "test-output", "__pycache__", ".pytest_cache",
+    "outputs", "artifacts", "test-output", "runs", "split3mf_runs", "__pycache__", ".pytest_cache",
     ".mypy_cache", ".ruff_cache", ".venv", "venv", "env", "build", "dist",
 }
 MODEL_SUFFIXES = {".3mf", ".stl", ".obj", ".glb", ".gltf", ".blend", ".blend1", ".npz", ".npy"}
